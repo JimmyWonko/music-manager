@@ -1,7 +1,11 @@
+# Python environment isolates
+venv/
 .venv/
 __pycache__/
-*.py[cod]
-.idea/
-.pytest_cache/
-.ruff_cache/
+*.pyc
 
+# PyCharm project settings
+.idea/
+
+# Local cache directories
+.cache/
