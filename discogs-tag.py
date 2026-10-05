@@ -44,7 +44,8 @@ from mutagen.id3 import (
 )
 from mutagen.mp4 import MP4
 
-DEFAULT_MUSIC = Path("/run/media/xen_is/Tunes/Music")
+DEFAULT_MUSIC = Path(os.getenv("DEFAULT_MUSIC", Path.home() / "Music"))
+
 TOKEN_PATH = Path.home() / ".config" / "discogs-tag" / "token"
 CACHE_DIR = Path.home() / ".cache" / "discogs-tag"
 USER_AGENT = "xen-discogs-tag/1.0 +local-library-tool"
