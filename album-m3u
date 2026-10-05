@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""Create one .m3u playlist per album in a music library.
+
+An album is any folder that directly contains audio files. Artist folders,
+empty folders, and junk directories (no tracks) are skipped.
+
+Modes:
+  rebuild   Delete existing .m3u/.m3u8 files, then create a playlist for
+            every album. Use this for the first run or a full refresh.
+  update    Create a playlist only for albums that do not already have
+            one. Use this when you add new albums.
+
+Examples:
+  album-m3u rebuild --dry-run
+  album-m3u rebuild
+  album-m3u update
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+from pathlib import Path
+
+DEFAULT_ROOT = Path("/path/to/Music")
+
+AUDIO_EXTS = {
+    ".flac",
+    ".mp3",
+    ".m4a",
+    ".aac",
+    ".ogg",
+    ".opus",
+    ".wav",
+    ".wma",
+    ".ape",
+    ".wv",
+    ".aiff",
+    ".aif",
+    ".alac",
+}
+
+PLAYLIST_EXTS = {".m3u", ".m3u8"}
+
+# Directories we never treat as albums, even if they somehow have audio.
+SKIP_DIR_NAMES = {".git", ".Trash", ".trashes", "@eaDir"}
+
+
+def natural_key(name: str) -> list:
+    """Sort 2 before 10, case-insensitive."""
+    return [
+        int(part) if part.isdigit() else part.casefold()
+        for part in re.split(r"(\d+)", name)
+    ]
+
+
+def is_audio(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() in AUDIO_EXTS
+
+
+def is_playlist(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() in PLAYLIST_EXTS
+
+
+def should_skip_dir(path: Path) -> bool:
+    return path.name.startswith(".") or path.name.lower() in SKIP_DIR_NAMES
+
+
+def album_tracks(album_dir: Path) -> list[Path]:
+    """Audio files sitting directly in album_dir (not in subfolders)."""
+    tracks: list[Path] = []
+    try:
+        for entry in album_dir.iterdir():
+            if is_audio(entry):
+                tracks.append(entry)
+    except OSError as exc:
+        print(f"warning: cannot read {album_dir}: {exc}", file=sys.stderr)
+        return []
+    tracks.sort(key=lambda p: natural_key(p.name))
+    return tracks
+
+
+def playlist_path(album_dir: Path) -> Path:
+    return album_dir / f"{album_dir.name}.m3u"
+
+
+def find_playlists(root: Path) -> list[Path]:
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [d for d in dirnames if not should_skip_dir(Path(dirpath) / d)]
+        for name in filenames:
+            path = Path(dirpath) / name
+            if is_playlist(path):
+                found.append(path)
+    return found
+
+
+def find_albums(root: Path) -> list[tuple[Path, list[Path]]]:
+    """Every folder under root (not root itself) that contains audio files."""
+    albums: list[tuple[Path, list[Path]]] = []
+    for dirpath, dirnames, _filenames in os.walk(root, followlinks=False):
+        current = Path(dirpath)
+        dirnames[:] = [d for d in dirnames if not should_skip_dir(current / d)]
+        if current == root or should_skip_dir(current):
+            continue
+        tracks = album_tracks(current)
+        if tracks:
+            albums.append((current, tracks))
+    albums.sort(key=lambda item: str(item[0]).casefold())
+    return albums
+
+
+def write_playlist(dest: Path, tracks: list[Path], dry_run: bool) -> None:
+    """Write relative filenames so playlists survive remounts."""
+    if dry_run:
+        return
+    lines = [track.name for track in tracks]
+    dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def cmd_rebuild(root: Path, dry_run: bool) -> int:
+    playlists = find_playlists(root)
+    albums = find_albums(root)
+
+    for playlist in playlists:
+        print(f"delete  {playlist}")
+        if not dry_run:
+            try:
+                playlist.unlink()
+            except OSError as exc:
+                print(f"warning: could not delete {playlist}: {exc}", file=sys.stderr)
+
+    created = 0
+    for album_dir, tracks in albums:
+        dest = playlist_path(album_dir)
+        print(f"create  {dest}  ({len(tracks)} tracks)")
+        write_playlist(dest, tracks, dry_run)
+        created += 1
+
+    prefix = "dry-run: would " if dry_run else ""
+    print(
+        f"\n{prefix}delete {len(playlists)} playlist(s), "
+        f"create {created} album playlist(s)"
+    )
+    return 0
+
+
+def cmd_update(root: Path, dry_run: bool) -> int:
+    albums = find_albums(root)
+    created = 0
+    skipped = 0
+
+    for album_dir, tracks in albums:
+        dest = playlist_path(album_dir)
+        if dest.exists():
+            skipped += 1
+            continue
+        print(f"create  {dest}  ({len(tracks)} tracks)")
+        write_playlist(dest, tracks, dry_run)
+        created += 1
+
+    prefix = "dry-run: would " if dry_run else ""
+    print(
+        f"\n{prefix}create {created} new album playlist(s), "
+        f"skip {skipped} album(s) that already have one"
+    )
+    return 0
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Create a .m3u playlist for each album folder."
+    )
+    parser.add_argument(
+        "mode",
+        choices=("rebuild", "update"),
+        help="rebuild = delete and recreate all; update = only missing albums",
+    )
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=DEFAULT_ROOT,
+        help=f"library root (default: {DEFAULT_ROOT})",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print what would happen without writing or deleting files",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    root = args.root.expanduser().resolve()
+
+    if not root.is_dir():
+        print(f"error: library not found: {root}", file=sys.stderr)
+        print("Is the music drive mounted?", file=sys.stderr)
+        return 1
+
+    if args.mode == "rebuild":
+        return cmd_rebuild(root, args.dry_run)
+    return cmd_update(root, args.dry_run)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
