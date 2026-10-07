@@ -27,7 +27,11 @@ from pathlib import Path
 import requests
 from mutagen import File as MutagenFile
 from mutagen import MutagenError
+from mutagen.aiff import AIFF
+from mutagen.apev2 import APEv2File
+from mutagen.asf import ASF
 from mutagen.easyid3 import EasyID3
+from mutagen.flac import FLAC
 from mutagen.id3 import (
     ID3,
     ID3NoHeaderError,
@@ -43,7 +47,19 @@ from mutagen.id3 import (
     TRCK,
     TXXX,
 )
-from mutagen.mp4 import MP4
+from mutagen.mp3 import MP3
+from mutagen.mp4 import MP4, MP4FreeForm
+from mutagen.oggflac import OggFLAC
+from mutagen.oggopus import OggOpus
+from mutagen.oggspeex import OggSpeex
+from mutagen.oggvorbis import OggVorbis
+from mutagen.wave import WAVE
+
+# The script is usually run through ~/.local/bin/discogs-tag, a symlink.
+# Resolve it so the shared helper next to the real file can be imported.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import mm_common  # noqa: E402
 
 _DRIVE_MUSIC = Path("/path/to/Music")
 DEFAULT_MUSIC = Path(
@@ -91,8 +107,9 @@ SIDECAR_EXTS = {
 }
 
 JUNK_DIR_NAMES = {".git", ".trash", ".trashes", "@eadir"}
+# Only treated as artwork/extras when they sit inside an album folder (see
+# is_artwork_dir). A real artist or album called "Art" or "Covers" is kept.
 ARTWORK_DIR_NAMES = {"scans", "covers", "artwork", "booklet", "pics", "art"}
-SKIP_DIR_NAMES = JUNK_DIR_NAMES | ARTWORK_DIR_NAMES
 
 SWAP_PREFIXES = ("The", "Die", "Le")
 
@@ -116,7 +133,7 @@ ARTIST_REPLACEMENTS = (
 
 CATNO_STRIP = re.compile(r"""[_⋅/: *?"<>| ]""")
 ARTIST_NUM_SUFFIX = re.compile(r"\s*\(\d+\)$")
-DISC_DIR = re.compile(r"^(?:cd|disc|disk)\s*[-_. ]?\s*\d+", re.I)
+DISC_DIR = mm_common.DISC_DIR
 YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 JUNK_BITS = re.compile(
     r"""(?ix)
@@ -131,9 +148,19 @@ JUNK_BITS = re.compile(
 NAMED_ALBUM_DIR = re.compile(
     r"^\[(?P<y1>\d{4}|)\]\s+(?P<title>.+?)(?:\s+\[(?P<y2>\d{4})\])?(?:\s+\[(?P<cat>[^\]]*)\])?\s*$"
 )
+# Non-reissue folders have no leading original year: "Album [1999] [CAT]"
+NAMED_ALBUM_DIR_NO_ORIG = re.compile(
+    r"^(?P<title>[^\[].*?)\s+\[(?P<y2>\d{4})\](?:\s+\[(?P<cat>[^\]]*)\])?\s*$"
+)
 TRACK_PREFIX = re.compile(r"^(\d{1,3})\s*[\.\-_]\s*")
-POS_CD = re.compile(r"^(?:cd\s*)?(\d+)\s*[-–.]\s*(\d+)$", re.I)
-POS_VINYL = re.compile(r"^([A-Z]+)\s*(\d+)$", re.I)
+# "2-05 Title" / "2.05 Title": disc 2, track 5 (only trusted on multi-disc releases)
+DISC_TRACK_PREFIX = re.compile(r"^(\d{1,2})[-.](\d{1,3})(?=[\s._-])")
+# "B2. Title" / "A1 - Title": vinyl/cassette side + track (only trusted when
+# the release really has that position)
+SIDE_PREFIX = re.compile(r"^([A-Za-z]{1,2}\d{1,2})(?=[\s._-])")
+POS_CD = re.compile(r"^(?:(?:cd|dvd|disc|disk)\s*)?(\d+)\s*[-–.]\s*(\d+)[a-z]?$", re.I)
+POS_NUM = re.compile(r"^(\d+)([a-z]|\.\d+)?$", re.I)
+POS_VINYL = re.compile(r"^([A-Z]{1,2})\s*(\d*)([a-z]|\.\d+)?$", re.I)
 RELEASE_URL = re.compile(r"discogs\.com/(?:.+/)?release/(\d+)", re.I)
 MASTER_URL = re.compile(r"discogs\.com/(?:.+/)?master/(\d+)", re.I)
 
@@ -142,12 +169,27 @@ def natural_key(name: str) -> list:
     return [int(p) if p.isdigit() else p.casefold() for p in re.split(r"(\d+)", name)]
 
 
-def should_skip_dir(path: Path) -> bool:
-    return path.name.startswith(".") or path.name.lower() in SKIP_DIR_NAMES
-
-
 def is_junk_dir(path: Path) -> bool:
     return path.name.startswith(".") or path.name.lower() in JUNK_DIR_NAMES
+
+
+def is_artwork_dir(path: Path) -> bool:
+    """Scans/Covers/Art/... only count as artwork inside an album folder.
+
+    The parent must be an album folder (it holds audio, or CD1/Disc 2/...
+    subfolders with audio) or a disc folder. A top-level artist or album
+    folder that happens to be called "Art" or "Covers" is a real folder.
+    """
+    if path.name.lower() not in ARTWORK_DIR_NAMES:
+        return False
+    parent = path.parent
+    if audio_in(parent):
+        return True
+    return bool(mm_common.disc_dirs_with_audio(parent))
+
+
+def should_skip_dir(path: Path) -> bool:
+    return is_junk_dir(path) or is_artwork_dir(path)
 
 
 def is_audio(path: Path) -> bool:
@@ -172,6 +214,10 @@ def audio_in(folder: Path) -> list[Path]:
 
 # ---------------------------------------------------------------------------
 # Naming (port of the restored Picard script)
+#
+# Every naming decision (folder and file names, when the original year is
+# shown) lives in this section, so it can later be swapped for a
+# user-configurable template without touching the tagging or move code.
 # ---------------------------------------------------------------------------
 
 def swapprefix(name: str, prefixes: tuple[str, ...] = SWAP_PREFIXES) -> str:
@@ -224,13 +270,34 @@ def year4(value: str | int | None) -> str:
     return text[:4] if len(text) >= 4 and text[:4].isdigit() else ""
 
 
+def reissue_original_year(master_year: str | int | None, release_year: str | int | None) -> str:
+    """The original year to show and tag, or "" when this release is the original.
+
+    A release is a reissue when its master's year is earlier than its own
+    year. Same year, no master, or an unknown year on either side: not a
+    reissue, so no original date is written.
+    """
+    master, release = year4(master_year), year4(release_year)
+    if master and release and int(master) < int(release):
+        return master
+    return ""
+
+
 def album_folder_name(album: str, original_year: str, release_year: str, catno: str | None, discs: int) -> str:
-    orig = original_year or release_year
+    """Reissue:  [orig]  Album [2CD] [press] [CATNO]
+    Original:  Album [2CD] [press] [CATNO]
+
+    original_year is the master's year; it is only shown when it is earlier
+    than release_year (see reissue_original_year).
+    """
+    orig = reissue_original_year(original_year, release_year)
     press = release_year or original_year
-    parts = [f"[{orig}]  {format_album_title(album)}"]
+    title = format_album_title(album)
+    parts = [f"[{orig}]  {title}" if orig else title]
     if discs > 1:
         parts.append(f"{discs}CD")
-    parts.append(f"[{press}]")
+    if press:
+        parts.append(f"[{press}]")
     catalog = format_catalog(catno)
     if catalog:
         parts.append(f"[{catalog}]")
@@ -298,6 +365,15 @@ def parse_album_dirname(name: str) -> dict[str, str]:
             info["catno"] = cat
         elif cat and YEAR_RE.fullmatch(cat) and not match.group("y2"):
             info["year"] = cat
+        return info
+
+    match = NAMED_ALBUM_DIR_NO_ORIG.match(name)
+    cat = (match.group("cat") or "").strip() if match else ""
+    if match and " - " not in match.group("title") and not (cat and JUNK_BITS.search(f"[{cat}]")):
+        info["album"] = re.sub(r"\s+\d+CD$", "", match.group("title")).strip()
+        info["year"] = match.group("y2")
+        if cat and not YEAR_RE.fullmatch(cat):
+            info["catno"] = cat
         return info
 
     cleaned = strip_junk(name)
@@ -512,6 +588,7 @@ class Discogs:
         raise DiscogsError(f"Discogs request failed after retries: {url}")
 
     def search_releases(self, artist: str, album: str, catno: str = "", year: str = "") -> list[dict]:
+        """Search releases. year only re-orders results; it never filters them."""
         params: dict[str, str] = {"type": "release", "per_page": "15"}
         if artist:
             params["artist"] = artist
@@ -523,16 +600,33 @@ class Discogs:
         data = self._get(f"{API}/database/search", params, "search", query)
         results = list(data.get("results") or [])
         if results or not (artist or album):
-            return results
+            return rank_by_year(results, year)
         fallback = {"type": "release", "per_page": "15", "q": " ".join(p for p in (artist, album) if p)}
         data = self._get(f"{API}/database/search", fallback, "search", json.dumps(fallback, sort_keys=True))
-        return list(data.get("results") or [])
+        return rank_by_year(list(data.get("results") or []), year)
 
     def release(self, release_id: int) -> dict:
         return self._get(f"{API}/releases/{release_id}", None, "release", str(release_id))
 
     def master(self, master_id: int) -> dict:
         return self._get(f"{API}/masters/{master_id}", None, "master", str(master_id))
+
+
+def rank_by_year(results: list[dict], year: str) -> list[dict]:
+    """Stable sort: exact year first, then nearest years, then unknown years.
+
+    Nothing is dropped, so a wrong or missing year in the folder name can
+    never hide the right release. score_result() also rewards a year match.
+    """
+    wanted = year4(year)
+    if not wanted:
+        return results
+
+    def distance(item: dict) -> int:
+        got = year4(item.get("year"))
+        return abs(int(got) - int(wanted)) if got else 10_000
+
+    return sorted(results, key=distance)
 
 
 def load_token() -> tuple[str | None, str | None, str | None]:
@@ -547,28 +641,75 @@ def load_token() -> tuple[str | None, str | None, str | None]:
     return None, key, secret
 
 
-def save_token(token: str) -> None:
-    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    TOKEN_PATH.write_text(token.strip() + "\n", encoding="utf-8")
-    TOKEN_PATH.chmod(0o600)
+def save_token(token: str, path: Path | None = None) -> None:
+    """Write the token so it is never readable by other users, not even briefly.
+
+    The file is created under a temporary name with O_CREAT|O_EXCL and mode
+    0600, written, fsynced, then renamed over the old token file.
+    """
+    path = path or TOKEN_PATH
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        os.fchmod(fd, 0o600)  # exactly 0600 whatever the umask is
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(token.strip() + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _keep_char(ch: str) -> bool:
+    # Letters, marks (needed by Devanagari, Thai, ...) and digits of any script.
+    return unicodedata.category(ch)[0] in "LMN"
 
 
 def norm(text: str) -> str:
-    text = unicodedata.normalize("NFKD", text or "")
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    text = text.casefold()
+    """Unicode-aware comparison form: NFKC, casefold, letters/digits only.
+
+    Japanese, Cyrillic, Greek, ... names keep their letters, so they can
+    match. Punctuation and symbols become spaces.
+    """
+    text = unicodedata.normalize("NFKC", text or "").casefold()
     text = ARTIST_NUM_SUFFIX.sub("", text)
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return text.strip()
+    text = "".join(ch if _keep_char(ch) else " " for ch in text)
+    return " ".join(text.split())
+
+
+def ascii_fold(normed: str) -> str | None:
+    """'björk' -> 'bjork'. None unless the result is plain ASCII.
+
+    Only accented Latin text gets an extra folded form; stripping marks from
+    kana or Devanagari would merge unrelated words.
+    """
+    decomposed = unicodedata.normalize("NFKD", normed)
+    folded = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    folded = folded.replace("ß", "ss").replace("æ", "ae").replace("ø", "o").replace("œ", "oe").replace("đ", "d").replace("ł", "l")
+    return folded if folded.isascii() else None
+
+
+def _ratio(a: str, b: str) -> float:
+    if a == b:
+        return 1.0
+    return SequenceMatcher(None, a, b).ratio()
 
 
 def similar(a: str, b: str) -> float:
     na, nb = norm(a), norm(b)
     if not na or not nb:
         return 0.0
-    if na == nb:
-        return 1.0
-    return SequenceMatcher(None, na, nb).ratio()
+    best = _ratio(na, nb)
+    fa, fb = ascii_fold(na), ascii_fold(nb)
+    if fa and fb:
+        best = max(best, _ratio(fa, fb))
+    return best
 
 
 def split_result_title(title: str) -> tuple[str, str]:
@@ -593,25 +734,47 @@ def score_result(result: dict, guess: dict[str, str]) -> float:
 
 
 def parse_position(position: str) -> tuple[int, int]:
+    """(disc, track number) from a Discogs position.
+
+    Track number 0 means "no usable number": vinyl/cassette sides (A1, B2),
+    letter-only positions, or anything unrecognised. Those tracks are
+    numbered by their order in the tracklist (see flatten_tracklist).
+    """
     pos = (position or "").strip()
     if not pos:
         return (1, 0)
     match = POS_CD.match(pos)
     if match:
         return int(match.group(1)), int(match.group(2))
-    match = POS_VINYL.match(pos)
+    match = POS_NUM.match(pos)
     if match:
-        letters = match.group(1).upper()
-        side = 0
-        for ch in letters:
-            side = side * 26 + (ord(ch) - 64)
-        return 1, (side - 1) * 20 + int(match.group(2))
+        return 1, int(match.group(1))
+    if is_side_position(pos):
+        return 1, 0
     digits = re.findall(r"\d+", pos)
     if len(digits) >= 2:
         return int(digits[0]), int(digits[1])
-    if digits:
-        return 1, int(digits[0])
     return (1, 0)
+
+
+def is_side_position(position: str) -> bool:
+    """A1, B12, AA1, C, A3a ... (vinyl and cassette sides)."""
+    return bool(POS_VINYL.match((position or "").strip()))
+
+
+def legacy_vinyl_number(position: str) -> int | None:
+    """The number older versions of this script gave a side position.
+
+    They used (side - 1) * 20 + n, so B1 became 21. Only used to recognise
+    files that were already renamed that way.
+    """
+    match = re.fullmatch(r"([A-Z]+)\s*(\d+)", (position or "").strip(), re.I)
+    if not match:
+        return None
+    side = 0
+    for ch in match.group(1).upper():
+        side = side * 26 + (ord(ch) - 64)
+    return (side - 1) * 20 + int(match.group(2))
 
 
 @dataclass
@@ -620,35 +783,91 @@ class DiscogsTrack:
     number: int
     title: str
     artist: str
+    position: str = ""  # Discogs position as printed on the release (A1, B2, 1-03, ...)
+    legacy_number: int | None = None  # number the old (side-1)*20+n scheme gave
 
 
-def flatten_tracklist(release: dict, album_artist: str) -> list[DiscogsTrack]:
-    out: list[DiscogsTrack] = []
-    seq = 0
-    last_disc = 1
+def _track_artist(item: dict, fallback: str) -> str:
+    artists = item.get("artists") or []
+    if not artists:
+        return fallback
+    return " & ".join(
+        ARTIST_NUM_SUFFIX.sub("", a.get("anv") or a.get("name") or "").strip()
+        for a in artists
+    )
+
+
+def _tracklist_entries(release: dict, album_artist: str) -> list[tuple[str, str, str]]:
+    """(position, title, artist) for every playable track, in tracklist order.
+
+    Headings are dropped. Index tracks (a work split into movements) are
+    replaced by their sub-tracks, titled "Work: Movement" so the work name
+    is not lost. A normal track that lists sub_tracks stays one track.
+    """
+    entries: list[tuple[str, str, str]] = []
     for item in release.get("tracklist") or []:
         kind = (item.get("type_") or "track").lower()
-        if kind in {"heading", "index"}:
+        if kind == "heading":
+            continue
+        if kind == "index":
+            parent_title = (item.get("title") or "").strip()
+            parent_artist = _track_artist(item, album_artist)
+            for sub in item.get("sub_tracks") or []:
+                if (sub.get("type_") or "track").lower() != "track":
+                    continue
+                sub_title = (sub.get("title") or "").strip()
+                if not sub_title:
+                    continue
+                title = f"{parent_title}: {sub_title}" if parent_title else sub_title
+                entries.append(((sub.get("position") or "").strip(), title, _track_artist(sub, parent_artist)))
             continue
         title = (item.get("title") or "").strip()
         if not title:
             continue
-        disc, number = parse_position(item.get("position") or "")
-        if disc != last_disc:
-            seq = 0
-            last_disc = disc
-        seq += 1
-        if number <= 0:
-            number = seq
-        artists = item.get("artists") or []
-        if artists:
-            artist = " & ".join(
-                ARTIST_NUM_SUFFIX.sub("", a.get("anv") or a.get("name") or "").strip()
-                for a in artists
-            )
+        entries.append(((item.get("position") or "").strip(), title, _track_artist(item, album_artist)))
+    return entries
+
+
+def flatten_tracklist(release: dict, album_artist: str) -> list[DiscogsTrack]:
+    """Discogs tracklist -> numbered tracks.
+
+    Each disc keeps Discogs' own numbers (1, 2, ... or 1-1, 1-2, ...) when
+    every track on it has a distinct number. Otherwise, and always for
+    vinyl/cassette sides, the disc's tracks are numbered 1..N in tracklist
+    order, so A1 A2 B1 B2 become 1 2 3 4.
+    """
+    parsed = []
+    for position, title, artist in _tracklist_entries(release, album_artist):
+        disc, number = parse_position(position)
+        parsed.append((max(disc, 1), number, position, title, artist))
+
+    by_disc: dict[int, list[int]] = {}
+    for i, (disc, *_rest) in enumerate(parsed):
+        by_disc.setdefault(disc, []).append(i)
+
+    numbers: dict[int, int] = {}
+    for indexes in by_disc.values():
+        explicit = [parsed[i][1] for i in indexes]
+        sides = any(is_side_position(parsed[i][2]) for i in indexes)
+        if not sides and all(n > 0 for n in explicit) and len(set(explicit)) == len(explicit):
+            for i in indexes:
+                numbers[i] = parsed[i][1]
         else:
-            artist = album_artist
-        out.append(DiscogsTrack(disc=max(disc, 1), number=number, title=title, artist=artist))
+            for seq, i in enumerate(indexes, 1):
+                numbers[i] = seq
+
+    out: list[DiscogsTrack] = []
+    for i, (disc, _number, position, title, artist) in enumerate(parsed):
+        out.append(
+            DiscogsTrack(
+                disc=disc,
+                number=numbers[i],
+                title=title,
+                artist=artist,
+                position=position,
+                legacy_number=legacy_vinyl_number(position),
+            )
+        )
     return out
 
 
@@ -705,95 +924,577 @@ def already_tagged(path: Path) -> str | None:
     return None
 
 
-def write_tags(path: Path, meta: dict) -> None:
-    suffix = path.suffix.lower()
-    if suffix == ".mp3":
-        _write_mp3(path, meta)
-        return
-    if suffix in {".m4a", ".mp4", ".aac"}:
-        _write_mp4(path, meta)
-        return
-    audio = MutagenFile(path)
-    if audio is None:
-        raise RuntimeError(f"unreadable: {path}")
-    mapping = {
-        "ARTIST": meta["artist"],
-        "ALBUMARTIST": meta["albumartist"],
-        "ALBUM": meta["album"],
-        "TITLE": meta["title"],
-        "TRACKNUMBER": str(meta["track"]),
-        "TRACKTOTAL": str(meta["tracktotal"]),
-        "DISCNUMBER": str(meta["disc"]),
-        "DISCTOTAL": str(meta["disctotal"]),
-        "DATE": meta["date"],
-        "YEAR": year4(meta["date"]),
-        "ORIGINALDATE": meta["originaldate"],
-        "ORIGINALYEAR": year4(meta["originaldate"]),
-        "LABEL": meta["label"],
-        "CATALOGNUMBER": meta["catalognumber"],
-        "GENRE": meta["genre"],
-        "DISCOGS_RELEASE_ID": str(meta["release_id"]),
-        "DISCOGS_MASTER_ID": str(meta.get("master_id") or ""),
+# ---------------------------------------------------------------------------
+# Tag writing
+#
+# Every format gets its own conventional field names (Picard/MusicBrainz
+# style). Only the fields this tool owns are replaced: before one of them is
+# written, every spelling of that field (aliases such as TOTALTRACKS next to
+# TRACKTOTAL) is removed so no stale or contradictory copy survives. A field
+# with no new value is left alone, except the DISCOGS_* ids, which describe
+# the chosen release and are always replaced as a group.
+#
+# Everything else (ReplayGain, AccurateRip, encoder and gapless info,
+# embedded art, lyrics, comments, MusicBrainz ids, ...) is kept. With
+# --clear-other-tags the remaining text metadata is removed too, but
+# PROTECTED fields (loudness, rip verification, encoder, art, lyrics, ISRC,
+# ratings, embedded cue/log) are still kept.
+# ---------------------------------------------------------------------------
+
+ALWAYS_REPLACED = {"discogs_release_id", "discogs_master_id", "discogs_position"}
+# When a file already carries a different DISCOGS_RELEASE_ID, these values
+# came from that other release, so they are replaced even by "no value".
+RELEASE_FIELDS = {"date", "year", "originaldate", "originalyear", "label", "catalognumber", "genre"}
+ORIGINAL_FIELDS = {"originaldate", "originalyear"}
+
+PROTECTED_SUBSTRINGS = (
+    "replaygain",
+    "r128",
+    "accuraterip",
+    "ctdb",
+    "itunsmpb",
+    "itunnorm",
+    "itunpgap",
+    "encod",  # ENCODER, ENCODED-BY, ENCODERSETTINGS, WM/EncodingSettings, ...
+    "lyrics",
+    "isrc",
+    "cuesheet",
+    "cdtoc",
+    "picture",
+    "coverart",
+    "cover art",
+    "rating",
+    "playcount",
+    "peakvalue",
+    "averagelevel",
+    "mediaclass",
+    "toolname",
+    "toolversion",
+    "isvbr",
+    "deviceconformance",
+)
+PROTECTED_EXACT = {"log", "eaclog", "crc", "crc32", "©too", "©lyr", "covr", "pgap"}
+
+
+def is_protected_key(name: str) -> bool:
+    key = name.casefold()
+    if key.startswith("----:"):
+        key = key.rsplit(":", 1)[-1]
+    return key in PROTECTED_EXACT or any(part in key for part in PROTECTED_SUBSTRINGS)
+
+
+def clean_date(value: str | int | None) -> str:
+    """Discogs writes unknown parts as 00 ("1999-00-00"); drop them."""
+    text = str(value or "").strip()
+    match = re.fullmatch(r"(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?", text)
+    if not match:
+        return year4(text)
+    year, month, day = match.groups()
+    if not month or month == "00":
+        return year
+    if not day or day == "00":
+        return f"{year}-{month}"
+    return f"{year}-{month}-{day}"
+
+
+def tag_values(meta: dict) -> dict[str, str | None]:
+    """meta -> canonical field values as text; None means 'no value'."""
+
+    def text(value) -> str | None:
+        if value is None:
+            return None
+        value = str(value).strip()
+        return value if value and value != "0" else None
+
+    date = clean_date(meta.get("date"))
+    original = clean_date(meta.get("originaldate"))
+    return {
+        "artist": text(meta.get("artist")),
+        "albumartist": text(meta.get("albumartist")),
+        "album": text(meta.get("album")),
+        "title": text(meta.get("title")),
+        "tracknumber": text(meta.get("track")),
+        "tracktotal": text(meta.get("tracktotal")),
+        "discnumber": text(meta.get("disc")),
+        "disctotal": text(meta.get("disctotal")),
+        "date": text(date),
+        "year": text(year4(date)),
+        "originaldate": text(original),
+        "originalyear": text(year4(original)),
+        "label": text(meta.get("label")),
+        "catalognumber": text(meta.get("catalognumber")),
+        "genre": text(meta.get("genre")),
+        "discogs_release_id": text(meta.get("release_id")),
+        "discogs_master_id": text(meta.get("master_id")),
+        "discogs_position": text(meta.get("position")),
     }
-    for key, value in mapping.items():
-        if not value:
+
+
+# canonical field -> (key written, other spellings of the same field)
+VORBIS_FIELDS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "artist": ("ARTIST", ()),
+    "albumartist": ("ALBUMARTIST", ("ALBUM ARTIST", "ALBUM_ARTIST")),
+    "album": ("ALBUM", ()),
+    "title": ("TITLE", ()),
+    "tracknumber": ("TRACKNUMBER", ()),
+    "tracktotal": ("TRACKTOTAL", ("TOTALTRACKS",)),
+    "discnumber": ("DISCNUMBER", ()),
+    "disctotal": ("DISCTOTAL", ("TOTALDISCS",)),
+    "date": ("DATE", ()),
+    "year": ("YEAR", ()),
+    "originaldate": ("ORIGINALDATE", ()),
+    "originalyear": ("ORIGINALYEAR", ()),
+    "label": ("LABEL", ("ORGANIZATION", "PUBLISHER")),
+    "catalognumber": ("CATALOGNUMBER", ("CATALOG",)),
+    "genre": ("GENRE", ()),
+    "discogs_release_id": ("DISCOGS_RELEASE_ID", ()),
+    "discogs_master_id": ("DISCOGS_MASTER_ID", ()),
+    "discogs_position": ("DISCOGS_POSITION", ()),
+}
+
+# APEv2 (Monkey's Audio, WavPack, Musepack). Keys are case-insensitive.
+APE_FIELDS: dict[str, tuple[str, tuple[str, ...]]] = {
+    **VORBIS_FIELDS,
+    "artist": ("Artist", ()),
+    "albumartist": ("Album Artist", ("ALBUMARTIST", "ALBUM_ARTIST")),
+    "album": ("Album", ()),
+    "title": ("Title", ()),
+    "tracknumber": ("Track", ("TRACKNUMBER", "TRACKTOTAL", "TOTALTRACKS")),  # "3/12"
+    "tracktotal": ("Track", ()),
+    "discnumber": ("Disc", ("DISCNUMBER", "DISCTOTAL", "TOTALDISCS")),  # "1/2"
+    "disctotal": ("Disc", ()),
+    "date": ("Year", ("DATE",)),
+    "year": ("Year", ()),
+    "label": ("Label", ("ORGANIZATION", "PUBLISHER")),
+    "catalognumber": ("CatalogNumber", ("CATALOG",)),
+    "genre": ("Genre", ()),
+}
+
+# Windows Media (ASF) attribute names, as Picard writes them.
+ASF_FIELDS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "artist": ("Author", ()),
+    "albumartist": ("WM/AlbumArtist", ()),
+    "album": ("WM/AlbumTitle", ()),
+    "title": ("Title", ()),
+    "tracknumber": ("WM/TrackNumber", ("WM/Track",)),
+    "tracktotal": ("TotalTracks", ("WM/TrackTotal",)),
+    "discnumber": ("WM/PartOfSet", ()),
+    "disctotal": ("TotalDiscs", ("WM/DiscTotal",)),
+    "date": ("WM/Year", ()),
+    "originaldate": ("WM/OriginalReleaseTime", ()),
+    "originalyear": ("WM/OriginalReleaseYear", ()),
+    "label": ("WM/Publisher", ()),
+    "catalognumber": ("WM/CatalogNo", ()),
+    "genre": ("WM/Genre", ()),
+    "discogs_release_id": ("DISCOGS_RELEASE_ID", ()),
+    "discogs_master_id": ("DISCOGS_MASTER_ID", ()),
+    "discogs_position": ("DISCOGS_POSITION", ()),
+}
+
+FF = "----:com.apple.iTunes:"
+MP4_FIELDS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "artist": ("\xa9ART", ()),
+    "albumartist": ("aART", ()),
+    "album": ("\xa9alb", ()),
+    "title": ("\xa9nam", ()),
+    "tracknumber": ("trkn", ()),
+    "discnumber": ("disk", ()),
+    "date": ("\xa9day", ()),
+    "originaldate": (FF + "ORIGINALDATE", ()),
+    "originalyear": (FF + "ORIGINALYEAR", ()),
+    "label": (FF + "LABEL", (FF + "publisher",)),
+    "catalognumber": (FF + "CATALOGNUMBER", ()),
+    "genre": ("\xa9gen", ("gnre",)),
+    "discogs_release_id": (FF + "DISCOGS_RELEASE_ID", ()),
+    "discogs_master_id": (FF + "DISCOGS_MASTER_ID", ()),
+    "discogs_position": (FF + "DISCOGS_POSITION", ()),
+}
+MP4_TEXT_ATOMS = {"aART", "soal", "soar", "soaa", "sonm", "soco", "desc", "ldes", "cprt", "gnre", "cpil", "tmpo", "purl", "egid"}
+
+
+def _apply_fields(tags, fields, values: dict, clear_other: bool, clearable, replace: set[str]) -> list[str]:
+    """Replace owned fields in a dict-like tag container.
+
+    values maps canonical field -> value in the container's own format, or
+    None for 'no new value'. Fields in replace are cleared even without a
+    new value. Returns keys removed and not written again.
+    """
+    removed: list[str] = []
+    owned: set[str] = set()
+    written: set[str] = set()
+    for name, (key, aliases) in fields.items():
+        spellings = {key.casefold(), *(a.casefold() for a in aliases)}
+        owned |= spellings
+        value = values.get(name)
+        if value is None and name not in replace:
             continue
-        audio[key] = value
-    audio.save()
+        for existing in list(tags.keys()):
+            if existing.casefold() in spellings and existing.casefold() not in written:
+                try:
+                    del tags[existing]
+                except KeyError:
+                    continue
+                if value is None or existing.casefold() != key.casefold():
+                    removed.append(existing)
+        if value is not None:
+            tags[key] = value
+            written.add(key.casefold())
+    if clear_other:
+        for existing in list(tags.keys()):
+            if existing.casefold() in owned or is_protected_key(existing) or not clearable(tags, existing):
+                continue
+            try:
+                del tags[existing]
+            except KeyError:
+                continue
+            removed.append(existing)
+    return removed
 
 
-def _ensure_id3(path: Path) -> ID3:
+def _always_clearable(_tags, _key) -> bool:
+    return True
+
+
+def _write_vorbis(audio, meta: dict, clear_other: bool, replace: set[str]) -> list[str]:
+    if audio.tags is None:
+        audio.add_tags()
+    values = {name: ([v] if v is not None else None) for name, v in tag_values(meta).items()}
+    return _apply_fields(audio.tags, VORBIS_FIELDS, values, clear_other, _always_clearable, replace)
+
+
+def _write_ape(audio, meta: dict, clear_other: bool, replace: set[str]) -> list[str]:
+    if audio.tags is None:
+        audio.add_tags()
+    tv = tag_values(meta)
+    values = dict(tv)
+    values["tracknumber"] = f"{tv['tracknumber']}/{tv['tracktotal']}" if tv["tracktotal"] else tv["tracknumber"]
+    values["discnumber"] = f"{tv['discnumber']}/{tv['disctotal']}" if tv["disctotal"] else tv["discnumber"]
+    values["tracktotal"] = values["disctotal"] = values["year"] = None
+
+    def clearable(tags, key):
+        return getattr(tags[key], "kind", 0) == 0  # text items only, never binary (art)
+
+    return _apply_fields(audio.tags, APE_FIELDS, values, clear_other, clearable, replace)
+
+
+def _write_asf(audio, meta: dict, clear_other: bool, replace: set[str]) -> list[str]:
+    from mutagen.asf import ASFUnicodeAttribute
+
+    if audio.tags is None:
+        audio.add_tags()
+    tv = tag_values(meta)
+    values: dict = {name: tv.get(name) for name in ASF_FIELDS}
+    if tv["disctotal"] and tv["discnumber"]:
+        values["discnumber"] = f"{tv['discnumber']}/{tv['disctotal']}"
+
+    def clearable(tags, key):
+        return all(isinstance(v, ASFUnicodeAttribute) for v in tags[key])
+
+    return _apply_fields(audio.tags, ASF_FIELDS, values, clear_other, clearable, replace)
+
+
+def _write_mp4_tags(audio, meta: dict, clear_other: bool, replace: set[str]) -> list[str]:
+    if audio.tags is None:
+        audio.add_tags()
+    tv = tag_values(meta)
+    values: dict = {}
+    for name, value in tv.items():
+        if name not in MP4_FIELDS:
+            continue
+        key = MP4_FIELDS[name][0]
+        if value is None:
+            values[name] = None
+        elif key.startswith("----:"):
+            values[name] = [MP4FreeForm(value.encode("utf-8"))]
+        else:
+            values[name] = [value]
+    values["tracknumber"] = [(int(meta["track"]), int(meta.get("tracktotal") or 0))]
+    values["discnumber"] = [(int(meta["disc"]), int(meta.get("disctotal") or 0))]
+
+    def clearable(_tags, key):
+        return key.startswith("\xa9") or key.startswith("----:") or key in MP4_TEXT_ATOMS
+
+    return _apply_fields(audio.tags, MP4_FIELDS, values, clear_other, clearable, replace)
+
+
+# ID3v2.4 (MP3, and ID3 chunks inside WAV and AIFF)
+ID3_TEXT_FRAMES = {
+    "artist": ("TPE1", TPE1),
+    "albumartist": ("TPE2", TPE2),
+    "album": ("TALB", TALB),
+    "title": ("TIT2", TIT2),
+    "date": ("TDRC", TDRC),
+    "originaldate": ("TDOR", TDOR),
+    "label": ("TPUB", TPUB),
+    "genre": ("TCON", TCON),
+}
+# TXXX descriptions that are other spellings of a field written as a frame
+ID3_TXXX_ALIASES = {
+    "albumartist": ("ALBUM ARTIST", "ALBUMARTIST"),
+    "date": ("DATE", "YEAR"),
+    "originaldate": ("ORIGINALDATE", "ORIGINALYEAR", "ORIGINAL YEAR"),
+    "label": ("LABEL", "PUBLISHER", "ORGANIZATION"),
+    "tracknumber": ("TRACKTOTAL", "TOTALTRACKS"),
+    "discnumber": ("DISCTOTAL", "TOTALDISCS"),
+}
+ID3_TXXX_FIELDS = {
+    "catalognumber": ("CATALOGNUMBER", ("CATALOG",)),
+    "discogs_release_id": ("DISCOGS_RELEASE_ID", ()),
+    "discogs_master_id": ("DISCOGS_MASTER_ID", ()),
+    "discogs_position": ("DISCOGS_POSITION", ()),
+}
+ID3_PROTECTED_FRAMES = {"TSSE", "TENC", "TLEN", "TFLT", "TSRC", "TDEN", "TOWN"}
+
+
+def _del_txxx(tags: ID3, descs) -> list[str]:
+    wanted = {d.casefold() for d in descs}
+    removed = []
+    for frame in list(tags.getall("TXXX")):
+        if (frame.desc or "").casefold() in wanted:
+            tags.delall(frame.HashKey)
+            removed.append(frame.HashKey)
+    return removed
+
+
+def _apply_id3(tags: ID3, meta: dict, clear_other: bool, replace: set[str]) -> list[str]:
+    tv = tag_values(meta)
+    removed: list[str] = []
+
+    def pair(n, total):
+        return f"{n}/{total}" if total else n
+
+    for name, (frame_id, cls) in ID3_TEXT_FRAMES.items():
+        value = tv[name]
+        if value is None:
+            if name in replace:
+                if tags.getall(frame_id):
+                    tags.delall(frame_id)
+                    removed.append(frame_id)
+                removed += _del_txxx(tags, ID3_TXXX_ALIASES.get(name, ()))
+            continue
+        tags.delall(frame_id)
+        removed += _del_txxx(tags, ID3_TXXX_ALIASES.get(name, ()))
+        tags.add(cls(encoding=3, text=value))
+    if tv["date"]:
+        for old in ("TYER", "TDAT", "TIME"):  # v2.3 date frames; TDRC replaces them
+            if tags.getall(old):
+                tags.delall(old)
+                removed.append(old)
+    if (tv["originaldate"] or "originaldate" in replace) and tags.getall("TORY"):
+        tags.delall("TORY")
+        removed.append("TORY")
+    for name, frame_id, cls, total in (
+        ("tracknumber", "TRCK", TRCK, "tracktotal"),
+        ("discnumber", "TPOS", TPOS, "disctotal"),
+    ):
+        if tv[name] is None:
+            continue
+        tags.delall(frame_id)
+        removed += _del_txxx(tags, ID3_TXXX_ALIASES.get(name, ()))
+        tags.add(cls(encoding=3, text=pair(tv[name], tv[total])))
+    for name, (desc, aliases) in ID3_TXXX_FIELDS.items():
+        value = tv[name]
+        if value is None and name not in replace:
+            continue
+        gone = _del_txxx(tags, (desc, *aliases))
+        if value is None:
+            removed += gone
+        else:
+            removed += [k for k in gone if k.casefold() != f"txxx:{desc}".casefold()]
+            tags.add(TXXX(encoding=3, desc=desc, text=value))
+
+    if clear_other:
+        owned_txxx = {d.casefold() for d, _ in ID3_TXXX_FIELDS.values()}
+        for key in list(tags.keys()):
+            frame = tags[key]
+            fid = frame.FrameID
+            if fid == "TXXX":
+                desc = frame.desc or ""
+                if desc.casefold() in owned_txxx or is_protected_key(desc):
+                    continue
+            elif fid == "COMM":
+                if is_protected_key(frame.desc or ""):
+                    continue
+            elif fid.startswith("T"):
+                if fid in ID3_PROTECTED_FRAMES or fid in {"TRCK", "TPOS"} or fid in {f for f, _ in ID3_TEXT_FRAMES.values()}:
+                    continue
+            elif not (fid.startswith("W") or fid == "UFID"):
+                continue  # art, lyrics, ratings, private and binary frames stay
+            tags.delall(key)
+            removed.append(key)
+    return removed
+
+
+def _load_id3_for_mp3(path: Path) -> ID3:
     try:
         return ID3(path)
     except ID3NoHeaderError:
-        tags = ID3()
-        tags.save(path)
-        return ID3(path)
+        return ID3()
+
+
+def write_tags(path: Path, meta: dict, clear_other: bool = False, dry_run: bool = False) -> list[str]:
+    """Write meta into path with the format's own tag names.
+
+    Returns the tag keys that were removed and not rewritten (stale aliases,
+    and with clear_other also unowned text fields). With dry_run the file is
+    read and the changes are computed, but nothing is saved.
+    """
+    replace = set(ALWAYS_REPLACED)
+    previous = already_tagged(path)
+    if previous and meta.get("release_id") and previous.strip() != str(meta["release_id"]):
+        replace |= RELEASE_FIELDS
+    if previous and not tag_values(meta)["originaldate"]:
+        # Not a reissue: drop an original date an earlier run of this tool
+        # wrote. Files never tagged by this tool keep theirs.
+        replace |= ORIGINAL_FIELDS
+
+    suffix = path.suffix.lower()
+    if suffix == ".mp3":
+        # ID3 only: works for tag-only or damaged files the MP3 parser rejects.
+        tags = _load_id3_for_mp3(path)
+        removed = _apply_id3(tags, meta, clear_other, replace)
+        if not dry_run:
+            tags.save(path, v2_version=4)
+        return removed
+
+    audio = MutagenFile(path)
+    if audio is None:
+        raise RuntimeError(f"unrecognised audio file: {path}")
+
+    if isinstance(audio, (WAVE, AIFF, MP3)):
+        if audio.tags is None:
+            audio.add_tags()
+        removed = _apply_id3(audio.tags, meta, clear_other, replace)
+        if not dry_run:
+            audio.save(v2_version=4)
+        return removed
+    if isinstance(audio, MP4):
+        removed = _write_mp4_tags(audio, meta, clear_other, replace)
+    elif isinstance(audio, ASF):
+        removed = _write_asf(audio, meta, clear_other, replace)
+    elif isinstance(audio, (FLAC, OggVorbis, OggOpus, OggFLAC, OggSpeex)):
+        removed = _write_vorbis(audio, meta, clear_other, replace)
+    elif isinstance(audio, APEv2File):
+        removed = _write_ape(audio, meta, clear_other, replace)
+    else:
+        raise RuntimeError(f"tag writing not supported for {type(audio).__name__}: {path}")
+    if not dry_run:
+        audio.save()
+    return removed
 
 
 def _write_mp3(path: Path, meta: dict) -> None:
-    tags = _ensure_id3(path)
-    tags.delall("TXXX:DISCOGS_RELEASE_ID")
-    tags.delall("TXXX:DISCOGS_MASTER_ID")
-    tags.delall("TXXX:CATALOGNUMBER")
-    tags["TIT2"] = TIT2(encoding=3, text=meta["title"])
-    tags["TPE1"] = TPE1(encoding=3, text=meta["artist"])
-    tags["TPE2"] = TPE2(encoding=3, text=meta["albumartist"])
-    tags["TALB"] = TALB(encoding=3, text=meta["album"])
-    tags["TRCK"] = TRCK(encoding=3, text=f"{meta['track']}/{meta['tracktotal']}")
-    tags["TPOS"] = TPOS(encoding=3, text=f"{meta['disc']}/{meta['disctotal']}")
-    if meta["date"]:
-        tags["TDRC"] = TDRC(encoding=3, text=meta["date"])
-    if meta["originaldate"]:
-        tags["TDOR"] = TDOR(encoding=3, text=meta["originaldate"])
-    if meta["label"]:
-        tags["TPUB"] = TPUB(encoding=3, text=meta["label"])
-    if meta["genre"]:
-        tags["TCON"] = TCON(encoding=3, text=meta["genre"])
-    if meta["catalognumber"]:
-        tags.add(TXXX(encoding=3, desc="CATALOGNUMBER", text=meta["catalognumber"]))
-    tags.add(TXXX(encoding=3, desc="DISCOGS_RELEASE_ID", text=str(meta["release_id"])))
-    if meta.get("master_id"):
-        tags.add(TXXX(encoding=3, desc="DISCOGS_MASTER_ID", text=str(meta["master_id"])))
-    tags.save(path)
+    write_tags(path, meta)
 
 
 def _write_mp4(path: Path, meta: dict) -> None:
-    audio = MP4(path)
-    audio["\xa9nam"] = [meta["title"]]
-    audio["\xa9ART"] = [meta["artist"]]
-    audio["aART"] = [meta["albumartist"]]
-    audio["\xa9alb"] = [meta["album"]]
-    audio["trkn"] = [(int(meta["track"]), int(meta["tracktotal"]))]
-    audio["disk"] = [(int(meta["disc"]), int(meta["disctotal"]))]
-    if meta["date"]:
-        audio["\xa9day"] = [meta["date"]]
-    if meta["genre"]:
-        audio["\xa9gen"] = [meta["genre"]]
-    audio["----:com.apple.iTunes:DISCOGS_RELEASE_ID"] = [str(meta["release_id"]).encode()]
-    if meta.get("catalognumber"):
-        audio["----:com.apple.iTunes:CATALOGNUMBER"] = [meta["catalognumber"].encode()]
-    audio.save()
+    write_tags(path, meta)
+
+
+# ---------------------------------------------------------------------------
+# Matching local files to Discogs tracks
+# ---------------------------------------------------------------------------
+
+def _disc_from_folder(local: Path, album_path: Path) -> int | None:
+    parent = local.parent
+    if parent == album_path or not DISC_DIR.match(parent.name):
+        return None
+    match = re.search(r"\d+", parent.name)
+    return int(match.group(0)) if match else None
+
+
+def match_tracks(album: AlbumFolder, dtracks: list[DiscogsTrack]) -> tuple[list[tuple[Path, DiscogsTrack | None]], bool]:
+    """Pair local files with Discogs tracks.
+
+    1. A file named after a side position the release has ("B2. Title")
+       gets that track.
+    2. A leading number ("06 Title", "6. Title", "2-06 Title") is matched
+       against the track numbers; a CD1/CD2 folder limits it to that disc.
+       Files renamed by older versions (B1 = 21) are recognised and matched
+       by that old number when that fits the folder better.
+    3. Anything left takes the remaining tracks in tracklist order.
+
+    Returns the pairs and whether the old vinyl numbering was detected.
+    """
+    discs = {dt.disc for dt in dtracks}
+    max_disc = max(discs, default=1)
+    side_positions = {
+        dt.position.casefold(): i for i, dt in enumerate(dtracks) if dt.position and is_side_position(dt.position)
+    }
+
+    info: list[tuple[Path, int | None, int | None, int | None]] = []
+    for local in album.tracks:
+        disc_hint = _disc_from_folder(local, album.path)
+        number = side_index = None
+        stem = local.stem
+        side = SIDE_PREFIX.match(stem)
+        disc_track = DISC_TRACK_PREFIX.match(stem)
+        plain = TRACK_PREFIX.match(stem)
+        if side and side.group(1).casefold() in side_positions:
+            side_index = side_positions[side.group(1).casefold()]
+        elif disc_track and len(discs) > 1 and disc_hint is None and 1 <= int(disc_track.group(1)) <= max_disc:
+            disc_hint, number = int(disc_track.group(1)), int(disc_track.group(2))
+        elif plain:
+            number = int(plain.group(1))
+        info.append((local, disc_hint, number, side_index))
+
+    use_legacy = False
+    if any(dt.legacy_number is not None and dt.legacy_number != dt.number for dt in dtracks):
+        numbers = [n for _l, _d, n, _s in info if n is not None]
+        new_hits = sum(1 for n in numbers if any(dt.number == n for dt in dtracks))
+        old_hits = sum(1 for n in numbers if any(dt.legacy_number == n for dt in dtracks))
+        use_legacy = old_hits > new_hits
+
+    def number_of(dt: DiscogsTrack) -> int:
+        if use_legacy and dt.legacy_number is not None:
+            return dt.legacy_number
+        return dt.number
+
+    used: set[int] = set()
+    chosen: list[int | None] = [None] * len(info)
+    for k, (_local, disc_hint, number, side_index) in enumerate(info):
+        if side_index is not None and side_index not in used:
+            chosen[k] = side_index
+            used.add(side_index)
+            continue
+        if number is None:
+            continue
+        for i, dt in enumerate(dtracks):
+            if i in used or number_of(dt) != number:
+                continue
+            if disc_hint is not None and dt.disc != disc_hint:
+                continue
+            chosen[k] = i
+            used.add(i)
+            break
+
+    for k, (_local, disc_hint, _number, _side) in enumerate(info):
+        if chosen[k] is not None:
+            continue
+        free = [i for i in range(len(dtracks)) if i not in used]
+        if disc_hint is not None:
+            free = [i for i in free if dtracks[i].disc == disc_hint] or free
+        if free:
+            chosen[k] = free[0]
+            used.add(free[0])
+
+    pairs = [(info[k][0], dtracks[i] if i is not None else None) for k, i in enumerate(chosen)]
+    return pairs, use_legacy
+
+
+# ---------------------------------------------------------------------------
+# Applying a release: tag everything, then move everything
+# ---------------------------------------------------------------------------
+
+class AlbumApplyError(RuntimeError):
+    """An album could not be fully applied. The message says what happened."""
+
+
+@dataclass
+class PlannedFile:
+    source: Path
+    dest: Path
+    meta: dict | None = None  # None for sidecars and extra folders
 
 
 def unique_dest(path: Path) -> Path:
@@ -807,13 +1508,68 @@ def unique_dest(path: Path) -> Path:
     raise RuntimeError(f"cannot find free name for {path}")
 
 
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
 def _move(src: Path, dest: Path) -> Path:
+    """Move src to dest without ever overwriting a different file."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists() and dest.resolve() != src.resolve():
+    if dest.exists() or dest.is_symlink():
+        if _same_file(src, dest):
+            if str(src) != str(dest):
+                os.rename(src, dest)  # case-only rename on a case-insensitive drive
+            return dest
         dest = unique_dest(dest)
-    if src.resolve() != dest.resolve():
-        shutil.move(str(src), str(dest))
+    shutil.move(str(src), str(dest))
     return dest
+
+
+def move_planned(items: list[PlannedFile], done: list[tuple[Path, Path]]) -> None:
+    """Move every item, appending (source, final destination) to done.
+
+    When a destination is currently occupied by another file of the same
+    album that is about to be renamed (re-tagging in place), that file is
+    first moved to a temporary name so nothing ends up as "Title (2)".
+    done is filled as moves happen, so after a failure it lists exactly
+    what was moved. It is the natural hook for a future undo journal.
+    """
+    sources = [item.source for item in items]
+    for item in items:
+        if not (item.dest.exists() or item.dest.is_symlink()):
+            continue
+        blocker = next(
+            (s for s in sources if s is not item.source and _same_file(s, item.dest) and not _same_file(s, item.source)),
+            None,
+        )
+        if blocker is None:
+            continue
+        staged = unique_dest(blocker.with_name(f".discogs-tag-{os.getpid()}-{blocker.name}"))
+        os.rename(blocker, staged)
+        done.append((blocker, staged))
+        for other in items:
+            if other.source is blocker:
+                other.source = staged
+        sources = [i.source for i in items]
+    for item in items:
+        final = _move(item.source, item.dest)
+        done.append((item.source, final))
+
+
+def describe_moves(done: list[tuple[Path, Path]], pending: list[PlannedFile]) -> str:
+    lines = []
+    if done:
+        lines.append(f"  moved {len(done)} item(s):")
+        lines += [f"    {src}  ->  {dest}" for src, dest in done]
+    else:
+        lines.append("  nothing was moved")
+    if pending:
+        lines.append(f"  not moved ({len(pending)}):")
+        lines += [f"    {item.source}" for item in pending]
+    return "\n".join(lines)
 
 
 def apply_album(
@@ -823,12 +1579,19 @@ def apply_album(
     dtracks: list[DiscogsTrack],
     original_year: str,
     dry_run: bool,
-) -> None:
+    clear_other: bool = False,
+) -> list[tuple[Path, Path]]:
+    """Tag the album's files, then move them into place.
+
+    Order: plan everything, write tags to every file in place (nothing is
+    moved if any file fails), then move tracks, extra folders and sidecars.
+    original_year is the master's year ("" when unknown); it is only used
+    for a reissue. Returns the (source, destination) list of moves made.
+    """
     album_artist = release_artists(release)
     folder_artist = format_artist(album_artist)
     title = release.get("title") or ""
     release_year = year4(release.get("released") or release.get("year"))
-    orig = original_year or release_year
     catno = release_catno(release)
     label = ""
     if release.get("labels"):
@@ -838,40 +1601,26 @@ def apply_album(
     genre = ", ".join(styles[:2] or genres[:2])
     discs = release_discs(release, dtracks)
     master_id = release.get("master_id") or 0
+    # Original date only for reissues (master year earlier than this release).
+    orig = reissue_original_year(original_year, release_year)
 
-    folder = album_folder_name(title, orig, release_year, catno, discs)
+    folder = album_folder_name(title, original_year, release_year, catno, discs)
     target_dir = dest_root / folder_artist / folder
 
     print(f"  dest  {target_dir}")
-    if not dry_run:
-        target_dir.mkdir(parents=True, exist_ok=True)
 
-    remaining = list(dtracks)
-    used: set[int] = set()
-
-    def take_track(local: Path) -> DiscogsTrack | None:
-        stem = local.stem
-        match = TRACK_PREFIX.match(stem)
-        if match:
-            want = int(match.group(1))
-            for i, dt in enumerate(remaining):
-                if dt.number == want and i not in used:
-                    used.add(i)
-                    return remaining[i]
-        for i, dt in enumerate(remaining):
-            if i not in used:
-                used.add(i)
-                return dt
-        return None
+    pairs, legacy = match_tracks(album, dtracks)
+    if legacy:
+        print("  note  these files use the old vinyl numbering (B1 = 21); they are renumbered 1..N")
 
     by_disc: dict[int, list[DiscogsTrack]] = {}
     for dt in dtracks:
         by_disc.setdefault(dt.disc, []).append(dt)
 
-    for local in album.tracks:
-        dt = take_track(local)
+    plan: list[PlannedFile] = []
+    for local, dt in pairs:
         if dt is None:
-            print(f"  skip  extra file  {local.name}")
+            print(f"  skip  extra file  {local.name}  (left in place)")
             continue
         disc_tracks = by_disc.get(dt.disc, dtracks)
         meta = {
@@ -890,33 +1639,105 @@ def apply_album(
             "genre": genre,
             "release_id": release.get("id"),
             "master_id": master_id,
+            "position": dt.position,
         }
-        dest_name = track_filename(dt.number, dt.title, local.suffix)
-        dest_file = target_dir / dest_name
+        dest_file = target_dir / track_filename(dt.number, dt.title, local.suffix)
+        where = f"{dt.disc}-{dt.number}"
+        if dt.position and dt.position != str(dt.number):
+            where += f", {dt.position}"
         print(f"  {local.name}")
-        print(f"      -> {dest_file.name}   [{dt.disc}-{dt.number}]")
-        if dry_run:
-            continue
-        write_tags(local, meta)
-        _move(local, dest_file)
+        print(f"      -> {dest_file.name}   [{where}]")
+        plan.append(PlannedFile(local, dest_file, meta))
 
-    for extra_dir in album.extra_dirs:
-        dest_dir = target_dir / extra_dir.name
-        print(f"  move  {extra_dir.name}/")
-        if dry_run:
-            continue
-        _move(extra_dir, dest_dir)
+    clash: dict[str, list[Path]] = {}
+    for item in plan:
+        clash.setdefault(str(item.dest).casefold(), []).append(item.source)
+    clashes = {k: v for k, v in clash.items() if len(v) > 1}
+    if clashes:
+        detail = "; ".join(", ".join(p.name for p in v) for v in clashes.values())
+        print(f"  warning: several files map to the same name and will get (2) suffixes: {detail}")
 
+    # Generated album playlists list the old file names. They are not moved;
+    # they are deleted and a fresh one is written once the move succeeds.
+    old_playlists: list[Path] = []
+    sidecars: list[Path] = []
     for sidecar in album.sidecars:
-        rel = sidecar.relative_to(album.path)
-        dest_file = target_dir / rel
-        print(f"  move  {rel}")
-        if dry_run:
-            continue
-        _move(sidecar, dest_file)
+        if sidecar.suffix.lower() in mm_common.PLAYLIST_EXTS and mm_common.is_generated_playlist(sidecar):
+            old_playlists.append(sidecar)
+        else:
+            sidecars.append(sidecar)
+            if sidecar.suffix.lower() in mm_common.PLAYLIST_EXTS:
+                print(f"  note  hand-made playlist {sidecar.name} is moved as-is; it may list old file names")
 
-    if not dry_run:
-        _prune_empty(album.path, dest_root)
+    # Phase 1: tags. Nothing moves unless every file was tagged.
+    tagged: list[Path] = []
+    for item in plan:
+        try:
+            removed = write_tags(item.source, item.meta, clear_other=clear_other, dry_run=dry_run)
+        except Exception as exc:  # noqa: BLE001 - any failure must stop this album only
+            msg = f"tagging failed for {item.source}: {type(exc).__name__}: {exc}\n  nothing was moved"
+            if tagged and not dry_run:
+                msg += f"; {len(tagged)} file(s) were already re-tagged in place:\n"
+                msg += "\n".join(f"    {p}" for p in tagged)
+            raise AlbumApplyError(msg) from exc
+        if removed:
+            print(f"      {'would clear' if dry_run else 'cleared'}  {', '.join(removed)}  ({item.source.name})")
+        tagged.append(item.source)
+
+    moves: list[PlannedFile] = list(plan)
+    for extra_dir in album.extra_dirs:
+        print(f"  move  {extra_dir.name}/")
+        moves.append(PlannedFile(extra_dir, target_dir / extra_dir.name))
+    for sidecar in sidecars:
+        rel = sidecar.relative_to(album.path)
+        print(f"  move  {rel}")
+        moves.append(PlannedFile(sidecar, target_dir / rel))
+    for playlist in old_playlists:
+        print(f"  drop  {playlist.relative_to(album.path)}  (generated playlist; regenerated after the move)")
+
+    if dry_run:
+        return []
+
+    # Phase 2: moves.
+    done: list[tuple[Path, Path]] = []
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        move_planned(moves, done)
+    except Exception as exc:  # noqa: BLE001
+        moved_sources = {src for src, _ in done}
+        pending = [m for m in moves if m.source not in moved_sources]
+        raise AlbumApplyError(
+            f"move failed: {type(exc).__name__}: {exc}\n"
+            f"  all files were tagged; the album is split between\n"
+            f"    {album.path}\n    {target_dir}\n" + describe_moves(done, pending)
+        ) from exc
+
+    # Phase 3: playlists and cleanup.
+    if old_playlists:
+        regenerate_playlist(target_dir, old_playlists)
+    _prune_empty(album.path, dest_root)
+    return done
+
+
+def regenerate_playlist(target_dir: Path, old_playlists: list[Path]) -> None:
+    for playlist in old_playlists:
+        try:
+            if playlist.exists():
+                playlist.unlink()
+        except OSError as exc:
+            print(f"  warning: could not delete old playlist {playlist}: {exc}")
+    dest = mm_common.playlist_path(target_dir)
+    if dest.exists() and not mm_common.is_generated_playlist(dest):
+        print(f"  warning: not replacing hand-made playlist {dest}")
+        return
+    tracks = mm_common.album_playlist_tracks(target_dir)
+    if not tracks:
+        return
+    try:
+        mm_common.write_playlist_file(dest, mm_common.render_playlist(target_dir, tracks))
+        print(f"  playlist  {dest.name}  ({len(tracks)} tracks)")
+    except OSError as exc:
+        print(f"  warning: could not write playlist {dest}: {exc}")
 
 
 def _prune_empty(start: Path, stop: Path) -> None:
@@ -1002,7 +1823,7 @@ def choose_release(
                 artist, album = query.split(" - ", 1)
             else:
                 artist, album = guess.get("artist", ""), query
-            results = api.search_releases(artist.strip(), album.strip(), guess.get("catno", ""))
+            results = api.search_releases(artist.strip(), album.strip(), guess.get("catno", ""), guess.get("year", ""))
             ranked = sorted(((score_result(r, guess), r) for r in results), key=lambda x: -x[0])
             continue
         if choice.lower().startswith("i"):
@@ -1026,12 +1847,14 @@ def process_album(
     yes: bool,
     skip_tagged: bool,
     release_id: int | None,
+    clear_other: bool = False,
 ) -> str:
+    """Returns "applied", "skipped", or "skipped-tagged" (not counted by --limit)."""
     if skip_tagged:
         tagged = already_tagged(album.tracks[0])
         if tagged:
             print(f"skip tagged (Discogs {tagged}): {album.path}")
-            return "skipped"
+            return "skipped-tagged"
 
     guess = guess_from_album_dir(album.path, album.tracks)
     print()
@@ -1044,7 +1867,7 @@ def process_album(
     if not release_id:
         results = api.search_releases(guess["artist"], guess["album"], guess.get("catno", ""), guess.get("year", ""))
         if not results and guess["album"]:
-            results = api.search_releases("", guess["album"], guess.get("catno", ""))
+            results = api.search_releases("", guess["album"], guess.get("catno", ""), guess.get("year", ""))
 
     try:
         release = choose_release(api, guess, results, auto=auto, release_id=release_id)
@@ -1056,17 +1879,20 @@ def process_album(
 
     album_artist = release_artists(release)
     dtracks = flatten_tracklist(release, album_artist)
-    original_year = year4(release.get("released") or release.get("year"))
+    release_year = year4(release.get("released") or release.get("year"))
+    original_year = ""  # the master's year; only used when it is earlier (reissue)
     master_id = release.get("master_id")
     if master_id:
         try:
             master = api.master(int(master_id))
-            original_year = year4(master.get("year")) or original_year
+            original_year = year4(master.get("year"))
         except DiscogsError as exc:
             print(f"  warning: master fetch failed: {exc}")
 
+    reissue_of = reissue_original_year(original_year, release_year)
     print(f"  match  {album_artist} – {release.get('title')}  [{release.get('year')}]")
-    print(f"         orig {original_year or '?'}  cat {release_catno(release) or '-'}  "
+    print(f"         orig {reissue_of + ' (reissue)' if reissue_of else '- (original release)'}  "
+          f"cat {release_catno(release) or '-'}  "
           f"{len(dtracks)} tracks / {release_discs(release, dtracks)} disc(s)")
     print(f"         https://www.discogs.com/release/{release.get('id')}")
 
@@ -1078,7 +1904,7 @@ def process_album(
         if ans in {"n", "no"}:
             return "skipped"
 
-    apply_album(album, dest_root, release, dtracks, original_year, dry_run=dry_run)
+    apply_album(album, dest_root, release, dtracks, original_year, dry_run=dry_run, clear_other=clear_other)
     return "applied"
 
 
@@ -1094,10 +1920,21 @@ def self_test() -> int:
     assert format_catalog("none") is None
     name = album_folder_name("No Cause for Concern", "1981", "1993", "DOJO CD 167", 1)
     assert name == "[1981]  No Cause for Concern [1993] [DOJOCD167]", name
+    # Not a reissue (master year == release year, or no master): no [orig] prefix.
     name = album_folder_name("Come On Die Young", "1999", "1999", "OLE365-2", 1)
-    assert name == "[1999]  Come On Die Young [1999] [OLE365-2]", name
+    assert name == "Come On Die Young [1999] [OLE365-2]", name
     name = album_folder_name("Mermaid Avenue", "1998", "1998", "7559-62204-1", 2)
-    assert name == "[1998]  Mermaid Avenue 2CD [1998] [7559-62204-1]", name
+    assert name == "Mermaid Avenue 2CD [1998] [7559-62204-1]", name
+    name = album_folder_name("Mermaid Avenue", "", "1998", "7559-62204-1", 2)
+    assert name == "Mermaid Avenue 2CD [1998] [7559-62204-1]", name
+    assert reissue_original_year("1981", "1993") == "1981"
+    assert reissue_original_year("1999", "1999") == "" and reissue_original_year("", "1999") == ""
+    assert reissue_original_year("2001", "1999") == "" and reissue_original_year("1981", "") == ""
+    parsed = parse_album_dirname("Come On Die Young [1999] [OLE365-2]")
+    assert parsed == {"album": "Come On Die Young", "year": "1999", "catno": "OLE365-2"}, parsed
+    parsed = parse_album_dirname("Mermaid Avenue 2CD [1998]")
+    assert parsed == {"album": "Mermaid Avenue", "year": "1998"}, parsed
+    assert "catno" not in parse_album_dirname("Some Album [2012] [FLAC]")
     parsed = parse_album_dirname("[1981]  No Cause for Concern [1993] [DOJOCD167]")
     assert parsed["album"] == "No Cause for Concern"
     assert parsed["originalyear"] == "1981"
@@ -1166,6 +2003,8 @@ def self_test() -> int:
         names = {str(p.relative_to(album_dir)) for p in files}
         assert names == {"cover.jpg", "notes.txt", "CD1/rip.log"}
 
+    _self_test_fixes()
+
     if DEFAULT_MUSIC.exists():
         assert default_dest(Path("/tmp/Artist - Album")) == DEFAULT_MUSIC.resolve()
         featuring = DEFAULT_MUSIC / "Aesop Rock" / "Featuring" / "Some Album"
@@ -1173,6 +2012,121 @@ def self_test() -> int:
 
     print("self-test ok")
     return 0
+
+
+def _tiny_wav(path: Path) -> None:
+    import wave
+
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(8000)
+        handle.writeframes(b"\x00\x00" * 8)
+
+
+def _tiny_aiff(path: Path) -> None:
+    import struct
+
+    frames = 8
+    rate_8000 = b"\x40\x0b\xfa\x00\x00\x00\x00\x00\x00\x00"  # 80-bit float 8000.0
+    comm = struct.pack(">hLh", 1, frames, 16) + rate_8000
+    ssnd = struct.pack(">LL", 0, 0) + b"\x00\x00" * frames
+    body = b"AIFF" + b"COMM" + struct.pack(">L", len(comm)) + comm + b"SSND" + struct.pack(">L", len(ssnd)) + ssnd
+    path.write_bytes(b"FORM" + struct.pack(">L", len(body)) + body)
+
+
+def _self_test_fixes() -> None:
+    """Checks for the tagging/matching/playlist fixes. No network, no samples."""
+    import stat
+    import tempfile
+
+    def track(pos, title, kind="track", **extra):
+        return {"position": pos, "type_": kind, "title": title, **extra}
+
+    # Vinyl: sequential across sides, original position kept.
+    lp = {"tracklist": [track("A1", "a"), track("A2", "b"), track("", "Side B", "heading"), track("B1", "c"), track("B2", "d")]}
+    tracks = flatten_tracklist(lp, "X")
+    assert [(t.number, t.position) for t in tracks] == [(1, "A1"), (2, "A2"), (3, "B1"), (4, "B2")], tracks
+    assert tracks[2].legacy_number == 21
+    assert track_filename(tracks[2].number, "c", ".flac") == "3. c.flac"
+
+    # Index tracks: sub-tracks included, numbered in order.
+    work = {"tracklist": [
+        track("1", "Intro"),
+        track("", "Suite", "index", sub_tracks=[track("2a", "Part 1"), track("2b", "Part 2")]),
+        track("3", "Outro"),
+    ]}
+    assert [(t.number, t.title) for t in flatten_tracklist(work, "X")] == [
+        (1, "Intro"), (2, "Suite: Part 1"), (3, "Suite: Part 2"), (4, "Outro")]
+
+    # Unicode similarity.
+    assert similar("荒井由実", "荒井由実") == 1.0
+    assert similar("Кино", "кино") == 1.0
+    assert similar("Björk", "Bjork") == 1.0
+    assert similar("ひこうき雲", "ミスリム") < 0.5
+    assert rank_by_year([{"year": "2000"}, {"year": "1990"}], "1990")[0]["year"] == "1990"
+    assert clean_date("1999-00-00") == "1999" and clean_date("1999-05-00") == "1999-05"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+
+        # Folder skip: "Art"/"Covers" are artwork only inside an album folder.
+        for rel in ("Art/Album/1. a.flac", "Artist/Covers/1. b.flac", "Artist/Album/1. c.flac",
+                    "Artist/Album/Scans/1. not-a-track.flac"):
+            (root / "walk" / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / "walk" / rel).write_bytes(b"x")
+        found = sorted(str(a.path.relative_to(root / "walk")) for a in collect_albums(root / "walk"))
+        assert found == ["Art/Album", "Artist/Album", "Artist/Covers"], found
+
+        # Playlists: generated vs hand-made.
+        album = root / "pl" / "Album"
+        album.mkdir(parents=True)
+        (album / "1. a.flac").write_bytes(b"x")
+        (album / "2. b.flac").write_bytes(b"x")
+        legacy = album / "Album.m3u"
+        legacy.write_text("1. a.flac\n2. b.flac\n", encoding="utf-8")
+        assert mm_common.is_generated_playlist(legacy)
+        mine = album / "mine.m3u"
+        mine.write_text("1. a.flac\n2. b.flac\n", encoding="utf-8")
+        assert not mm_common.is_generated_playlist(mine)
+        legacy.write_text("2. b.flac\n1. a.flac\n", encoding="utf-8")
+        assert not mm_common.is_generated_playlist(legacy)
+        lines = mm_common.render_playlist(album, mm_common.album_playlist_tracks(album))
+        assert lines[:2] == ["#EXTM3U", mm_common.GENERATED_MARKER]
+        marked = album / "x.m3u8"
+        marked.write_bytes(mm_common.encode_lines(lines))
+        assert mm_common.is_generated_playlist(marked)
+
+        # Tag writing: ID3v2.4 in WAV and AIFF, ID3 in MP3, nothing Vorbis-style.
+        meta = {
+            "title": "Ünïcode", "artist": "A", "albumartist": "A", "album": "B", "track": 2, "tracktotal": 9,
+            "disc": 1, "disctotal": 1, "date": "2001-00-00", "originaldate": "1990", "label": "L",
+            "catalognumber": "C1", "genre": "G", "release_id": 77, "master_id": 0, "position": "A2",
+        }
+        for name, make in (("t.wav", _tiny_wav), ("t.aiff", _tiny_aiff)):
+            path = root / name
+            make(path)
+            write_tags(path, meta)
+            tags = MutagenFile(path).tags
+            assert isinstance(tags, ID3) and tags.version[:2] == (2, 4), name
+            assert str(tags["TIT2"]) == "Ünïcode" and str(tags["TRCK"]) == "2/9" and str(tags["TDRC"]) == "2001"
+            assert already_tagged(path) == "77"
+        mp3 = root / "t.mp3"
+        mp3.write_bytes(b"")
+        old = ID3()
+        old.add(TXXX(encoding=3, desc="DISCOGS_MASTER_ID", text="5"))
+        old.add(TXXX(encoding=3, desc="REPLAYGAIN_TRACK_GAIN", text="-1 dB"))
+        old.save(mp3)
+        write_tags(mp3, meta)
+        tags = ID3(mp3)
+        assert "TXXX:DISCOGS_MASTER_ID" not in tags  # stale id from another release
+        assert "TXXX:REPLAYGAIN_TRACK_GAIN" in tags  # never touched by default
+        assert str(tags["TXXX:DISCOGS_POSITION"]) == "A2"
+
+        # Token file is private from the start.
+        token = root / "cfg" / "token"
+        save_token("abc", token)
+        assert stat.S_IMODE(token.stat().st_mode) == 0o600 and token.read_text() == "abc\n"
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -1197,10 +2151,21 @@ credentials:
 
 where files go:
   DESTINATION/AlbumArtist/[original year]  Album [press year] [CATNO]/N. Title.ext
+  The [original year] part and the original-date tag are only used for a
+  reissue (Discogs master year earlier than the release year):
+  DESTINATION/AlbumArtist/Album [press year] [CATNO]/N. Title.ext otherwise.
   DESTINATION is --dest, else the Featuring directory when the path is
   under one, else $DEFAULT_MUSIC (default: /path/to/Music
   when that volume is mounted). Extra files and folders (Scans, Covers,
-  logs, cues, …) move with the album.
+  logs, cues, …) move with the album. Vinyl/cassette sides are numbered
+  straight through (A1 A2 B1 -> 1 2 3); the side is kept in DISCOGS_POSITION.
+
+safety:
+  All files of an album are tagged before anything moves. Only the tags
+  this tool writes are replaced. Comments, MusicBrainz ids and other text
+  tags are kept unless --clear-other-tags; ReplayGain, AccurateRip,
+  encoder info, art, lyrics and ISRC are always kept. One album failing
+  does not stop the run.
 """.strip(),
     )
     parser.add_argument(
@@ -1216,7 +2181,18 @@ where files go:
     parser.add_argument("-y", "--yes", action="store_true", help="do not ask before writing")
     parser.add_argument("--skip-tagged", action="store_true", help="skip albums that already have a Discogs id")
     parser.add_argument("--release-id", type=int, help="use this Discogs release id (single album)")
-    parser.add_argument("--limit", type=int, default=0, help="process at most N albums (0 = all)")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="process at most N albums (0 = all); albums skipped by --skip-tagged do not count",
+    )
+    parser.add_argument(
+        "--clear-other-tags",
+        action="store_true",
+        help="also remove text tags this tool does not write (comments, MusicBrainz ids, ...); "
+        "ReplayGain, AccurateRip, encoder info, art, lyrics and ISRC are always kept",
+    )
     parser.add_argument("--save-token", action="store_true", help="store a Discogs user token and exit")
     parser.add_argument("--self-test", action="store_true", help="run built-in naming tests and exit")
     return parser.parse_args(argv)
@@ -1252,12 +2228,10 @@ def main(argv: list[str] | None = None) -> int:
 
     dest = (args.dest or default_dest(root)).expanduser().resolve()
     albums = collect_albums(root)
-    if args.limit:
-        albums = albums[: args.limit]
     if not albums:
         print(f"No album folders with audio under {root}")
         return 0
-    if args.release_id and len(albums) > 1:
+    if args.release_id and len(albums) > 1 and args.limit != 1:
         print("error: --release-id only works on a single album folder", file=sys.stderr)
         return 2
 
@@ -1268,10 +2242,18 @@ def main(argv: list[str] | None = None) -> int:
         print(exc, file=sys.stderr)
         return 1
 
-    print(f"albums {len(albums)}   dest {dest}" + ("   DRY RUN" if args.dry_run else ""))
+    print(
+        f"albums {len(albums)}   dest {dest}"
+        + (f"   limit {args.limit}" if args.limit else "")
+        + ("   DRY RUN" if args.dry_run else "")
+    )
     applied = skipped = failed = 0
+    processed = 0
+    failures: list[tuple[Path, str]] = []
     try:
         for album in albums:
+            if args.limit and processed >= args.limit:
+                break
             try:
                 result = process_album(
                     api,
@@ -1282,11 +2264,21 @@ def main(argv: list[str] | None = None) -> int:
                     yes=args.yes,
                     skip_tagged=args.skip_tagged,
                     release_id=args.release_id,
+                    clear_other=args.clear_other_tags,
                 )
-            except (DiscogsError, MutagenError) as exc:
-                print(f"  error: {album.path}: {exc}", file=sys.stderr)
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:  # noqa: BLE001 - one album must not stop the batch
+                processed += 1
                 failed += 1
+                detail = str(exc) if isinstance(exc, (DiscogsError, AlbumApplyError)) else f"{type(exc).__name__}: {exc}"
+                print(f"  error: {album.path}: {detail}", file=sys.stderr)
+                failures.append((album.path, detail.splitlines()[0] if detail else type(exc).__name__))
                 continue
+            if result == "skipped-tagged":
+                skipped += 1
+                continue
+            processed += 1
             if result == "applied":
                 applied += 1
             else:
@@ -1294,6 +2286,8 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\nstopped")
     print(f"\ndone  applied={applied}  skipped={skipped}  failed={failed}")
+    for path, reason in failures:
+        print(f"  failed  {path}: {reason}")
     return 0 if failed == 0 else 1
 
 
