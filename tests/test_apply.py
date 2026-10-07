@@ -23,7 +23,7 @@ def run_apply(dt, album_dir, dest_root, rel, orig="1985", **kw):
     return dt.apply_album(album, dest_root, rel, dtracks, orig, dry_run=kw.pop("dry_run", False), **kw)
 
 
-VINYL_DIR = "Testers, The/[1985]  Side Story [1985] [WAX001]"  # not a reissue: leading year = release year
+VINYL_DIR = "Testers, The/[1985]  Side Story [WAX001]"  # not a reissue: one year, no release-year bracket
 
 
 def test_vinyl_album_renamed_sequentially(dt, tmp_path):
@@ -36,7 +36,7 @@ def test_vinyl_album_renamed_sequentially(dt, tmp_path):
     assert not any(n.startswith("21.") for n in names)
     tags = MutagenFile(target / "6. Flip.flac").tags
     assert tags["TRACKNUMBER"] == ["6"] and tags["TRACKTOTAL"] == ["10"] and tags["DISCOGS_POSITION"] == ["B1"]
-    assert not any(src.iterdir())  # everything moved (pruning only happens inside the dest root)
+    assert not src.exists()  # everything moved; the emptied source folder was removed
 
 
 def test_reissue_gets_original_date_and_orig_folder_year(dt, tmp_path):
@@ -87,7 +87,7 @@ def test_non_reissue_folder_keeps_leading_year_my_war(dt, tmp_path):
     src = make_album(tmp_path / "in" / "Black Flag - My War", ["01.flac", "02.flac"])
     out = tmp_path / "lib"
     run_apply(dt, src, out, rel, orig="1984")  # master year == release year
-    target = out / "Black Flag" / "[1984]  My War [1984] [SST023]"
+    target = out / "Black Flag" / "[1984]  My War [SST023]"
     assert sorted(p.name for p in target.iterdir()) == ["1. My War.flac", "2. Nothing Left Inside.flac"]
     tags = MutagenFile(target / "1. My War.flac").tags
     assert "ORIGINALDATE" not in tags and "ORIGINALYEAR" not in tags  # tags: not a reissue
@@ -98,9 +98,13 @@ def test_non_reissue_folder_keeps_leading_year_my_war(dt, tmp_path):
     "title, master, release_year, catno, expected",
     [
         ("Nervous Breakdown", "1979", "1988", "SST CD 001", "[1979]  Nervous Breakdown [1988] [SSTCD001]"),
-        ("My War", "1984", "1984", "SST 023", "[1984]  My War [1984] [SST023]"),
-        ("Who's Got the 10½?", "1986", "1986", "SST CD 060", "[1986]  Who's Got the 10½_ [1986] [SSTCD060]"),
-        ("What The…", "", "2013", "SST 391", "[2013]  What The… [2013] [SST391]"),
+        ("My War", "1984", "1984", "SST 023", "[1984]  My War [SST023]"),
+        ("My War", "", "1984", "SST 023", "[1984]  My War [SST023]"),
+        ("Who's Got the 10½?", "1986", "1986", "SST CD 060", "[1986]  Who's Got the 10½_ [SSTCD060]"),
+        ("What The…", "", "2013", "SST 391", "[2013]  What The… [SST391]"),
+        ("What The…", "2013", "2013", "", "[2013]  What The…"),
+        ("What The…", "", "", "", "What The…"),
+        ("What The…", "", "", "SST 391", "What The… [SST391]"),
         ("The First Four Years", "1983", "1990", "", "[1983]  The First Four Years [1990]"),
     ],
 )
@@ -153,7 +157,7 @@ def test_index_subtracks_become_files(dt, tmp_path):
     src = make_album(tmp_path / "in" / "Orchestra - Works", [f"{n:02d}.flac" for n in range(1, 6)])
     out = tmp_path / "lib"
     run_apply(dt, src, out, release("index_tracks"), orig="")
-    target = out / "Orchestra" / "[2001]  Works [2001] [CL-9]"  # no master year: release year leads
+    target = out / "Orchestra" / "[2001]  Works [CL-9]"  # no master year: release year leads
     assert sorted(p.name for p in target.iterdir()) == sorted([
         "1. Overture.flac", "2. Symphony No. 1_ I. Allegro.flac", "3. Symphony No. 1_ II. Adagio.flac",
         "4. Symphony No. 1_ III. Finale.flac", "5. Encore.flac"])
@@ -204,7 +208,7 @@ def test_tag_failure_moves_nothing(dt, tmp_path):
 
 def test_move_failure_reports_what_moved(dt, tmp_path, monkeypatch):
     src = make_album(tmp_path / "in" / "Testers - Side Story", [f"{n:02d} track.flac" for n in range(1, 11)])
-    real_move = dt.shutil.move
+    real_move = dt._move
     calls = {"n": 0}
 
     def flaky(a, b):
@@ -213,7 +217,7 @@ def test_move_failure_reports_what_moved(dt, tmp_path, monkeypatch):
             raise OSError(28, "No space left on device")
         return real_move(a, b)
 
-    monkeypatch.setattr(dt.shutil, "move", flaky)
+    monkeypatch.setattr(dt, "_move", flaky)
     with pytest.raises(dt.AlbumApplyError) as err:
         run_apply(dt, src, tmp_path / "lib", release("vinyl_lp"))
     text = str(err.value)

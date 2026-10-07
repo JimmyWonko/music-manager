@@ -72,20 +72,22 @@ albums are listed at the end.
 ## Where files go
 
 ```text
-DESTINATION/AlbumArtist/[original year]  Album [press year] [CATNO]/N. Title.ext
+DESTINATION/AlbumArtist/[LEADYEAR]  Album [RELEASEYEAR] [CATNO]/N. Title.ext
 ```
 
-The folder always starts with a year, so each artist's albums sort
+The folder starts with a year, so each artist's albums sort
 chronologically. For a reissue (the Discogs master's year is earlier
 than the release's year) that is the master's year; otherwise it is the
-release's own year. `%date%` is the press/release year after the title,
-even when the two match. A catalog number is appended when Discogs has
-one. Examples from the library:
+release's own year. The release year after the title only appears for a
+reissue. Anything unknown is left out together with its brackets and
+spaces: no catalog number means no `[CATNO]`, and with no year at all
+the name is just `Album [CATNO]` or `Album`. Examples from the library:
 
 ```text
 Black Flag/[1979]  Nervous Breakdown [1988] [SSTCD001]/   (1988 reissue of a 1979 release)
-Black Flag/[1984]  My War [1984] [SST023]/                (original release)
-Black Flag/[1983]  The First Four Years [1990]/           (no catalog number)
+Black Flag/[1984]  My War [SST023]/                       (original release)
+Black Flag/[1983]  The First Four Years [1990]/           (reissue, no catalog number)
+Black Flag/[2013]  What The…/                             (original release, no catalog number)
 ```
 
 Tags are stricter than folder names: `ORIGINALDATE`/`ORIGINALYEAR` (and
@@ -103,9 +105,23 @@ tagger is left alone.
 
 Albums are filed under the Discogs album artist, not inside the source
 folder. Extra files and folders (Scans, Covers, Artwork, logs, cues,
-playlists, nfo, leftover files in CD1/CD2, …) move with the album and
-keep their relative paths. Empty source directories are removed up to
-the destination root.
+playlists, nfo, leftover files in CD1/CD2, hidden files and folders, …)
+move with the album and keep their relative paths. Only trash folders
+(`.Trash-1000`, `.Trashes`) and `.git` stay behind; a git checkout (such
+as a copy of this tool) is never treated as an album.
+
+After a successful move, the old album folder is removed, together with
+its emptied `CD1`/`CD2` folders and every parent folder that became
+empty, up to and including the folder you passed on the command line
+(nothing above it). Inside the library this stops below the library
+root, so an emptied artist folder goes but the root never does. Folders
+are removed with `rmdir` only, so a folder that still holds anything at
+all (a hidden file, an unmatched track that was left in place) is kept.
+
+Moving to another drive is a real move: each file is copied to a hidden
+partial file, flushed to disk, read back and compared (size and
+SHA-256), renamed into place, and only then is the original deleted. If
+the check fails, the copy is removed and the original stays.
 
 Artist names follow the Picard rules in the script: a leading `The`,
 `Die`, or `Le` moves to the end (`Beatles, The`), and joiner words such
@@ -167,10 +183,51 @@ written in the new folder. Hand-made playlists are moved as they are.
 | `--clear-other-tags` | Also remove text tags this tool does not write. See above for what is always kept. |
 | `--save-token` | Prompt for a token, save it, and exit. |
 | `--self-test` | Run the naming checks and exit. |
+| `--normalize-folders` | Rename album folders under `path` to the current naming rule. Preview unless `--apply`. |
+| `--undo-journal FILE` | Reverse the renames recorded in a journal. Preview unless `--apply`. |
+| `--apply` | Really rename (only with `--normalize-folders` or `--undo-journal`). |
 | `-h`, `--help` | Show this help. |
 
 Without a TTY, pass `--release-id` or `--auto`. Otherwise the album is
 reported as failed instead of waiting for a prompt.
+
+## Clean up folder names (`--normalize-folders`)
+
+Folders made by older versions repeat the year for non-reissues
+(`[1984]  My War [1984] [SST023]`). This renames them to the current rule
+without contacting Discogs and without changing any file:
+
+```sh
+discogs-tag --normalize-folders /path/to/Music           # preview
+discogs-tag --normalize-folders --apply /path/to/Music   # rename
+discogs-tag --undo-journal ~/.local/state/discogs-tag/journal/normalize-folders-YYYYMMDD-HHMMSS.jsonl          # preview the undo
+discogs-tag --undo-journal ~/.local/state/discogs-tag/journal/normalize-folders-YYYYMMDD-HHMMSS.jsonl --apply  # undo
+```
+
+- Only album folders (folders with audio) are considered, never artist
+  folders. Only names in the exact shape this tool writes,
+  `[Y1]  Album[ 2CD] [Y2][ [CATNO]]`, are touched.
+- `Y1 == Y2`: the second year is removed. If the album's tags have an
+  `ORIGINALDATE`/`ORIGINALYEAR` earlier than `DATE` (a reissue), the
+  folder is skipped instead. `Y1 < Y2` (a reissue) is already right.
+  An old `[]  Album []` with no year becomes `Album`.
+- Everything else is skipped and listed with the reason: other naming
+  styles, `[Y]  Album [CATNO] [Y]`, a leading year later than the second,
+  a catalog number that looks like a year, brackets in the title.
+- If the new name already exists, or two folders would get the same
+  name, both are left alone and reported as conflicts. Nothing is merged
+  or overwritten.
+- A playlist generated by `album-m3u` and named after the folder is
+  renamed with it. Files are never retagged.
+- The preview prints every `old -> new`, the skipped folders with
+  reasons, the conflicts, and the counts. `--apply` writes every rename
+  to a JSON-lines journal (old and new absolute paths, time, inode) in
+  `~/.local/state/discogs-tag/journal/` (`$XDG_STATE_HOME` if set), and
+  prints the undo command.
+- `--undo-journal FILE --apply` reverses the journal newest first. An
+  entry is only reversed when the renamed folder is still there (same
+  inode) and its old name is free; anything that changed since is skipped
+  and reported. The undo writes its own journal.
 
 ## `album-m3u`
 
