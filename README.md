@@ -75,20 +75,24 @@ albums are listed at the end.
 DESTINATION/AlbumArtist/[original year]  Album [press year] [CATNO]/N. Title.ext
 ```
 
-`%date%` is the press/release year after the title. The leading
-`[original year]` is only used for a reissue: when the Discogs master's
-year is earlier than the release's year. An original release (same year,
-no master, or no master year) gets no leading year and no original-date
-tag. A catalog number is appended when Discogs has one. Examples:
+The folder always starts with a year, so each artist's albums sort
+chronologically. For a reissue (the Discogs master's year is earlier
+than the release's year) that is the master's year; otherwise it is the
+release's own year. `%date%` is the press/release year after the title,
+even when the two match. A catalog number is appended when Discogs has
+one. Examples from the library:
 
 ```text
-Abrasive Wheels/[1982]  When the Punks Go Marching In! [2006] [AHOYDPX25]/   (2006 reissue of a 1982 album)
-Some Artist/Some Album [2001] [CAT001]/                                         (original release)
+Black Flag/[1979]  Nervous Breakdown [1988] [SSTCD001]/   (1988 reissue of a 1979 release)
+Black Flag/[1984]  My War [1984] [SST023]/                (original release)
+Black Flag/[1983]  The First Four Years [1990]/           (no catalog number)
 ```
 
-When an album this tool tagged before turns out not to be a reissue, the
-original-date tags it wrote earlier are removed. An original date written
-by another tagger is left alone.
+Tags are stricter than folder names: `ORIGINALDATE`/`ORIGINALYEAR` (and
+each format's equivalents) are only written for a reissue. When an album
+this tool tagged before turns out not to be a reissue, the original-date
+tags it wrote earlier are removed. An original date written by another
+tagger is left alone.
 
 `DESTINATION` is the first match:
 

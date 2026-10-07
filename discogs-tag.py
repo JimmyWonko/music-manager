@@ -148,10 +148,6 @@ JUNK_BITS = re.compile(
 NAMED_ALBUM_DIR = re.compile(
     r"^\[(?P<y1>\d{4}|)\]\s+(?P<title>.+?)(?:\s+\[(?P<y2>\d{4})\])?(?:\s+\[(?P<cat>[^\]]*)\])?\s*$"
 )
-# Non-reissue folders have no leading original year: "Album [1999] [CAT]"
-NAMED_ALBUM_DIR_NO_ORIG = re.compile(
-    r"^(?P<title>[^\[].*?)\s+\[(?P<y2>\d{4})\](?:\s+\[(?P<cat>[^\]]*)\])?\s*$"
-)
 TRACK_PREFIX = re.compile(r"^(\d{1,3})\s*[\.\-_]\s*")
 # "2-05 Title" / "2.05 Title": disc 2, track 5 (only trusted on multi-disc releases)
 DISC_TRACK_PREFIX = re.compile(r"^(\d{1,2})[-.](\d{1,3})(?=[\s._-])")
@@ -271,11 +267,12 @@ def year4(value: str | int | None) -> str:
 
 
 def reissue_original_year(master_year: str | int | None, release_year: str | int | None) -> str:
-    """The original year to show and tag, or "" when this release is the original.
+    """The original year for the ORIGINALDATE tags, or "" when this release is the original.
 
     A release is a reissue when its master's year is earlier than its own
     year. Same year, no master, or an unknown year on either side: not a
-    reissue, so no original date is written.
+    reissue, so no original-date tag is written. (The folder name always
+    has a leading year; see folder_lead_year.)
     """
     master, release = year4(master_year), year4(release_year)
     if master and release and int(master) < int(release):
@@ -283,21 +280,28 @@ def reissue_original_year(master_year: str | int | None, release_year: str | int
     return ""
 
 
-def album_folder_name(album: str, original_year: str, release_year: str, catno: str | None, discs: int) -> str:
-    """Reissue:  [orig]  Album [2CD] [press] [CATNO]
-    Original:  Album [2CD] [press] [CATNO]
+def folder_lead_year(master_year: str | int | None, release_year: str | int | None) -> str:
+    """Leading year of the album folder, so an artist's albums sort chronologically.
 
-    original_year is the master's year; it is only shown when it is earlier
-    than release_year (see reissue_original_year).
+    The master's year when this is a reissue, otherwise the release's own
+    year (or the master's year when the release year is unknown).
     """
-    orig = reissue_original_year(original_year, release_year)
+    return reissue_original_year(master_year, release_year) or year4(release_year) or year4(master_year)
+
+
+def album_folder_name(album: str, original_year: str, release_year: str, catno: str | None, discs: int) -> str:
+    """[lead year]  Album [2CD] [release year] [CATNO]
+
+    original_year is the master's year. The leading year is always present
+    when any year is known (see folder_lead_year), so non-reissues read
+    "[1984]  My War [1984] [SST023]".
+    """
+    lead = folder_lead_year(original_year, release_year)
     press = release_year or original_year
-    title = format_album_title(album)
-    parts = [f"[{orig}]  {title}" if orig else title]
+    parts = [f"[{lead}]  {format_album_title(album)}"]
     if discs > 1:
         parts.append(f"{discs}CD")
-    if press:
-        parts.append(f"[{press}]")
+    parts.append(f"[{press}]")
     catalog = format_catalog(catno)
     if catalog:
         parts.append(f"[{catalog}]")
@@ -365,15 +369,6 @@ def parse_album_dirname(name: str) -> dict[str, str]:
             info["catno"] = cat
         elif cat and YEAR_RE.fullmatch(cat) and not match.group("y2"):
             info["year"] = cat
-        return info
-
-    match = NAMED_ALBUM_DIR_NO_ORIG.match(name)
-    cat = (match.group("cat") or "").strip() if match else ""
-    if match and " - " not in match.group("title") and not (cat and JUNK_BITS.search(f"[{cat}]")):
-        info["album"] = re.sub(r"\s+\d+CD$", "", match.group("title")).strip()
-        info["year"] = match.group("y2")
-        if cat and not YEAR_RE.fullmatch(cat):
-            info["catno"] = cat
         return info
 
     cleaned = strip_junk(name)
@@ -1920,21 +1915,21 @@ def self_test() -> int:
     assert format_catalog("none") is None
     name = album_folder_name("No Cause for Concern", "1981", "1993", "DOJO CD 167", 1)
     assert name == "[1981]  No Cause for Concern [1993] [DOJOCD167]", name
-    # Not a reissue (master year == release year, or no master): no [orig] prefix.
     name = album_folder_name("Come On Die Young", "1999", "1999", "OLE365-2", 1)
-    assert name == "Come On Die Young [1999] [OLE365-2]", name
+    assert name == "[1999]  Come On Die Young [1999] [OLE365-2]", name
     name = album_folder_name("Mermaid Avenue", "1998", "1998", "7559-62204-1", 2)
-    assert name == "Mermaid Avenue 2CD [1998] [7559-62204-1]", name
-    name = album_folder_name("Mermaid Avenue", "", "1998", "7559-62204-1", 2)
-    assert name == "Mermaid Avenue 2CD [1998] [7559-62204-1]", name
+    assert name == "[1998]  Mermaid Avenue 2CD [1998] [7559-62204-1]", name
+    # Leading year is always present: no master -> release year.
+    name = album_folder_name("My War", "", "1984", "SST 023", 1)
+    assert name == "[1984]  My War [1984] [SST023]", name
+    name = album_folder_name("The First Four Years", "1983", "1990", None, 1)
+    assert name == "[1983]  The First Four Years [1990]", name
+    # Tags: original date only for reissues.
     assert reissue_original_year("1981", "1993") == "1981"
     assert reissue_original_year("1999", "1999") == "" and reissue_original_year("", "1999") == ""
     assert reissue_original_year("2001", "1999") == "" and reissue_original_year("1981", "") == ""
-    parsed = parse_album_dirname("Come On Die Young [1999] [OLE365-2]")
-    assert parsed == {"album": "Come On Die Young", "year": "1999", "catno": "OLE365-2"}, parsed
-    parsed = parse_album_dirname("Mermaid Avenue 2CD [1998]")
-    assert parsed == {"album": "Mermaid Avenue", "year": "1998"}, parsed
-    assert "catno" not in parse_album_dirname("Some Album [2012] [FLAC]")
+    assert folder_lead_year("1984", "1984") == "1984" and folder_lead_year("", "1984") == "1984"
+    assert folder_lead_year("2001", "1999") == "1999" and folder_lead_year("1981", "") == "1981"
     parsed = parse_album_dirname("[1981]  No Cause for Concern [1993] [DOJOCD167]")
     assert parsed["album"] == "No Cause for Concern"
     assert parsed["originalyear"] == "1981"
@@ -2151,9 +2146,9 @@ credentials:
 
 where files go:
   DESTINATION/AlbumArtist/[original year]  Album [press year] [CATNO]/N. Title.ext
-  The [original year] part and the original-date tag are only used for a
-  reissue (Discogs master year earlier than the release year):
-  DESTINATION/AlbumArtist/Album [press year] [CATNO]/N. Title.ext otherwise.
+  The leading year is the master's year for a reissue (master year earlier
+  than the release year), otherwise the release's own year, so albums sort
+  chronologically. The ORIGINALDATE tags are only written for a reissue.
   DESTINATION is --dest, else the Featuring directory when the path is
   under one, else $DEFAULT_MUSIC (default: /run/media/xen_is/Tunes/Music
   when that volume is mounted). Extra files and folders (Scans, Covers,
