@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import time
 import unicodedata
@@ -44,7 +45,10 @@ from mutagen.id3 import (
 )
 from mutagen.mp4 import MP4
 
-DEFAULT_MUSIC = Path(os.getenv("DEFAULT_MUSIC", Path.home() / "Music"))
+_DRIVE_MUSIC = Path("/path/to/Music")
+DEFAULT_MUSIC = Path(
+    os.getenv("DEFAULT_MUSIC") or (_DRIVE_MUSIC if _DRIVE_MUSIC.exists() else Path.home() / "Music")
+)
 
 TOKEN_PATH = Path.home() / ".config" / "discogs-tag" / "token"
 CACHE_DIR = Path.home() / ".cache" / "discogs-tag"
@@ -86,7 +90,9 @@ SIDECAR_EXTS = {
     ".m3u8",
 }
 
-SKIP_DIR_NAMES = {".git", ".trash", ".trashes", "@eadir", "scans", "covers", "artwork", "booklet", "pics"}
+JUNK_DIR_NAMES = {".git", ".trash", ".trashes", "@eadir"}
+ARTWORK_DIR_NAMES = {"scans", "covers", "artwork", "booklet", "pics", "art"}
+SKIP_DIR_NAMES = JUNK_DIR_NAMES | ARTWORK_DIR_NAMES
 
 SWAP_PREFIXES = ("The", "Die", "Le")
 
@@ -138,6 +144,10 @@ def natural_key(name: str) -> list:
 
 def should_skip_dir(path: Path) -> bool:
     return path.name.startswith(".") or path.name.lower() in SKIP_DIR_NAMES
+
+
+def is_junk_dir(path: Path) -> bool:
+    return path.name.startswith(".") or path.name.lower() in JUNK_DIR_NAMES
 
 
 def is_audio(path: Path) -> bool:
@@ -338,6 +348,8 @@ def default_dest(start: Path) -> Path:
     parts = list(resolved.parts)
     if "Featuring" in parts:
         return Path(*parts[: parts.index("Featuring") + 1])
+    if DEFAULT_MUSIC.exists():
+        return DEFAULT_MUSIC.resolve()
     try:
         resolved.relative_to(DEFAULT_MUSIC)
         return DEFAULT_MUSIC
@@ -354,17 +366,54 @@ class AlbumFolder:
     path: Path
     tracks: list[Path]
     sidecars: list[Path] = field(default_factory=list)
+    extra_dirs: list[Path] = field(default_factory=list)
 
 
-def collect_sidecars(folder: Path) -> list[Path]:
-    found: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(folder, followlinks=False):
-        dirnames[:] = [d for d in dirnames if not should_skip_dir(Path(dirpath) / d)]
-        for name in filenames:
-            path = Path(dirpath) / name
-            if is_sidecar(path):
-                found.append(path)
-    return found
+def _dir_holds_track(folder: Path, tracks: list[Path]) -> bool:
+    root = folder.resolve()
+    for track in tracks:
+        resolved = track.resolve()
+        if resolved == root or root in resolved.parents:
+            return True
+    return False
+
+
+def collect_extras(folder: Path, tracks: list[Path]) -> tuple[list[Path], list[Path]]:
+    """Non-audio files and extra folders that should travel with the album.
+
+    Top-level dirs that contain none of the album tracks (Scans, Covers,
+    Artwork, Booklet, …) are moved as directories. Leftover files inside
+    disc folders are kept with their relative path.
+    """
+    track_set = {path.resolve() for path in tracks}
+    extra_files: list[Path] = []
+    extra_dirs: list[Path] = []
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return [], []
+
+    for entry in entries:
+        if entry.is_dir() and is_junk_dir(entry):
+            continue
+        if entry.is_dir():
+            if _dir_holds_track(entry, tracks):
+                for dirpath, dirnames, filenames in os.walk(entry, followlinks=False):
+                    dirnames[:] = [d for d in dirnames if not is_junk_dir(Path(dirpath) / d)]
+                    for name in filenames:
+                        path = Path(dirpath) / name
+                        if path.resolve() in track_set or is_audio(path):
+                            continue
+                        extra_files.append(path)
+            else:
+                extra_dirs.append(entry)
+            continue
+        if entry.is_file() and entry.resolve() not in track_set:
+            extra_files.append(entry)
+
+    extra_files.sort(key=lambda p: natural_key(str(p.relative_to(folder))))
+    extra_dirs.sort(key=lambda p: natural_key(p.name))
+    return extra_files, extra_dirs
 
 
 def collect_albums(root: Path) -> list[AlbumFolder]:
@@ -383,12 +432,14 @@ def collect_albums(root: Path) -> list[AlbumFolder]:
             for name in sorted(disc_dirs, key=natural_key):
                 tracks.extend(audio_in(current / name))
             if tracks:
-                albums.append(AlbumFolder(current, tracks, collect_sidecars(current)))
+                files, dirs = collect_extras(current, tracks)
+                albums.append(AlbumFolder(current, tracks, files, dirs))
             dirnames[:] = [d for d in dirnames if d not in disc_dirs]
             continue
 
         if here:
-            albums.append(AlbumFolder(current, here, collect_sidecars(current)))
+            files, dirs = collect_extras(current, here)
+            albums.append(AlbumFolder(current, here, files, dirs))
             dirnames[:] = []
     albums.sort(key=lambda a: str(a.path).casefold())
     return albums
@@ -756,6 +807,15 @@ def unique_dest(path: Path) -> Path:
     raise RuntimeError(f"cannot find free name for {path}")
 
 
+def _move(src: Path, dest: Path) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() and dest.resolve() != src.resolve():
+        dest = unique_dest(dest)
+    if src.resolve() != dest.resolve():
+        shutil.move(str(src), str(dest))
+    return dest
+
+
 def apply_album(
     album: AlbumFolder,
     dest_root: Path,
@@ -838,23 +898,22 @@ def apply_album(
         if dry_run:
             continue
         write_tags(local, meta)
-        dest_file.parent.mkdir(parents=True, exist_ok=True)
-        if dest_file.exists() and dest_file.resolve() != local.resolve():
-            dest_file = unique_dest(dest_file)
-        if local.resolve() != dest_file.resolve():
-            local.rename(dest_file)
+        _move(local, dest_file)
 
-    for sidecar in album.sidecars:
-        dest_file = target_dir / sidecar.name
-        print(f"  move  {sidecar.name}")
+    for extra_dir in album.extra_dirs:
+        dest_dir = target_dir / extra_dir.name
+        print(f"  move  {extra_dir.name}/")
         if dry_run:
             continue
-        if dest_file.exists() and dest_file.resolve() == sidecar.resolve():
+        _move(extra_dir, dest_dir)
+
+    for sidecar in album.sidecars:
+        rel = sidecar.relative_to(album.path)
+        dest_file = target_dir / rel
+        print(f"  move  {rel}")
+        if dry_run:
             continue
-        dest_file.parent.mkdir(parents=True, exist_ok=True)
-        if dest_file.exists():
-            dest_file = unique_dest(dest_file)
-        sidecar.rename(dest_file)
+        _move(sidecar, dest_file)
 
     if not dry_run:
         _prune_empty(album.path, dest_root)
@@ -1090,13 +1149,59 @@ def self_test() -> int:
         )
         assert already_tagged(bare) == "99"
 
+        album_dir = Path(tmp) / "Artist - Album"
+        scans = album_dir / "Scans"
+        scans.mkdir(parents=True)
+        track = album_dir / "1. Song.flac"
+        track.write_bytes(b"flac")
+        (album_dir / "cover.jpg").write_bytes(b"jpg")
+        (album_dir / "notes.txt").write_bytes(b"nfo")
+        (scans / "front.jpg").write_bytes(b"scan")
+        leftover = album_dir / "CD1"
+        leftover.mkdir()
+        (leftover / "2. Other.flac").write_bytes(b"flac")
+        (leftover / "rip.log").write_bytes(b"log")
+        files, dirs = collect_extras(album_dir, [track, leftover / "2. Other.flac"])
+        assert {p.name for p in dirs} == {"Scans"}
+        names = {str(p.relative_to(album_dir)) for p in files}
+        assert names == {"cover.jpg", "notes.txt", "CD1/rip.log"}
+
+    if DEFAULT_MUSIC.exists():
+        assert default_dest(Path("/tmp/Artist - Album")) == DEFAULT_MUSIC.resolve()
+        featuring = DEFAULT_MUSIC / "Aesop Rock" / "Featuring" / "Some Album"
+        assert default_dest(featuring) == DEFAULT_MUSIC / "Aesop Rock" / "Featuring"
+
     print("self-test ok")
     return 0
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Tag and rename albums from Discogs using this library's folder rules."
+        prog="discogs-tag",
+        description="Tag and rename albums from Discogs using this library's folder rules.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  discogs-tag --save-token
+  discogs-tag --dry-run "/path/to/album"
+  discogs-tag --auto --yes "/path/to/Featuring"
+  discogs-tag --release-id 249504 --dest "$DEFAULT_MUSIC" "/path/to/album"
+
+credentials:
+  Create a personal token at
+  https://www.discogs.com/settings/developers
+  then run --save-token. The token is stored at
+  ~/.config/discogs-tag/token (mode 600).
+  DISCOGS_TOKEN overrides that file.
+  DISCOGS_KEY and DISCOGS_SECRET are the consumer-key alternative.
+
+where files go:
+  DESTINATION/AlbumArtist/[original year]  Album [press year] [CATNO]/N. Title.ext
+  DESTINATION is --dest, else the Featuring directory when the path is
+  under one, else $DEFAULT_MUSIC (default: /path/to/Music
+  when that volume is mounted). Extra files and folders (Scans, Covers,
+  logs, cues, …) move with the album.
+""".strip(),
     )
     parser.add_argument(
         "path",
@@ -1105,15 +1210,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         help="album folder or tree to process",
     )
-    parser.add_argument("--dest", type=Path, help="library root to write into (Artist/Album/...)")
+    parser.add_argument("--dest", type=Path, help="library root to write into (AlbumArtist/Album/...)")
     parser.add_argument("--dry-run", action="store_true", help="search and show plan, write nothing")
     parser.add_argument("--auto", action="store_true", help="apply only high-confidence matches")
     parser.add_argument("-y", "--yes", action="store_true", help="do not ask before writing")
     parser.add_argument("--skip-tagged", action="store_true", help="skip albums that already have a Discogs id")
     parser.add_argument("--release-id", type=int, help="use this Discogs release id (single album)")
-    parser.add_argument("--limit", type=int, default=0, help="process at most N albums")
+    parser.add_argument("--limit", type=int, default=0, help="process at most N albums (0 = all)")
     parser.add_argument("--save-token", action="store_true", help="store a Discogs user token and exit")
-    parser.add_argument("--self-test", action="store_true", help="run built-in naming tests")
+    parser.add_argument("--self-test", action="store_true", help="run built-in naming tests and exit")
     return parser.parse_args(argv)
 
 
