@@ -12,6 +12,7 @@ Get a token (not an OAuth app):
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -185,7 +186,23 @@ def is_artwork_dir(path: Path) -> bool:
 
 
 def should_skip_dir(path: Path) -> bool:
-    return is_junk_dir(path) or is_artwork_dir(path)
+    return is_junk_dir(path) or is_artwork_dir(path) or is_source_checkout(path)
+
+
+def is_source_checkout(path: Path) -> bool:
+    """A git checkout (e.g. a copy of this tool next to the music) holds
+    test samples, not albums; it is never scanned or moved."""
+    return os.path.lexists(path / ".git")
+
+
+def stays_behind(path: Path) -> bool:
+    """Hidden folders that never travel with an album (trash, git data).
+
+    Every other hidden or system folder inside an album (.AppleDouble,
+    @eaDir, …) moves with it, so the old folder can be emptied and removed.
+    """
+    name = path.name.lower()
+    return name in {".git", ".trash", ".trashes"} or name.startswith(".trash-")
 
 
 def is_audio(path: Path) -> bool:
@@ -290,18 +307,25 @@ def folder_lead_year(master_year: str | int | None, release_year: str | int | No
 
 
 def album_folder_name(album: str, original_year: str, release_year: str, catno: str | None, discs: int) -> str:
-    """[lead year]  Album [2CD] [release year] [CATNO]
+    """[LEADYEAR]  Album [2CD] [RELEASEYEAR] [CATNO]
 
-    original_year is the master's year. The leading year is always present
-    when any year is known (see folder_lead_year), so non-reissues read
-    "[1984]  My War [1984] [SST023]".
+    original_year is the master's year.
+    - LEADYEAR: the master's year for a reissue, else the release year
+      (see folder_lead_year), so each artist's albums sort chronologically.
+    - RELEASEYEAR: only for a reissue (master year earlier than release year).
+    - Unknown parts are left out with their brackets and spaces.
+
+    Reissue:      [1979]  Nervous Breakdown [1988] [SSTCD001]
+    Not reissue:  [1984]  My War [SST023]
+    No year:      My War [SST023]
     """
     lead = folder_lead_year(original_year, release_year)
-    press = release_year or original_year
-    parts = [f"[{lead}]  {format_album_title(album)}"]
+    title = format_album_title(album)
+    parts = [f"[{lead}]  {title}" if lead else title]
     if discs > 1:
         parts.append(f"{discs}CD")
-    parts.append(f"[{press}]")
+    if reissue_original_year(original_year, release_year):
+        parts.append(f"[{year4(release_year)}]")
     catalog = format_catalog(catno)
     if catalog:
         parts.append(f"[{catalog}]")
@@ -453,8 +477,9 @@ def collect_extras(folder: Path, tracks: list[Path]) -> tuple[list[Path], list[P
     """Non-audio files and extra folders that should travel with the album.
 
     Top-level dirs that contain none of the album tracks (Scans, Covers,
-    Artwork, Booklet, …) are moved as directories. Leftover files inside
-    disc folders are kept with their relative path.
+    Artwork, Booklet, …, and hidden/system folders such as .AppleDouble)
+    are moved as directories. Leftover files inside disc folders are kept
+    with their relative path. Only trash and .git folders stay behind.
     """
     track_set = {path.resolve() for path in tracks}
     extra_files: list[Path] = []
@@ -465,12 +490,15 @@ def collect_extras(folder: Path, tracks: list[Path]) -> tuple[list[Path], list[P
         return [], []
 
     for entry in entries:
-        if entry.is_dir() and is_junk_dir(entry):
+        if entry.is_dir() and stays_behind(entry):
+            continue
+        if entry.is_dir() and is_junk_dir(entry) and not entry.is_symlink():
+            extra_dirs.append(entry)
             continue
         if entry.is_dir():
             if _dir_holds_track(entry, tracks):
                 for dirpath, dirnames, filenames in os.walk(entry, followlinks=False):
-                    dirnames[:] = [d for d in dirnames if not is_junk_dir(Path(dirpath) / d)]
+                    dirnames[:] = [d for d in dirnames if not stays_behind(Path(dirpath) / d)]
                     for name in filenames:
                         path = Path(dirpath) / name
                         if path.resolve() in track_set or is_audio(path):
@@ -1493,12 +1521,12 @@ class PlannedFile:
 
 
 def unique_dest(path: Path) -> Path:
-    if not path.exists():
+    if not os.path.lexists(path):
         return path
     stem, suffix = path.stem, path.suffix
     for i in range(2, 50):
         candidate = path.with_name(f"{stem} ({i}){suffix}")
-        if not candidate.exists():
+        if not os.path.lexists(candidate):
             return candidate
     raise RuntimeError(f"cannot find free name for {path}")
 
@@ -1510,8 +1538,74 @@ def _same_file(a: Path, b: Path) -> bool:
         return False
 
 
+COPY_CHUNK = 4 * 1024 * 1024
+
+
+def _copy_verified(src: Path, dest: Path) -> None:
+    """Copy one file to dest (which must not exist), verifying every byte.
+
+    The data goes to a hidden partial file next to dest, is flushed to disk,
+    and is read back: size and SHA-256 must match the source. Only then is
+    it given its real name. On any problem the partial file is removed and
+    the source is untouched.
+    """
+    partial = dest.with_name(f".{dest.name}.discogs-tag-partial-{os.getpid()}")
+    src_hash = hashlib.sha256()
+    try:
+        with open(src, "rb") as fin, open(partial, "xb") as fout:
+            while chunk := fin.read(COPY_CHUNK):
+                src_hash.update(chunk)
+                fout.write(chunk)
+            fout.flush()
+            os.fsync(fout.fileno())
+        try:
+            shutil.copystat(src, partial)
+        except OSError:
+            pass  # timestamps/permissions are nice to have; the data is what matters
+        dest_hash = hashlib.sha256()
+        with open(partial, "rb") as fcheck:
+            while chunk := fcheck.read(COPY_CHUNK):
+                dest_hash.update(chunk)
+        if os.path.getsize(partial) != os.path.getsize(src) or dest_hash.digest() != src_hash.digest():
+            raise OSError(errno.EIO, f"copy verification failed for {src} -> {dest}")
+        if os.path.lexists(dest):
+            raise FileExistsError(errno.EEXIST, f"{dest} appeared during the copy")
+        os.rename(partial, dest)
+    except BaseException:
+        try:
+            os.unlink(partial)
+        except OSError:
+            pass
+        raise
+
+
+def _move_across_devices(src: Path, dest: Path) -> None:
+    """True move between drives: verified copy first, then delete the source.
+
+    Directories are moved file by file the same way; their emptied source
+    folders are then removed with rmdir (only when truly empty).
+    """
+    if src.is_symlink():
+        os.symlink(os.readlink(src), dest)
+        os.unlink(src)
+        return
+    if not src.is_dir():
+        _copy_verified(src, dest)
+        os.unlink(src)
+        return
+    dest.mkdir()
+    shutil.copystat(src, dest, follow_symlinks=False)
+    for entry in sorted(src.iterdir()):
+        _move_across_devices(entry, dest / entry.name)
+    os.rmdir(src)  # fails (and stops) if anything is still inside
+
+
 def _move(src: Path, dest: Path) -> Path:
-    """Move src to dest without ever overwriting a different file."""
+    """Move src to dest without ever overwriting a different file.
+
+    Same drive: a rename. Different drive: copy, verify size and SHA-256,
+    then delete the source, so a move never leaves a second copy behind.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists() or dest.is_symlink():
         if _same_file(src, dest):
@@ -1519,7 +1613,12 @@ def _move(src: Path, dest: Path) -> Path:
                 os.rename(src, dest)  # case-only rename on a case-insensitive drive
             return dest
         dest = unique_dest(dest)
-    shutil.move(str(src), str(dest))
+    try:
+        os.rename(src, dest)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        _move_across_devices(src, dest)
     return dest
 
 
@@ -1575,13 +1674,16 @@ def apply_album(
     original_year: str,
     dry_run: bool,
     clear_other: bool = False,
+    scan_root: Path | None = None,
 ) -> list[tuple[Path, Path]]:
     """Tag the album's files, then move them into place.
 
     Order: plan everything, write tags to every file in place (nothing is
     moved if any file fails), then move tracks, extra folders and sidecars.
     original_year is the master's year ("" when unknown); it is only used
-    for a reissue. Returns the (source, destination) list of moves made.
+    for a reissue. Afterwards the old folder, and parents that became empty,
+    are removed (see prune_limit). Returns the (source, destination)
+    list of moves made.
     """
     album_artist = release_artists(release)
     folder_artist = format_artist(album_artist)
@@ -1710,7 +1812,10 @@ def apply_album(
     # Phase 3: playlists and cleanup.
     if old_playlists:
         regenerate_playlist(target_dir, old_playlists)
-    _prune_empty(album.path, dest_root)
+    if album.path.resolve() != target_dir.resolve():
+        limit = prune_limit(album.path, dest_root, scan_root)
+        for gone in _prune_empty(album.path, limit, protect=[dest_root, target_dir]):
+            print(f"  removed empty folder  {gone}")
     return done
 
 
@@ -1735,24 +1840,409 @@ def regenerate_playlist(target_dir: Path, old_playlists: list[Path]) -> None:
         print(f"  warning: could not write playlist {dest}: {exc}")
 
 
-def _prune_empty(start: Path, stop: Path) -> None:
+def prune_limit(album_path: Path, dest_root: Path, scan_root: Path | None) -> Path:
+    """Highest folder that empty-folder cleanup may remove after a move.
+
+    - The folder passed on the command line (scan_root) when the album was
+      found under it: that folder itself goes too if it ends up empty.
+    - Otherwise, inside the library: the artist-level folder (never the
+      library root).
+    - Otherwise only the album folder itself.
+    The library root and its parents, the album's new folder and its
+    parents, the home folder and mount points are never removed (see
+    _prune_empty).
+    """
+    album = album_path.resolve()
+    if scan_root is not None:
+        scan = scan_root.resolve()
+        if album == scan or scan in album.parents:
+            return scan
+    root = dest_root.resolve()
+    if root in album.parents:
+        return root / album.relative_to(root).parts[0]
+    return album
+
+
+def _remove_empty_tree(folder: Path, protected: set[Path]) -> list[Path]:
+    """rmdir every truly empty folder inside folder, deepest first."""
+    removed: list[Path] = []
+    for dirpath, _dirnames, filenames in os.walk(folder, topdown=False, followlinks=False):
+        current = Path(dirpath)
+        if current == folder or filenames:
+            continue
+        if current.resolve() in protected or current.is_symlink() or os.path.ismount(current):
+            continue
+        try:
+            os.rmdir(current)
+            removed.append(current)
+        except OSError:
+            pass
+    return removed
+
+
+def _prune_empty(start: Path, limit: Path, protect: list[Path] = ()) -> list[Path]:
+    """Remove folders left empty under start, then start and its parents.
+
+    Uses os.rmdir only, which refuses to remove a folder holding anything at
+    all (hidden files included). Goes no higher than limit (limit itself may
+    go). Never removes a protected folder or any parent of one, the home
+    folder, or a mount point. Returns the removed folders.
+    """
+    limit = limit.resolve()
+    protected: set[Path] = set()
+    for path in [*protect, Path.home()]:
+        try:
+            path = path.resolve()
+        except OSError:
+            continue
+        protected |= {path, *path.parents}
+    removed: list[Path] = []
+    if start.is_dir() and not start.is_symlink():
+        removed += _remove_empty_tree(start, protected)
     current = start
-    stop = stop.resolve()
     while True:
         try:
-            current.relative_to(stop)
-        except ValueError:
-            return
-        if current.resolve() == stop:
-            return
-        try:
-            next(current.iterdir())
-            return
-        except StopIteration:
-            current.rmdir()
-            current = current.parent
+            resolved = current.resolve()
         except OSError:
-            return
+            return removed
+        if resolved != limit and limit not in resolved.parents:
+            return removed
+        if resolved in protected or current.is_symlink() or not current.is_dir() or os.path.ismount(current):
+            return removed
+        try:
+            os.rmdir(current)
+        except OSError:
+            return removed  # not empty: stop here
+        removed.append(current)
+        if resolved == limit:
+            return removed
+        current = current.parent
+
+
+# ---------------------------------------------------------------------------
+# Library cleanup: --normalize-folders / --undo-journal
+#
+# Renames album folders made by older versions ("[1984]  My War [1984]
+# [SST023]") to the current rule ("[1984]  My War [SST023]") without
+# calling Discogs and without touching any file's tags. Preview by default;
+# --apply renames and records every rename in a JSON-lines journal that
+# --undo-journal can reverse.
+# ---------------------------------------------------------------------------
+
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "discogs-tag"
+
+# Exactly the shape this tool writes: "[Y1]  Title[ NCD] [Y2][ [CAT]]",
+# two spaces after the leading bracket and single spaces elsewhere.
+OLD_FOLDER = re.compile(
+    r"^\[(?P<y1>\d{4}|)\]  (?P<title>[^\[\]]+?)(?P<discs> \d+CD)?"
+    r"(?P<y2seg> \[(?P<y2>\d{4}|)\])(?P<cat> \[[^\[\]]+\])?$"
+)
+# Already in the current shape: "[Y]  Title[ NCD][ [CAT]]".
+NEW_FOLDER = re.compile(r"^\[\d{4}\]  [^\[\]]+?(?: \d+CD)?(?: \[[^\[\]]+\])?$")
+
+
+@dataclass
+class FolderPlan:
+    """Result of plan_folder_rename: action is "rename", "ok" or "skip"."""
+    action: str
+    new_name: str = ""
+    reason: str = ""
+
+
+def plan_folder_rename(name: str, tag_years: tuple[str, str] | None = None) -> FolderPlan:
+    """Decide the new name of one album folder from its name alone.
+
+    tag_years is (DATE year, ORIGINALDATE/ORIGINALYEAR year) read from the
+    album's files, or None when not read. Pure function: no file access.
+    """
+    match = OLD_FOLDER.match(name)
+    if not match:
+        if NEW_FOLDER.match(name):
+            return FolderPlan("ok")
+        return FolderPlan("skip", reason="not in the '[YEAR]  Album [YEAR] [CATNO]' shape")
+    y1, y2 = match.group("y1"), match.group("y2")
+    cat = match.group("cat") or ""
+    if YEAR_RE.fullmatch(cat.strip(" []")):
+        return FolderPlan("skip", reason="catalog number looks like a year (ambiguous)")
+    if y1 and y2 and y1 < y2:
+        return FolderPlan("ok")  # a reissue: both years stay
+    if y1 and y2 and y1 > y2:
+        return FolderPlan("skip", reason=f"leading year {y1} is later than release year {y2}")
+    if bool(y1) != bool(y2):
+        return FolderPlan("skip", reason="only one of the two years is filled in")
+    if y1 and tag_years:
+        date, original = (year4(v) for v in tag_years)
+        if date and original and original < date:
+            return FolderPlan(
+                "skip",
+                reason=f"tags say reissue (original {original}, release {date}) but folder years are equal",
+            )
+    if y1:
+        new = name[: match.start("y2seg")] + name[match.end("y2seg"):]
+    else:
+        # "[]  Album []" from an old version with no year at all.
+        new = match.group("title") + (match.group("discs") or "") + cat
+    if not new.strip() or new != sanitize_filename(new):
+        return FolderPlan("skip", reason="new name would not be a clean folder name")
+    return FolderPlan("rename", new_name=new)
+
+
+DATE_KEYS = ("date", "year", "tdrc", "tyer", "©day", "wm/year")
+ORIGINAL_KEYS = (
+    "originaldate", "originalyear", "tdor", "tory",
+    "txxx:originaldate", "txxx:originalyear",
+    "----:com.apple.itunes:originaldate", "----:com.apple.itunes:originalyear",
+    "wm/originalreleasetime", "wm/originalreleaseyear",
+)
+
+
+def _tag_text(value) -> str:
+    if isinstance(value, list):
+        value = value[0] if value else ""
+    if hasattr(value, "text"):  # ID3 frame
+        value = value.text[0] if value.text else ""
+    if isinstance(value, (bytes, bytearray)):
+        value = bytes(value).decode("utf-8", "replace")
+    return str(value)
+
+
+def read_tag_years(path: Path) -> tuple[str, str]:
+    """(DATE year, original year) from one file, any format; "" when absent."""
+    _audio, tags = _read_tag_file(path)
+    if not tags:
+        return "", ""
+    values: dict[str, str] = {}
+    try:
+        for key in tags.keys():
+            values.setdefault(str(key).casefold(), _tag_text(tags[key]))
+    except Exception:  # noqa: BLE001 - odd tag types: treat as unknown
+        return "", ""
+
+    def first(keys: tuple[str, ...]) -> str:
+        for key in keys:
+            year = year4(values.get(key, ""))
+            if year:
+                return year
+        return ""
+
+    return first(DATE_KEYS), first(ORIGINAL_KEYS)
+
+
+def album_tag_years(album: AlbumFolder) -> tuple[str, str] | None:
+    """Years from the album's first track that has any, or None."""
+    for track in album.tracks:
+        date, original = read_tag_years(track)
+        if date or original:
+            return date, original
+    return None
+
+
+@dataclass
+class FolderRename:
+    old: Path
+    new: Path
+    playlists: list[tuple[Path, Path]] = field(default_factory=list)
+
+
+def plan_library_normalization(root: Path) -> tuple[list[FolderRename], list[tuple[Path, str]], int]:
+    """(renames, skipped with reasons, number already fine) for a library."""
+    renames: list[FolderRename] = []
+    skipped: list[tuple[Path, str]] = []
+    fine = 0
+    for album in collect_albums(root):
+        name = album.path.name
+        plan = plan_folder_rename(name)
+        if plan.action == "rename" and OLD_FOLDER.match(name).group("y1"):
+            plan = plan_folder_rename(name, album_tag_years(album))
+        if plan.action == "ok":
+            fine += 1
+            continue
+        if plan.action == "skip":
+            skipped.append((album.path, plan.reason))
+            continue
+        new_dir = album.path.with_name(plan.new_name)
+        playlists = []
+        for playlist in mm_common.playlists_in(album.path):
+            if playlist.stem == name and mm_common.is_generated_playlist(playlist):
+                playlists.append((new_dir / playlist.name, new_dir / f"{plan.new_name}{playlist.suffix}"))
+        renames.append(FolderRename(album.path, new_dir, playlists))
+
+    # Never merge or overwrite: an existing target, or two folders that
+    # would get the same name, are conflicts and are left alone. (The
+    # existence check follows the drive's own case rules.)
+    targets: dict[str, int] = {}
+    for item in renames:
+        targets[str(item.new)] = targets.get(str(item.new), 0) + 1
+    ok: list[FolderRename] = []
+    for item in renames:
+        if os.path.lexists(item.new):
+            skipped.append((item.old, f"conflict: {item.new.name!r} already exists"))
+        elif targets[str(item.new)] > 1:
+            skipped.append((item.old, f"conflict: another folder would also become {item.new.name!r}"))
+        else:
+            ok.append(item)
+    return ok, skipped, fine
+
+
+class Journal:
+    """Append-only JSON-lines record of renames, flushed and fsynced per line."""
+
+    def __init__(self, kind: str, directory: Path | None = None):
+        directory = directory or STATE_DIR / "journal"
+        directory.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        for n in range(1000):
+            suffix = f"-{n}" if n else ""
+            path = directory / f"{kind}-{stamp}{suffix}.jsonl"
+            try:
+                self._fh = open(path, "x", encoding="utf-8")  # noqa: SIM115
+            except FileExistsError:
+                continue
+            self.path = path
+            break
+        else:
+            raise OSError(f"cannot create a journal in {directory}")
+
+    def write(self, **entry) -> None:
+        entry = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **entry}
+        self._fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        self._fh.flush()
+        os.fsync(self._fh.fileno())
+
+    def close(self) -> None:
+        self._fh.close()
+
+
+def _rename_logged(journal: Journal, kind: str, old: Path, new: Path) -> None:
+    if os.path.lexists(new):
+        raise FileExistsError(f"{new} already exists")
+    os.rename(old, new)
+    st = os.lstat(new)
+    journal.write(action="rename", kind=kind, old=str(old), new=str(new), dev=st.st_dev, ino=st.st_ino)
+
+
+def normalize_folders(root: Path, apply: bool, journal_dir: Path | None = None) -> int:
+    root = root.resolve()
+    if not root.is_dir():
+        print(f"not a folder: {root}", file=sys.stderr)
+        return 2
+    renames, skipped, fine = plan_library_normalization(root)
+    mode = "APPLY" if apply else "PREVIEW (nothing is renamed; add --apply to rename)"
+    print(f"normalize album folders under {root}\n{mode}\n")
+    for item in renames:
+        print(f"  {item.old}\n    -> {item.new.name}")
+        for old_pl, new_pl in item.playlists:
+            print(f"       playlist {old_pl.name} -> {new_pl.name}")
+    if skipped:
+        print("\nskipped (left as they are):")
+        for path, reason in skipped:
+            print(f"  {path}\n    {reason}")
+    conflicts = sum(1 for _, reason in skipped if reason.startswith("conflict"))
+    print(
+        f"\n{len(renames)} to rename, {fine} already fine, "
+        f"{len(skipped) - conflicts} skipped, {conflicts} conflicts"
+    )
+    if not apply or not renames:
+        return 0
+
+    journal = Journal("normalize-folders", journal_dir)
+    journal.write(action="start", command="normalize-folders", root=str(root))
+    done = failed = 0
+    try:
+        for item in renames:
+            try:
+                _rename_logged(journal, "folder", item.old, item.new)
+            except OSError as exc:
+                failed += 1
+                print(f"  FAILED {item.old}: {exc}")
+                continue
+            done += 1
+            for old_pl, new_pl in item.playlists:
+                try:
+                    _rename_logged(journal, "playlist", old_pl, new_pl)
+                except OSError as exc:
+                    print(f"  warning: playlist not renamed: {old_pl}: {exc}")
+    finally:
+        journal.close()
+    print(f"\nrenamed {done} folders, {failed} failed")
+    print(f"journal: {journal.path}")
+    print(f"undo:    discogs-tag --undo-journal '{journal.path}' --apply")
+    return 1 if failed else 0
+
+
+def undo_journal(journal_path: Path, apply: bool, journal_dir: Path | None = None) -> int:
+    """Reverse the renames in a journal, newest first.
+
+    A rename is only reversed when the renamed item is still where the
+    journal left it (same device and inode) and nothing has taken its old
+    place. Anything else changed since and is skipped and reported.
+    """
+    entries = []
+    with open(journal_path, encoding="utf-8") as fh:
+        for n, line in enumerate(fh, 1):
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                print(f"  warning: line {n} of the journal is not valid JSON; ignored")
+                continue
+            if entry.get("action") == "rename":
+                entries.append(entry)
+    mode = "APPLY" if apply else "PREVIEW (nothing is renamed; add --apply to undo)"
+    print(f"undo {journal_path}\n{mode}\n")
+
+    def blocker(entry: dict, current: Path, original: Path) -> str:
+        try:
+            st = os.lstat(current)
+        except OSError:
+            return "no longer exists"
+        if (st.st_dev, st.st_ino) != (entry.get("dev"), entry.get("ino")):
+            return "is not the item that was renamed (changed since)"
+        if os.path.lexists(original):
+            return f"{original.name!r} exists again"
+        return ""
+
+    plan = [(e, Path(e["new"]), Path(e["old"])) for e in reversed(entries)]
+    skipped: list[tuple[Path, str]] = []
+    if not apply:
+        # Playlists are renamed inside their (still renamed) folder and are
+        # undone before it, so every step can be checked as things are now.
+        ready = 0
+        for entry, current, original in plan:
+            reason = blocker(entry, current, original)
+            if reason:
+                skipped.append((current, reason))
+                continue
+            ready += 1
+            print(f"  {current}\n    -> {original.name}")
+        for path, reason in skipped:
+            print(f"  would skip {path}: {reason}")
+        print(f"\n{ready} renames would be reversed, {len(skipped)} skipped")
+        return 0
+
+    journal = Journal("undo", journal_dir)
+    journal.write(action="start", command="undo-journal", journal=str(journal_path))
+    done = 0
+    try:
+        for entry, current, original in plan:
+            reason = blocker(entry, current, original)
+            if not reason:
+                try:
+                    _rename_logged(journal, entry.get("kind", "folder"), current, original)
+                    print(f"  {current}\n    -> {original.name}")
+                    done += 1
+                    continue
+                except OSError as exc:
+                    reason = str(exc)
+            skipped.append((current, reason))
+    finally:
+        journal.close()
+    for path, reason in skipped:
+        print(f"  skipped {path}: {reason}")
+    print(f"\nreversed {done} renames, {len(skipped)} skipped")
+    print(f"journal of this undo: {journal.path}")
+    return 1 if skipped else 0
 
 
 # ---------------------------------------------------------------------------
@@ -1843,6 +2333,7 @@ def process_album(
     skip_tagged: bool,
     release_id: int | None,
     clear_other: bool = False,
+    scan_root: Path | None = None,
 ) -> str:
     """Returns "applied", "skipped", or "skipped-tagged" (not counted by --limit)."""
     if skip_tagged:
@@ -1899,7 +2390,10 @@ def process_album(
         if ans in {"n", "no"}:
             return "skipped"
 
-    apply_album(album, dest_root, release, dtracks, original_year, dry_run=dry_run, clear_other=clear_other)
+    apply_album(
+        album, dest_root, release, dtracks, original_year,
+        dry_run=dry_run, clear_other=clear_other, scan_root=scan_root,
+    )
     return "applied"
 
 
@@ -1915,15 +2409,31 @@ def self_test() -> int:
     assert format_catalog("none") is None
     name = album_folder_name("No Cause for Concern", "1981", "1993", "DOJO CD 167", 1)
     assert name == "[1981]  No Cause for Concern [1993] [DOJOCD167]", name
-    name = album_folder_name("Come On Die Young", "1999", "1999", "OLE365-2", 1)
-    assert name == "[1999]  Come On Die Young [1999] [OLE365-2]", name
-    name = album_folder_name("Mermaid Avenue", "1998", "1998", "7559-62204-1", 2)
-    assert name == "[1998]  Mermaid Avenue 2CD [1998] [7559-62204-1]", name
-    # Leading year is always present: no master -> release year.
-    name = album_folder_name("My War", "", "1984", "SST 023", 1)
-    assert name == "[1984]  My War [1984] [SST023]", name
-    name = album_folder_name("The First Four Years", "1983", "1990", None, 1)
-    assert name == "[1983]  The First Four Years [1990]", name
+    # Release-year bracket only for reissues; unknown parts left out entirely.
+    for args, want in (
+        (("Come On Die Young", "1999", "1999", "OLE365-2", 1), "[1999]  Come On Die Young [OLE365-2]"),
+        (("Mermaid Avenue", "1998", "1998", "7559-62204-1", 2), "[1998]  Mermaid Avenue 2CD [7559-62204-1]"),
+        (("Mermaid Avenue", "1990", "1998", "7559-62204-1", 2), "[1990]  Mermaid Avenue 2CD [1998] [7559-62204-1]"),
+        (("My War", "", "1984", "SST 023", 1), "[1984]  My War [SST023]"),
+        (("Nervous Breakdown", "1979", "1988", "SST CD 001", 1), "[1979]  Nervous Breakdown [1988] [SSTCD001]"),
+        (("The First Four Years", "1983", "1990", None, 1), "[1983]  The First Four Years [1990]"),
+        (("What The…", "2013", "2013", "", 1), "[2013]  What The…"),
+        (("My War", "", "", "SST 023", 1), "My War [SST023]"),
+        (("My War", "", "", None, 1), "My War"),
+    ):
+        assert album_folder_name(*args) == want, (args, album_folder_name(*args))
+    # Library cleanup (--normalize-folders): pure planning on names.
+    for name, want in (
+        ("[1984]  My War [1984] [SST023]", "[1984]  My War [SST023]"),
+        ("[2013]  What The… [2013]", "[2013]  What The…"),
+        ("[1998]  Mermaid Avenue 2CD [1998] [7559-62204-1]", "[1998]  Mermaid Avenue 2CD [7559-62204-1]"),
+    ):
+        plan = plan_folder_rename(name)
+        assert (plan.action, plan.new_name) == ("rename", want), (name, plan)
+    assert plan_folder_rename("[1979]  Nervous Breakdown [1988] [SSTCD001]").action == "ok"
+    assert plan_folder_rename("[1984]  My War [SST023]").action == "ok"
+    assert plan_folder_rename("[1991]  Black Sabbath [TECP-23892] [1970]").action == "skip"
+    assert plan_folder_rename("[1985]  X [1985] [C1]", ("2016", "1985")).action == "skip"
     # Tags: original date only for reissues.
     assert reissue_original_year("1981", "1993") == "1981"
     assert reissue_original_year("1999", "1999") == "" and reissue_original_year("", "1999") == ""
@@ -2123,6 +2633,26 @@ def _self_test_fixes() -> None:
         save_token("abc", token)
         assert stat.S_IMODE(token.stat().st_mode) == 0o600 and token.read_text() == "abc\n"
 
+        # Empty-folder cleanup: only truly empty folders, never past the limit.
+        arg = root / "bf-test" / "Black Flag"
+        (arg / "Album" / "CD1").mkdir(parents=True)
+        (arg / "Kept").mkdir()
+        (arg / "Kept" / ".hidden").write_text("x")
+        _prune_empty(arg / "Album", arg)
+        assert not (arg / "Album").exists() and (arg / "Kept" / ".hidden").exists()
+        (arg / "Kept" / ".hidden").unlink()
+        _prune_empty(arg / "Kept", arg)
+        assert not arg.exists() and (root / "bf-test").is_dir()
+
+        # Cross-drive move: verified copy, then the source is deleted.
+        src = root / "xdev" / "a.flac"
+        src.parent.mkdir()
+        src.write_bytes(b"audio" * 1000)
+        dest = root / "xdev-out" / "a.flac"
+        dest.parent.mkdir()
+        _move_across_devices(src, dest)
+        assert not src.exists() and dest.read_bytes() == b"audio" * 1000
+
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -2135,6 +2665,9 @@ examples:
   discogs-tag --dry-run "/path/to/album"
   discogs-tag --auto --yes "/path/to/Featuring"
   discogs-tag --release-id 249504 --dest "$DEFAULT_MUSIC" "/path/to/album"
+  discogs-tag --normalize-folders "/path/to/Music"           (preview)
+  discogs-tag --normalize-folders --apply "/path/to/Music"
+  discogs-tag --undo-journal ~/.local/state/discogs-tag/journal/FILE.jsonl --apply
 
 credentials:
   Create a personal token at
@@ -2145,10 +2678,18 @@ credentials:
   DISCOGS_KEY and DISCOGS_SECRET are the consumer-key alternative.
 
 where files go:
-  DESTINATION/AlbumArtist/[original year]  Album [press year] [CATNO]/N. Title.ext
-  The leading year is the master's year for a reissue (master year earlier
-  than the release year), otherwise the release's own year, so albums sort
-  chronologically. The ORIGINALDATE tags are only written for a reissue.
+  DESTINATION/AlbumArtist/[LEADYEAR]  Album [RELEASEYEAR] [CATNO]/N. Title.ext
+  LEADYEAR is the master's year for a reissue (master year earlier than
+  the release year), otherwise the release's own year, so albums sort
+  chronologically. [RELEASEYEAR] and the ORIGINALDATE tags only appear for
+  a reissue. Unknown parts are left out with their brackets:
+    [1984]  My War [SST023]                    not a reissue
+    [1979]  Nervous Breakdown [1988] [SSTCD001] reissue
+    [2013]  What The…                          no catalog number
+  After a move, the old album folder and every parent that became empty
+  are removed, up to and including the folder passed on the command line
+  (never the library root, never a folder still holding any file).
+  Moves to another drive copy, verify (size + SHA-256), then delete.
   DESTINATION is --dest, else the Featuring directory when the path is
   under one, else $DEFAULT_MUSIC (default: /run/media/xen_is/Tunes/Music
   when that volume is mounted). Extra files and folders (Scans, Covers,
@@ -2161,6 +2702,19 @@ safety:
   tags are kept unless --clear-other-tags; ReplayGain, AccurateRip,
   encoder info, art, lyrics and ISRC are always kept. One album failing
   does not stop the run.
+
+library cleanup (no Discogs, no tag changes):
+  --normalize-folders ROOT lists every album folder under ROOT whose name
+  follows an older rule ("[1984]  My War [1984] [SST023]") and the new
+  name ("[1984]  My War [SST023]"), plus everything skipped and why and
+  every conflict. Nothing changes without --apply. Equal years are a
+  non-reissue unless the album's tags have ORIGINALDATE/ORIGINALYEAR
+  earlier than DATE (then the folder is skipped). Existing targets are
+  never overwritten or merged. A generated album playlist named after the
+  folder is renamed with it. Every rename is recorded in a JSON-lines
+  journal in ~/.local/state/discogs-tag/journal/ ($XDG_STATE_HOME);
+  --undo-journal FILE --apply reverses it newest first, skipping anything
+  that changed since. Without --apply, --undo-journal only previews.
 """.strip(),
     )
     parser.add_argument(
@@ -2190,6 +2744,22 @@ safety:
     )
     parser.add_argument("--save-token", action="store_true", help="store a Discogs user token and exit")
     parser.add_argument("--self-test", action="store_true", help="run built-in naming tests and exit")
+    parser.add_argument(
+        "--normalize-folders",
+        action="store_true",
+        help="rename album folders under PATH to the current naming rule (preview unless --apply)",
+    )
+    parser.add_argument(
+        "--undo-journal",
+        type=Path,
+        metavar="FILE",
+        help="reverse the renames recorded in a --normalize-folders journal (preview unless --apply)",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="really rename for --normalize-folders / --undo-journal (default is a preview)",
+    )
     return parser.parse_args(argv)
 
 
@@ -2207,8 +2777,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"saved {TOKEN_PATH}")
         return 0
 
+    if args.undo_journal is not None:
+        apply = args.apply and not args.dry_run
+        return undo_journal(args.undo_journal.expanduser(), apply=apply)
+
     if args.path is None:
         print("error: pass an album folder or tree", file=sys.stderr)
+        return 2
+
+    if args.normalize_folders:
+        apply = args.apply and not args.dry_run
+        return normalize_folders(args.path.expanduser(), apply=apply)
+    if args.apply:
+        print("error: --apply only goes with --normalize-folders or --undo-journal", file=sys.stderr)
         return 2
 
     root = args.path.expanduser()
@@ -2260,6 +2841,7 @@ def main(argv: list[str] | None = None) -> int:
                     skip_tagged=args.skip_tagged,
                     release_id=args.release_id,
                     clear_other=args.clear_other_tags,
+                    scan_root=root,
                 )
             except KeyboardInterrupt:
                 raise
