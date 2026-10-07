@@ -23,7 +23,7 @@ def run_apply(dt, album_dir, dest_root, rel, orig="1985", **kw):
     return dt.apply_album(album, dest_root, rel, dtracks, orig, dry_run=kw.pop("dry_run", False), **kw)
 
 
-VINYL_DIR = "Testers, The/Side Story [1985] [WAX001]"  # master year == release year: not a reissue
+VINYL_DIR = "Testers, The/[1985]  Side Story [1985] [WAX001]"  # not a reissue: leading year = release year
 
 
 def test_vinyl_album_renamed_sequentially(dt, tmp_path):
@@ -63,8 +63,7 @@ def test_original_release_gets_no_original_date(dt, tmp_path, orig):
 
 def test_stale_original_date_from_earlier_run_removed(dt, tmp_path):
     out = tmp_path / "lib"
-    folder = make_album(out / "Testers, The" / "[1985]  Side Story [1985] [WAX001]",  # old-style name
-                        [f"{n}. t.flac" for n in range(1, 11)])
+    folder = make_album(out / VINYL_DIR, [f"{n}. t.flac" for n in range(1, 11)])
     for path in folder.glob("*.flac"):
         audio = MutagenFile(path)
         audio.tags["DISCOGS_RELEASE_ID"] = ["1000001"]  # tagged by an earlier run
@@ -74,7 +73,39 @@ def test_stale_original_date_from_earlier_run_removed(dt, tmp_path):
     run_apply(dt, folder, out, release("vinyl_lp"), orig="1985")
     tags = MutagenFile(out / VINYL_DIR / "1. Opening.flac").tags
     assert "ORIGINALDATE" not in tags and "ORIGINALYEAR" not in tags
-    assert not folder.exists()  # renamed to the non-reissue name, old folder pruned
+    assert folder == out / VINYL_DIR and folder.is_dir()  # folder name unchanged (re-tagged in place)
+
+
+def test_non_reissue_folder_keeps_leading_year_my_war(dt, tmp_path):
+    rel = {
+        "id": 2000023, "master_id": 3000023, "title": "My War", "year": 1984, "released": "1984-03-00",
+        "artists": [{"name": "Black Flag"}], "labels": [{"name": "SST Records", "catno": "SST 023"}],
+        "formats": [{"name": "Vinyl", "qty": "1"}], "genres": ["Rock"], "styles": ["Hardcore"],
+        "tracklist": [{"position": "A1", "type_": "track", "title": "My War"},
+                      {"position": "B1", "type_": "track", "title": "Nothing Left Inside"}],
+    }
+    src = make_album(tmp_path / "in" / "Black Flag - My War", ["01.flac", "02.flac"])
+    out = tmp_path / "lib"
+    run_apply(dt, src, out, rel, orig="1984")  # master year == release year
+    target = out / "Black Flag" / "[1984]  My War [1984] [SST023]"
+    assert sorted(p.name for p in target.iterdir()) == ["1. My War.flac", "2. Nothing Left Inside.flac"]
+    tags = MutagenFile(target / "1. My War.flac").tags
+    assert "ORIGINALDATE" not in tags and "ORIGINALYEAR" not in tags  # tags: not a reissue
+    assert tags["DATE"] == ["1984-03"]
+
+
+@pytest.mark.parametrize(
+    "title, master, release_year, catno, expected",
+    [
+        ("Nervous Breakdown", "1979", "1988", "SST CD 001", "[1979]  Nervous Breakdown [1988] [SSTCD001]"),
+        ("My War", "1984", "1984", "SST 023", "[1984]  My War [1984] [SST023]"),
+        ("Who's Got the 10½?", "1986", "1986", "SST CD 060", "[1986]  Who's Got the 10½_ [1986] [SSTCD060]"),
+        ("What The…", "", "2013", "SST 391", "[2013]  What The… [2013] [SST391]"),
+        ("The First Four Years", "1983", "1990", "", "[1983]  The First Four Years [1990]"),
+    ],
+)
+def test_folder_names_match_existing_library(dt, title, master, release_year, catno, expected):
+    assert dt.album_folder_name(title, master, release_year, catno, 1) == expected
 
 
 def test_original_date_from_other_tagger_kept_when_not_reissue(dt, sample, meta):
@@ -122,7 +153,7 @@ def test_index_subtracks_become_files(dt, tmp_path):
     src = make_album(tmp_path / "in" / "Orchestra - Works", [f"{n:02d}.flac" for n in range(1, 6)])
     out = tmp_path / "lib"
     run_apply(dt, src, out, release("index_tracks"), orig="")
-    target = out / "Orchestra" / "Works [2001] [CL-9]"
+    target = out / "Orchestra" / "[2001]  Works [2001] [CL-9]"  # no master year: release year leads
     assert sorted(p.name for p in target.iterdir()) == sorted([
         "1. Overture.flac", "2. Symphony No. 1_ I. Allegro.flac", "3. Symphony No. 1_ II. Adagio.flac",
         "4. Symphony No. 1_ III. Finale.flac", "5. Encore.flac"])
