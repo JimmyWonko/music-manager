@@ -1,0 +1,244 @@
+"""End-to-end apply on temp folders: bug 1 (file names), 4 (errors), 9 (--limit), 13 (playlists)."""
+
+import shutil
+
+import pytest
+from conftest import SAMPLES, release
+from mutagen import File as MutagenFile
+
+
+def make_album(folder, names, ext="flac"):
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        dest = folder / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(SAMPLES / f"silent.{ext}", dest)
+    return folder
+
+
+def run_apply(dt, album_dir, dest_root, rel, orig="1985", **kw):
+    album = next(a for a in dt.collect_albums(album_dir) if a.path == album_dir)
+    artist = dt.release_artists(rel)
+    dtracks = dt.flatten_tracklist(rel, artist)
+    return dt.apply_album(album, dest_root, rel, dtracks, orig, dry_run=kw.pop("dry_run", False), **kw)
+
+
+VINYL_DIR = "Testers, The/Side Story [1985] [WAX001]"  # master year == release year: not a reissue
+
+
+def test_vinyl_album_renamed_sequentially(dt, tmp_path):
+    src = make_album(tmp_path / "in" / "Testers - Side Story", [f"{n:02d} track.flac" for n in range(1, 11)])
+    out = tmp_path / "lib"
+    run_apply(dt, src, out, release("vinyl_lp"))
+    target = out / VINYL_DIR
+    names = sorted(p.name for p in target.iterdir())
+    assert "6. Flip.flac" in names and "10. Closing.flac" in names
+    assert not any(n.startswith("21.") for n in names)
+    tags = MutagenFile(target / "6. Flip.flac").tags
+    assert tags["TRACKNUMBER"] == ["6"] and tags["TRACKTOTAL"] == ["10"] and tags["DISCOGS_POSITION"] == ["B1"]
+    assert not any(src.iterdir())  # everything moved (pruning only happens inside the dest root)
+
+
+def test_reissue_gets_original_date_and_orig_folder_year(dt, tmp_path):
+    src = make_album(tmp_path / "in" / "Testers - Side Story", [f"{n:02d} track.flac" for n in range(1, 11)])
+    out = tmp_path / "lib"
+    rel = dict(release("vinyl_lp"), year=2016, released="2016-04-16")  # 2016 repress of a 1985 album
+    run_apply(dt, src, out, rel, orig="1985")
+    target = out / "Testers, The" / "[1985]  Side Story [2016] [WAX001]"
+    tags = MutagenFile(target / "1. Opening.flac").tags
+    assert tags["ORIGINALDATE"] == ["1985"] and tags["ORIGINALYEAR"] == ["1985"]
+    assert tags["DATE"] == ["2016-04-16"]
+
+
+@pytest.mark.parametrize("orig", ["1985", "", "1990"])  # same year, no master, master year later
+def test_original_release_gets_no_original_date(dt, tmp_path, orig):
+    src = make_album(tmp_path / "in" / "Testers - Side Story", [f"{n:02d} track.flac" for n in range(1, 11)])
+    out = tmp_path / "lib"
+    run_apply(dt, src, out, release("vinyl_lp"), orig=orig)
+    target = out / VINYL_DIR
+    tags = MutagenFile(target / "1. Opening.flac").tags
+    assert "ORIGINALDATE" not in tags and "ORIGINALYEAR" not in tags
+    assert tags["DATE"] == ["1985"]
+
+
+def test_stale_original_date_from_earlier_run_removed(dt, tmp_path):
+    out = tmp_path / "lib"
+    folder = make_album(out / "Testers, The" / "[1985]  Side Story [1985] [WAX001]",  # old-style name
+                        [f"{n}. t.flac" for n in range(1, 11)])
+    for path in folder.glob("*.flac"):
+        audio = MutagenFile(path)
+        audio.tags["DISCOGS_RELEASE_ID"] = ["1000001"]  # tagged by an earlier run
+        audio.tags["ORIGINALDATE"] = ["1985"]
+        audio.tags["ORIGINALYEAR"] = ["1985"]
+        audio.save()
+    run_apply(dt, folder, out, release("vinyl_lp"), orig="1985")
+    tags = MutagenFile(out / VINYL_DIR / "1. Opening.flac").tags
+    assert "ORIGINALDATE" not in tags and "ORIGINALYEAR" not in tags
+    assert not folder.exists()  # renamed to the non-reissue name, old folder pruned
+
+
+def test_original_date_from_other_tagger_kept_when_not_reissue(dt, sample, meta):
+    path = sample("flac")
+    audio = MutagenFile(path)
+    audio.tags["ORIGINALDATE"] = ["1979"]  # e.g. from Picard; this tool never wrote it
+    audio.save()
+    dt.write_tags(path, dict(meta, originaldate=""))
+    assert MutagenFile(path).tags["ORIGINALDATE"] == ["1979"]
+
+
+@pytest.mark.parametrize("ext", ["mp3", "m4a", "wma", "wav"])
+def test_stale_original_date_removed_all_formats(dt, sample, meta, ext):
+    path = sample(ext)
+    dt.write_tags(path, meta)  # reissue: original date written
+    dt.write_tags(path, dict(meta, originaldate=""))  # same release, now treated as original
+    audio = MutagenFile(path)
+    keys = {k.casefold() for k in (dt.ID3(path).keys() if ext == "mp3" else audio.tags.keys())}
+    assert not {"tdor", "tory", "originaldate", "----:com.apple.itunes:originaldate",
+                "----:com.apple.itunes:originalyear", "wm/originalreleasetime", "wm/originalreleaseyear"} & keys
+
+
+def test_legacy_numbered_files_fixed(dt, tmp_path):
+    names = ["1. Opening.flac", "2. Second.flac", "3. Third.flac", "4. Fourth.flac", "5. Fifth.flac",
+             "21. Flip.flac", "22. Seventh.flac", "23. Eighth.flac", "24. Ninth.flac", "25. Closing.flac"]
+    out = tmp_path / "lib"
+    src = make_album(out / VINYL_DIR, names)  # re-tag in place
+    run_apply(dt, src, out, release("vinyl_lp"))
+    got = sorted((p.name for p in src.iterdir()), key=lambda n: int(n.split(".")[0]))
+    assert got == ["1. Opening.flac", "2. Second.flac", "3. Third.flac", "4. Fourth.flac", "5. Fifth.flac",
+                   "6. Flip.flac", "7. Seventh.flac", "8. Eighth.flac", "9. Ninth.flac", "10. Closing.flac"]
+
+
+def test_in_place_swap_never_produces_suffixes(dt, tmp_path):
+    rel = release("cassette")  # A = "Группа крови", B = "Звезда по имени Солнце"
+    out = tmp_path / "lib"
+    folder = out / "Кино" / "[1985]  Tape Loops [1991] [C60-001]"
+    make_album(folder, ["1. Звезда по имени Солнце.flac", "2. Группа крови.flac"])
+    # files named with the right numbers but swapped titles: matched by number
+    run_apply(dt, folder, out, rel)
+    assert sorted(p.name for p in folder.iterdir()) == ["1. Группа крови.flac", "2. Звезда по имени Солнце.flac"]
+
+
+def test_index_subtracks_become_files(dt, tmp_path):
+    src = make_album(tmp_path / "in" / "Orchestra - Works", [f"{n:02d}.flac" for n in range(1, 6)])
+    out = tmp_path / "lib"
+    run_apply(dt, src, out, release("index_tracks"), orig="")
+    target = out / "Orchestra" / "Works [2001] [CL-9]"
+    assert sorted(p.name for p in target.iterdir()) == sorted([
+        "1. Overture.flac", "2. Symphony No. 1_ I. Allegro.flac", "3. Symphony No. 1_ II. Adagio.flac",
+        "4. Symphony No. 1_ III. Finale.flac", "5. Encore.flac"])
+
+
+def test_generated_playlist_regenerated_handmade_moved(dt, common, tmp_path):
+    src = make_album(tmp_path / "in" / "Testers - Side Story", [f"{n:02d} track.flac" for n in range(1, 11)])
+    legacy = src / "Testers - Side Story.m3u"
+    legacy.write_text("\n".join(f"{n:02d} track.flac" for n in range(1, 11)) + "\n", encoding="utf-8")
+    mine = src / "favourites.m3u"
+    mine.write_text("03 track.flac\n01 track.flac\n", encoding="utf-8")
+    out = tmp_path / "lib"
+    run_apply(dt, src, out, release("vinyl_lp"))
+    target = out / VINYL_DIR
+    assert not (target / "Testers - Side Story.m3u").exists()  # stale playlist not carried along
+    fresh = target / f"{target.name}.m3u"
+    lines = fresh.read_text(encoding="utf-8").splitlines()
+    assert lines[:2] == ["#EXTM3U", common.GENERATED_MARKER]
+    assert lines[2:] == [f"{n}. {t}.flac" for n, t in enumerate(
+        ["Opening", "Second", "Third", "Fourth", "Fifth", "Flip", "Seventh", "Eighth", "Ninth", "Closing"], 1)]
+    assert (target / "favourites.m3u").read_text(encoding="utf-8") == "03 track.flac\n01 track.flac\n"
+
+
+def test_no_playlist_created_when_there_was_none(dt, tmp_path):
+    src = make_album(tmp_path / "in" / "Testers - Side Story", [f"{n:02d} track.flac" for n in range(1, 11)])
+    out = tmp_path / "lib"
+    run_apply(dt, src, out, release("vinyl_lp"))
+    assert not list((out / VINYL_DIR).glob("*.m3u"))
+
+
+def test_dry_run_changes_nothing(dt, tmp_path):
+    src = make_album(tmp_path / "in" / "Testers - Side Story", [f"{n:02d} track.flac" for n in range(1, 11)])
+    before = {p: p.read_bytes() for p in src.iterdir()}
+    run_apply(dt, src, tmp_path / "lib", release("vinyl_lp"), dry_run=True)
+    assert {p: p.read_bytes() for p in src.iterdir()} == before
+    assert not (tmp_path / "lib").exists()
+
+
+def test_tag_failure_moves_nothing(dt, tmp_path):
+    src = make_album(tmp_path / "in" / "Testers - Side Story", [f"{n:02d} track.flac" for n in range(1, 11)])
+    (src / "05 track.flac").write_bytes(b"corrupt")
+    with pytest.raises(dt.AlbumApplyError) as err:
+        run_apply(dt, src, tmp_path / "lib", release("vinyl_lp"))
+    assert "nothing was moved" in str(err.value)
+    assert len(list(src.glob("*.flac"))) == 10
+    assert not (tmp_path / "lib" / VINYL_DIR).exists() or not any((tmp_path / "lib" / VINYL_DIR).iterdir())
+
+
+def test_move_failure_reports_what_moved(dt, tmp_path, monkeypatch):
+    src = make_album(tmp_path / "in" / "Testers - Side Story", [f"{n:02d} track.flac" for n in range(1, 11)])
+    real_move = dt.shutil.move
+    calls = {"n": 0}
+
+    def flaky(a, b):
+        calls["n"] += 1
+        if calls["n"] == 4:
+            raise OSError(28, "No space left on device")
+        return real_move(a, b)
+
+    monkeypatch.setattr(dt.shutil, "move", flaky)
+    with pytest.raises(dt.AlbumApplyError) as err:
+        run_apply(dt, src, tmp_path / "lib", release("vinyl_lp"))
+    text = str(err.value)
+    assert "No space left on device" in text and "moved 3 item(s)" in text
+    assert "01 track.flac" in text and "-> " in text and "not moved (7)" in text
+    assert len(list(src.glob("*.flac"))) == 7  # nothing lost, nothing half-moved
+
+
+class FakeDiscogs:
+    def __init__(self, *args):
+        pass
+
+    def search_releases(self, artist, album, catno="", year=""):
+        return []
+
+    def release(self, release_id):
+        return release({1000001: "vinyl_lp", 1000002: "cassette"}[release_id])
+
+    def master(self, master_id):
+        return {"year": 1985}
+
+
+def fake_choose(api, guess, results, auto, release_id):
+    return api.release(1000001 if "Side" in guess["album"] else 1000002)
+
+
+def test_batch_continues_after_unexpected_error(dt, tmp_path, monkeypatch, capsys):
+    root = tmp_path / "in"
+    make_album(root / "Testers - Side Story", [f"{n:02d} track.flac" for n in range(1, 11)])
+    bad = make_album(root / "Kino - Tape Loops", ["1 a.flac", "2 b.flac"])
+    (bad / "1 a.flac").write_bytes(b"not flac")  # TypeError/RuntimeError territory, not MutagenError
+    monkeypatch.setattr(dt, "Discogs", FakeDiscogs)
+    monkeypatch.setattr(dt, "load_token", lambda: ("t", None, None))
+    monkeypatch.setattr(dt, "choose_release", fake_choose)
+    code = dt.main([str(root), "--dest", str(tmp_path / "lib"), "--yes"])
+    out = capsys.readouterr()
+    assert code == 1
+    assert "applied=1" in out.out and "failed=1" in out.out
+    assert (tmp_path / "lib" / VINYL_DIR / "6. Flip.flac").exists()
+    assert "Tape Loops" in out.out or "Kino - Tape Loops" in out.out
+
+
+def test_limit_counts_only_albums_processed(dt, tmp_path, monkeypatch, capsys):
+    root = tmp_path / "in"
+    lib = tmp_path / "lib"
+    # first album (alphabetically) is already tagged
+    tagged = make_album(root / "A Tagged - Album", ["1 a.flac"])
+    audio = MutagenFile(tagged / "1 a.flac")
+    audio.tags["DISCOGS_RELEASE_ID"] = ["5"]
+    audio.save()
+    make_album(root / "Testers - Side Story", [f"{n:02d} track.flac" for n in range(1, 11)])
+    monkeypatch.setattr(dt, "Discogs", FakeDiscogs)
+    monkeypatch.setattr(dt, "load_token", lambda: ("t", None, None))
+    monkeypatch.setattr(dt, "choose_release", fake_choose)
+    code = dt.main([str(root), "--dest", str(lib), "--yes", "--skip-tagged", "--limit", "1"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "applied=1" in out
+    assert (lib / VINYL_DIR / "1. Opening.flac").exists()

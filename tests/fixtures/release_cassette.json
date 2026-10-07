@@ -1,0 +1,42 @@
+{
+ "id": 1000002,
+ "master_id": 0,
+ "title": "Tape Loops",
+ "year": 1991,
+ "released": "1991",
+ "artists": [
+  {
+   "name": "Кино"
+  }
+ ],
+ "labels": [
+  {
+   "name": "Melodiya",
+   "catno": "C60-001"
+  }
+ ],
+ "formats": [
+  {
+   "name": "Cassette",
+   "qty": "1"
+  }
+ ],
+ "genres": [
+  "Rock"
+ ],
+ "styles": [],
+ "tracklist": [
+  {
+   "position": "A",
+   "type_": "track",
+   "title": "Группа крови",
+   "duration": ""
+  },
+  {
+   "position": "B",
+   "type_": "track",
+   "title": "Звезда по имени Солнце",
+   "duration": ""
+  }
+ ]
+}
