@@ -16,13 +16,16 @@ def test_vinyl_sides_numbered_sequentially(dt):
     flip = tracks[5]
     assert (flip.position, flip.number, flip.title) == ("B1", 6, "Flip")
     assert flip.legacy_number == 21  # what the old code produced
-    # file name and tag use the sequential number
-    assert dt.track_filename(flip.number, flip.title, ".FLAC") == "6. Flip.flac"
+    # the tag keeps the sequential number; the file name uses the side by default
+    assert flip.side == "B1"
+    assert dt.track_filename(dt.track_prefix(flip), flip.title, ".FLAC") == "B1. Flip.flac"
+    assert dt.track_filename(dt.track_prefix(flip, side_names=False), flip.title, ".FLAC") == "6. Flip.flac"
 
 
 def test_cassette_letter_only_positions(dt):
     tracks = dt.flatten_tracklist(release("cassette"), "Кино")
     assert [(t.number, t.position) for t in tracks] == [(1, "A"), (2, "B")]
+    assert [dt.track_prefix(t) for t in tracks] == ["A", "B"]
 
 
 def test_cd_positions_kept(dt):

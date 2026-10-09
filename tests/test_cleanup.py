@@ -96,7 +96,7 @@ def test_in_place_rename_removes_old_folder_keeps_artist(dt, tmp_path):
     (lib / "Testers, The" / "[1979]  Other" / "x.flac").parent.mkdir(parents=True)
     run_apply(dt, old, lib, release("vinyl_lp"), scan_root=lib)
     assert not old.exists()
-    assert (lib / VINYL_DIR / "1. Opening.flac").is_file()
+    assert (lib / VINYL_DIR / "A1. Opening.flac").is_file()
     assert sorted(p.name for p in (lib / "Testers, The").iterdir()) == ["[1979]  Other", "[1985]  Side Story [WAX001]"]
 
 
