@@ -332,8 +332,31 @@ def album_folder_name(album: str, original_year: str, release_year: str, catno: 
     return sanitize_filename(" ".join(parts))
 
 
-def track_filename(number: int, title: str, suffix: str) -> str:
+def track_filename(number: int | str, title: str, suffix: str) -> str:
+    """"N. Title.ext", or "A1. Title.ext" when given a vinyl/cassette side position."""
     return sanitize_filename(f"{number}. {title}") + suffix.lower()
+
+
+# Vinyl and cassette tracks are named after their side position (A1, A2, B1 ...)
+# by default, as collectors expect. --sequential-sides switches back to 1..N.
+SIDE_NAMES = True
+
+
+def side_label(position: str) -> str | None:
+    """Normalised side position for a file name ("a1" -> "A1", "B 2" -> "B2"), or None."""
+    pos = (position or "").strip()
+    match = POS_VINYL.match(pos)
+    if not match:
+        return None
+    return match.group(1).upper() + match.group(2) + (match.group(3) or "")
+
+
+def track_prefix(dt: "DiscogsTrack", side_names: bool | None = None) -> str:
+    """What goes before ". Title" in a track's file name."""
+    use_sides = SIDE_NAMES if side_names is None else side_names
+    if use_sides and dt.side:
+        return dt.side
+    return str(dt.number)
 
 
 # ---------------------------------------------------------------------------
@@ -808,6 +831,7 @@ class DiscogsTrack:
     artist: str
     position: str = ""  # Discogs position as printed on the release (A1, B2, 1-03, ...)
     legacy_number: int | None = None  # number the old (side-1)*20+n scheme gave
+    side: str | None = None  # normalised side position (A1) when its whole disc uses sides
 
 
 def _track_artist(item: dict, fallback: str) -> str:
@@ -857,7 +881,10 @@ def flatten_tracklist(release: dict, album_artist: str) -> list[DiscogsTrack]:
     Each disc keeps Discogs' own numbers (1, 2, ... or 1-1, 1-2, ...) when
     every track on it has a distinct number. Otherwise, and always for
     vinyl/cassette sides, the disc's tracks are numbered 1..N in tracklist
-    order, so A1 A2 B1 B2 become 1 2 3 4.
+    order, so A1 A2 B1 B2 become 1 2 3 4 in the track-number tag.
+
+    When every track on a disc has a distinct side position, each track also
+    gets `side` (A1, A2, B1 ...), which file names use by default.
     """
     parsed = []
     for position, title, artist in _tracklist_entries(release, album_artist):
@@ -869,9 +896,14 @@ def flatten_tracklist(release: dict, album_artist: str) -> list[DiscogsTrack]:
         by_disc.setdefault(disc, []).append(i)
 
     numbers: dict[int, int] = {}
+    sides_of: dict[int, str] = {}
     for indexes in by_disc.values():
         explicit = [parsed[i][1] for i in indexes]
         sides = any(is_side_position(parsed[i][2]) for i in indexes)
+        labels = [side_label(parsed[i][2]) if is_side_position(parsed[i][2]) else None for i in indexes]
+        if all(labels) and len({lab.casefold() for lab in labels}) == len(labels):
+            for i, lab in zip(indexes, labels):
+                sides_of[i] = lab
         if not sides and all(n > 0 for n in explicit) and len(set(explicit)) == len(explicit):
             for i in indexes:
                 numbers[i] = parsed[i][1]
@@ -889,6 +921,7 @@ def flatten_tracklist(release: dict, album_artist: str) -> list[DiscogsTrack]:
                 artist=artist,
                 position=position,
                 legacy_number=legacy_vinyl_number(position),
+                side=sides_of.get(i),
             )
         )
     return out
@@ -1738,7 +1771,7 @@ def apply_album(
             "master_id": master_id,
             "position": dt.position,
         }
-        dest_file = target_dir / track_filename(dt.number, dt.title, local.suffix)
+        dest_file = target_dir / track_filename(track_prefix(dt), dt.title, local.suffix)
         where = f"{dt.disc}-{dt.number}"
         if dt.position and dt.position != str(dt.number):
             where += f", {dt.position}"
@@ -2553,7 +2586,9 @@ def _self_test_fixes() -> None:
     tracks = flatten_tracklist(lp, "X")
     assert [(t.number, t.position) for t in tracks] == [(1, "A1"), (2, "A2"), (3, "B1"), (4, "B2")], tracks
     assert tracks[2].legacy_number == 21
-    assert track_filename(tracks[2].number, "c", ".flac") == "3. c.flac"
+    assert tracks[2].side == "B1"
+    assert track_filename(track_prefix(tracks[2], side_names=True), "c", ".flac") == "B1. c.flac"
+    assert track_filename(track_prefix(tracks[2], side_names=False), "c", ".flac") == "3. c.flac"
 
     # Index tracks: sub-tracks included, numbered in order.
     work = {"tracklist": [
@@ -2694,7 +2729,9 @@ where files go:
   under one, else $DEFAULT_MUSIC (default: /run/media/xen_is/Tunes/Music
   when that volume is mounted). Extra files and folders (Scans, Covers,
   logs, cues, …) move with the album. Vinyl/cassette sides are numbered
-  straight through (A1 A2 B1 -> 1 2 3); the side is kept in DISCOGS_POSITION.
+  by side (A1. Title, A2. Title, B1. Title); the track-number tag counts
+  straight through (1 2 3) for players and the side is kept in
+  DISCOGS_POSITION. --sequential-sides names them 1. 2. 3. instead.
 
 safety:
   All files of an album are tagged before anything moves. Only the tags
@@ -2726,6 +2763,11 @@ library cleanup (no Discogs, no tag changes):
     )
     parser.add_argument("--dest", type=Path, help="library root to write into (AlbumArtist/Album/...)")
     parser.add_argument("--dry-run", action="store_true", help="search and show plan, write nothing")
+    parser.add_argument(
+        "--sequential-sides",
+        action="store_true",
+        help="name vinyl/cassette tracks 1. 2. 3. instead of A1. A2. B1. (tags are the same either way)",
+    )
     parser.add_argument("--auto", action="store_true", help="apply only high-confidence matches")
     parser.add_argument("-y", "--yes", action="store_true", help="do not ask before writing")
     parser.add_argument("--skip-tagged", action="store_true", help="skip albums that already have a Discogs id")
@@ -2767,6 +2809,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.self_test:
         return self_test()
+    global SIDE_NAMES
+    SIDE_NAMES = not args.sequential_sides
 
     if args.save_token:
         token = prompt("Paste Discogs user token: ")

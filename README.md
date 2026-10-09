@@ -130,10 +130,15 @@ punctuation and are stored uppercase (`DOJO CD 167` becomes `DOJOCD167`).
 Multi-disc albums get a `2CD` marker in the folder name. Track files are
 `1. Title.flac`.
 
-Vinyl and cassette sides are numbered straight through in Discogs order:
-`A1 A2 A3 B1 B2` become tracks 1 to 5 (file names and tags). The side
-position is kept in the `DISCOGS_POSITION` tag. Files that an older
-version named with its `B1 = 21` scheme are recognised and renumbered.
+Vinyl and cassette tracks are named by side position, the way collectors
+list them: `A1. Title.flac`, `A2. Title.flac`, `B1. Title.flac`. The
+track-number tag still counts straight through in Discogs order (`A1 A2 A3
+B1 B2` are tracks 1 to 5) so players sort and display them normally, and
+the side position is kept in the `DISCOGS_POSITION` tag. Pass
+`--sequential-sides` to name the files `1. 2. 3.` instead. A disc whose
+positions are not all distinct sides (mixed or repeated positions) falls
+back to numbers. Files already named `A1. Title`, `1. Title`, or with an
+older version's `B1 = 21` scheme are all recognised.
 Discogs "index" tracks (a work with movements) become one file per
 movement, titled `Work: Movement`.
 
