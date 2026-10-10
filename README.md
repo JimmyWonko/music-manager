@@ -100,8 +100,12 @@ tagger is left alone.
 
 1. `--dest`
 2. The `Featuring` directory, when the path is under one
-3. `$DEFAULT_MUSIC` (default `/path/to/Music` when that
-   volume is mounted, otherwise `~/Music`)
+3. `$DEFAULT_MUSIC`, only if you set it
+
+There is no built-in library path. If none of these applies, `discogs-tag`
+stops with an error before reading tags or moving anything. Put
+`export DEFAULT_MUSIC=/path/to/your/library` in your shell profile to keep
+the old "file into my library" behaviour.
 
 Albums are filed under the Discogs album artist, not inside the source
 folder. Extra files and folders (Scans, Covers, Artwork, logs, cues,
@@ -203,8 +207,8 @@ Folders made by older versions repeat the year for non-reissues
 without contacting Discogs and without changing any file:
 
 ```sh
-discogs-tag --normalize-folders /path/to/Music           # preview
-discogs-tag --normalize-folders --apply /path/to/Music   # rename
+discogs-tag --normalize-folders /path/to/library           # preview
+discogs-tag --normalize-folders --apply /path/to/library   # rename
 discogs-tag --undo-journal ~/.local/state/discogs-tag/journal/normalize-folders-YYYYMMDD-HHMMSS.jsonl          # preview the undo
 discogs-tag --undo-journal ~/.local/state/discogs-tag/journal/normalize-folders-YYYYMMDD-HHMMSS.jsonl --apply  # undo
 ```
@@ -236,7 +240,7 @@ discogs-tag --undo-journal ~/.local/state/discogs-tag/journal/normalize-folders-
 
 ## `album-m3u`
 
-Writes one `.m3u` per album folder under `/path/to/Music`.
+Writes one `.m3u` per album folder under the library root (`--root`, or `$DEFAULT_MUSIC`).
 
 ```sh
 /path/to/music-manager/album-m3u rebuild --dry-run

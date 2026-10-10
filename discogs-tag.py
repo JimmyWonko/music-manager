@@ -62,10 +62,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import mm_common  # noqa: E402
 
-_DRIVE_MUSIC = Path("/path/to/Music")
-DEFAULT_MUSIC = Path(
-    os.getenv("DEFAULT_MUSIC") or (_DRIVE_MUSIC if _DRIVE_MUSIC.exists() else Path.home() / "Music")
-)
+# There is deliberately no built-in library path: a missing --dest must never
+# send albums into whatever library happens to be mounted. $DEFAULT_MUSIC is
+# used only when the user has set it.
+_env_music = os.getenv("DEFAULT_MUSIC", "").strip()
+DEFAULT_MUSIC: Path | None = Path(_env_music).expanduser() if _env_music else None
 
 TOKEN_PATH = Path.home() / ".config" / "discogs-tag" / "token"
 CACHE_DIR = Path.home() / ".cache" / "discogs-tag"
@@ -461,18 +462,20 @@ def guess_from_album_dir(album_dir: Path, tracks: list[Path]) -> dict[str, str]:
     return guess
 
 
-def default_dest(start: Path) -> Path:
+def default_dest(start: Path, library: Path | None = None) -> Path | None:
+    """Destination when --dest is not given, or None when there isn't a safe one.
+
+    The Featuring directory the path sits under, else $DEFAULT_MUSIC when the
+    user set it (and it exists). Never a guessed or built-in library.
+    """
+    library = DEFAULT_MUSIC if library is None else library
     resolved = start.resolve()
     parts = list(resolved.parts)
     if "Featuring" in parts:
         return Path(*parts[: parts.index("Featuring") + 1])
-    if DEFAULT_MUSIC.exists():
-        return DEFAULT_MUSIC.resolve()
-    try:
-        resolved.relative_to(DEFAULT_MUSIC)
-        return DEFAULT_MUSIC
-    except ValueError:
-        return start if start.is_dir() else start.parent
+    if library is not None and library.is_dir():
+        return library.resolve()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -2543,10 +2546,12 @@ def self_test() -> int:
 
     _self_test_fixes()
 
-    if DEFAULT_MUSIC.exists():
-        assert default_dest(Path("/tmp/Artist - Album")) == DEFAULT_MUSIC.resolve()
-        featuring = DEFAULT_MUSIC / "Aesop Rock" / "Featuring" / "Some Album"
-        assert default_dest(featuring) == DEFAULT_MUSIC / "Aesop Rock" / "Featuring"
+    with tempfile.TemporaryDirectory() as tmp:
+        lib = Path(tmp) / "Library"
+        lib.mkdir()
+        assert default_dest(Path(tmp) / "Artist - Album", library=lib) == lib.resolve()
+        featuring = lib / "Aesop Rock" / "Featuring" / "Some Album"
+        assert default_dest(featuring, library=lib) == (lib / "Aesop Rock" / "Featuring").resolve()
 
     print("self-test ok")
     return 0
@@ -2726,8 +2731,8 @@ where files go:
   (never the library root, never a folder still holding any file).
   Moves to another drive copy, verify (size + SHA-256), then delete.
   DESTINATION is --dest, else the Featuring directory when the path is
-  under one, else $DEFAULT_MUSIC (default: /path/to/Music
-  when that volume is mounted). Extra files and folders (Scans, Covers,
+  under one, else $DEFAULT_MUSIC if you set it. There is no built-in
+  library: with none of these, discogs-tag stops before touching anything. Extra files and folders (Scans, Covers,
   logs, cues, …) move with the album. Vinyl/cassette sides are numbered
   by side (A1. Title, A2. Title, B1. Title); the track-number tag counts
   straight through (1 2 3) for players and the side is kept in
@@ -2846,7 +2851,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: not found: {root}", file=sys.stderr)
         return 1
 
-    dest = (args.dest or default_dest(root)).expanduser().resolve()
+    dest = args.dest or default_dest(root)
+    if dest is None:
+        print(
+            "error: no destination library. Pass --dest DIR, or set DEFAULT_MUSIC to your library root.",
+            file=sys.stderr,
+        )
+        return 2
+    dest = dest.expanduser().resolve()
     albums = collect_albums(root)
     if not albums:
         print(f"No album folders with audio under {root}")
