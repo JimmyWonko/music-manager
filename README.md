@@ -284,3 +284,9 @@ python3 -m pytest tests        # needs pytest; no network access
 
 `tests/samples` holds tiny silent files made with ffmpeg
 (`tests/make_samples.sh`), and `tests/fixtures` holds saved Discogs JSON.
+
+## License
+
+music-manager is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. It is distributed WITHOUT ANY WARRANTY. See the [LICENSE](LICENSE) file for the full text.
+
+Copyright (C) 2026 Jami L. Boucher
