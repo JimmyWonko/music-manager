@@ -25,9 +25,9 @@ Modes:
             per-disc playlists. Use this when you add or retag albums.
 
 Examples:
-  album-m3u rebuild --dry-run
-  album-m3u rebuild
-  album-m3u update
+  album-m3u rebuild --dry-run --root /path/to/library
+  album-m3u rebuild --root /path/to/library
+  album-m3u update            (uses $DEFAULT_MUSIC)
 """
 
 from __future__ import annotations
@@ -55,7 +55,9 @@ from mm_common import (  # noqa: E402
     write_playlist_file,
 )
 
-DEFAULT_ROOT = Path("/run/media/xen_is/Tunes/Music")
+# No built-in library path: the root comes from --root or $DEFAULT_MUSIC.
+_env_music = os.getenv("DEFAULT_MUSIC", "").strip()
+DEFAULT_ROOT: Path | None = Path(_env_music).expanduser() if _env_music else None
 
 # Directories we never treat as albums, even if they somehow have audio.
 SKIP_DIR_NAMES = {".git", ".trash", ".trashes", "@eadir"}
@@ -239,8 +241,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--root",
         type=Path,
-        default=DEFAULT_ROOT,
-        help=f"library root (default: {DEFAULT_ROOT})",
+        default=None,
+        help="library root (default: $DEFAULT_MUSIC; required when that is unset)",
     )
     parser.add_argument(
         "--dry-run",
@@ -252,11 +254,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    root = args.root.expanduser().resolve()
+    chosen = args.root or DEFAULT_ROOT
+    if chosen is None:
+        print("error: no library root. Pass --root DIR, or set DEFAULT_MUSIC.", file=sys.stderr)
+        return 2
+    root = chosen.expanduser().resolve()
 
     if not root.is_dir():
         print(f"error: library not found: {root}", file=sys.stderr)
-        print("Is the Tunes drive mounted?", file=sys.stderr)
+        print("Is the drive mounted?", file=sys.stderr)
         return 1
 
     if args.mode == "rebuild":
