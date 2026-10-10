@@ -1,5 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "music-manager"
-version = "0.1.0"
+dynamic = ["version"]
+description = "Tag and rename a local music library from Discogs"
+readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "James Boucher"}]
+dependencies = [
+    "requests",
+    "mutagen",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+discogs-tag = "discogs_tag:main"
+album-m3u = "album_m3u:main"
+
+[project.urls]
+Homepage = "https://github.com/JimmyWonko/music-manager"
+
+[tool.setuptools]
+py-modules = ["discogs_tag", "album_m3u", "mm_common"]
+
+[tool.setuptools.dynamic]
+version = {attr = "mm_common.__version__"}

@@ -27,14 +27,14 @@ def _load(name: str, path: Path):
 
 @pytest.fixture(scope="session")
 def dt():
-    """discogs-tag.py as a module."""
-    return _load("discogs_tag", REPO / "discogs-tag.py")
+    """discogs_tag.py as a module. discogs-tag.py is the checkout launcher."""
+    return _load("discogs_tag", REPO / "discogs_tag.py")
 
 
 @pytest.fixture(scope="session")
 def m3u():
-    """album-m3u as a module."""
-    return _load("album_m3u", REPO / "album-m3u")
+    """album_m3u.py as a module. album-m3u is the checkout launcher."""
+    return _load("album_m3u", REPO / "album_m3u.py")
 
 
 @pytest.fixture(scope="session")

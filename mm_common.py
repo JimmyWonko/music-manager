@@ -1,7 +1,7 @@
 """Shared helpers for discogs-tag and album-m3u.
 
-Both scripts are run through symlinks in ~/.local/bin, so each one adds
-its own resolved directory to sys.path before importing this module.
+A launcher adds its own resolved directory to sys.path before importing
+this module, so a symlink to the launcher still finds it.
 
 Playlist rules
 --------------
@@ -17,6 +17,8 @@ deleted. Every other .m3u/.m3u8 file is treated as hand-made and left alone.
 """
 
 from __future__ import annotations
+
+__version__ = "0.1.0"
 
 import os
 import re
