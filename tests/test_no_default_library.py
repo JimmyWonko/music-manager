@@ -15,8 +15,21 @@ def _env(**extra):
 
 
 def test_no_hardcoded_library_paths():
-    for name in ("discogs-tag.py", "album-m3u", "mm_common.py", "README.md"):
+    for name in (
+        "discogs-tag.py",
+        "discogs_tag.py",
+        "album-m3u",
+        "album_m3u.py",
+        "mm_common.py",
+        "README.md",
+    ):
         assert "/run/media/" not in (REPO / name).read_text(encoding="utf-8"), name
+
+
+def test_user_agent_names_the_app(dt):
+    assert dt.USER_AGENT.startswith(f"music-manager/{dt.mm_common.__version__} ")
+    assert "https://github.com/JimmyWonko/music-manager" in dt.USER_AGENT
+    assert "xen" not in dt.USER_AGENT.casefold()
 
 
 def test_default_dest_none_without_library(dt, tmp_path):
