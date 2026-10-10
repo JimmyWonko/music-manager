@@ -1,0 +1,61 @@
+{
+ "id": 1000004,
+ "master_id": 2000004,
+ "title": "Double Feature",
+ "year": 1998,
+ "released": "1998-03-17",
+ "artists": [
+  {
+   "name": "Band A"
+  },
+  {
+   "name": "Band B"
+  }
+ ],
+ "labels": [
+  {
+   "name": "Label Two",
+   "catno": "LT-2CD"
+  }
+ ],
+ "formats": [
+  {
+   "name": "CD",
+   "qty": "2"
+  }
+ ],
+ "genres": [
+  "Electronic"
+ ],
+ "styles": [
+  "Ambient",
+  "Drone",
+  "Dub"
+ ],
+ "tracklist": [
+  {
+   "position": "1-1",
+   "type_": "track",
+   "title": "One",
+   "duration": ""
+  },
+  {
+   "position": "1-2",
+   "type_": "track",
+   "title": "Two",
+   "duration": ""
+  },
+  {
+   "position": "2-1",
+   "type_": "track",
+   "title": "Three",
+   "duration": ""
+  },
+  {
+   "position": "2-2",
+   "type_": "track",
+   "title": "Four",
+   "duration": ""
+  }
+ ]
+}
