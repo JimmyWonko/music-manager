@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "Tag and rename a local music library from Discogs"
 readme = "README.md"
 requires-python = ">=3.12"
-license = "MIT"
+license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 authors = [{name = "James Boucher"}]
 dependencies = [
