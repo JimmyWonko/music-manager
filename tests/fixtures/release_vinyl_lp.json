@@ -1,0 +1,104 @@
+{
+ "id": 1000001,
+ "master_id": 2000001,
+ "title": "Side Story",
+ "year": 1985,
+ "released": "1985-00-00",
+ "artists": [
+  {
+   "name": "The Testers (2)",
+   "anv": "",
+   "join": ""
+  }
+ ],
+ "labels": [
+  {
+   "name": "Wax Label",
+   "catno": "WAX 001"
+  }
+ ],
+ "formats": [
+  {
+   "name": "Vinyl",
+   "qty": "1",
+   "descriptions": [
+    "LP",
+    "Album"
+   ]
+  }
+ ],
+ "genres": [
+  "Rock"
+ ],
+ "styles": [
+  "Post-Punk"
+ ],
+ "tracklist": [
+  {
+   "position": "A1",
+   "type_": "track",
+   "title": "Opening",
+   "duration": ""
+  },
+  {
+   "position": "A2",
+   "type_": "track",
+   "title": "Second",
+   "duration": ""
+  },
+  {
+   "position": "A3",
+   "type_": "track",
+   "title": "Third",
+   "duration": ""
+  },
+  {
+   "position": "A4",
+   "type_": "track",
+   "title": "Fourth",
+   "duration": ""
+  },
+  {
+   "position": "A5",
+   "type_": "track",
+   "title": "Fifth",
+   "duration": ""
+  },
+  {
+   "position": "",
+   "type_": "heading",
+   "title": "Side Two",
+   "duration": ""
+  },
+  {
+   "position": "B1",
+   "type_": "track",
+   "title": "Flip",
+   "duration": ""
+  },
+  {
+   "position": "B2",
+   "type_": "track",
+   "title": "Seventh",
+   "duration": ""
+  },
+  {
+   "position": "B3",
+   "type_": "track",
+   "title": "Eighth",
+   "duration": ""
+  },
+  {
+   "position": "B4",
+   "type_": "track",
+   "title": "Ninth",
+   "duration": ""
+  },
+  {
+   "position": "B5",
+   "type_": "track",
+   "title": "Closing",
+   "duration": ""
+  }
+ ]
+}

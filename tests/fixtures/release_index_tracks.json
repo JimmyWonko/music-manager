@@ -1,0 +1,68 @@
+{
+ "id": 1000003,
+ "master_id": 2000003,
+ "title": "Works",
+ "year": 2001,
+ "released": "2001-05-00",
+ "artists": [
+  {
+   "name": "Orchestra"
+  }
+ ],
+ "labels": [
+  {
+   "name": "Classics",
+   "catno": "CL-9"
+  }
+ ],
+ "formats": [
+  {
+   "name": "CD",
+   "qty": "1"
+  }
+ ],
+ "genres": [
+  "Classical"
+ ],
+ "styles": [],
+ "tracklist": [
+  {
+   "position": "1",
+   "type_": "track",
+   "title": "Overture",
+   "duration": ""
+  },
+  {
+   "position": "",
+   "type_": "index",
+   "title": "Symphony No. 1",
+   "duration": "",
+   "sub_tracks": [
+    {
+     "position": "2a",
+     "type_": "track",
+     "title": "I. Allegro",
+     "duration": ""
+    },
+    {
+     "position": "2b",
+     "type_": "track",
+     "title": "II. Adagio",
+     "duration": ""
+    },
+    {
+     "position": "2c",
+     "type_": "track",
+     "title": "III. Finale",
+     "duration": ""
+    }
+   ]
+  },
+  {
+   "position": "3",
+   "type_": "track",
+   "title": "Encore",
+   "duration": ""
+  }
+ ]
+}
