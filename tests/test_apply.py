@@ -234,11 +234,11 @@ def test_move_failure_reports_what_moved(dt, tmp_path, monkeypatch):
     real_move = dt._move
     calls = {"n": 0}
 
-    def flaky(a, b):
+    def flaky(a, b, journal=None):
         calls["n"] += 1
         if calls["n"] == 4:
             raise OSError(28, "No space left on device")
-        return real_move(a, b)
+        return real_move(a, b, journal)
 
     monkeypatch.setattr(dt, "_move", flaky)
     with pytest.raises(dt.AlbumApplyError) as err:
