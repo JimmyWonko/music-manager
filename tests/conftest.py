@@ -45,6 +45,15 @@ def common():
     return mm_common
 
 
+@pytest.fixture(autouse=True)
+def _isolated_state(tmp_path, monkeypatch, dt):
+    """Journals and the trash live in the test's temp folder, never in ~."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    monkeypatch.setattr(dt, "STATE_DIR", tmp_path / "xdg-state" / "discogs-tag")
+    monkeypatch.setattr(dt, "CACHE_DIR", tmp_path / "xdg-cache" / "discogs-tag")
+
+
 def release(name: str) -> dict:
     return json.loads((FIXTURES / f"release_{name}.json").read_text(encoding="utf-8"))
 
