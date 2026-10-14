@@ -69,7 +69,8 @@ discogs-tag --release-id 249504 "/path/to/album"
 discogs-tag --skip-tagged --limit 10 "/path/to/tree"
 ```
 
-Search results are cached under `~/.cache/discogs-tag` for 30 days.
+Search results are cached under `~/.cache/discogs-tag` for at most 6 hours,
+as Discogs' API terms require. Older answers are fetched again.
 `--limit` counts albums that were actually looked up; albums skipped by
 `--skip-tagged` do not use up the limit.
 
@@ -124,6 +125,18 @@ playlists, nfo, leftover files in CD1/CD2, hidden files and folders, …)
 move with the album and keep their relative paths. Only trash folders
 (`.Trash-1000`, `.Trashes`) and `.git` stay behind; a git checkout (such
 as a copy of this tool) is never treated as an album.
+
+Every real run is journaled and can be undone. Before each change, a
+line goes into a journal in `~/.local/state/discogs-tag/journal/`
+(`$XDG_STATE_HOME` if set): every file's tags before and after (all of
+them, cover art included), every move with the file's SHA-256, every
+folder created or removed, every playlist trashed or written. The end of
+the run prints the journal path. `discogs-tag --undo-journal FILE` shows
+what undo would do without changing anything; add `--apply` to do it.
+Undo works newest first, and anything that changed since (a file edited
+or replaced, a name taken again) is skipped and reported, never
+overwritten. Tags and audio come back as they were; FLAC and other files
+may differ in tag padding, so the file is not always byte-identical.
 
 After a successful move, the old album folder is removed, together with
 its emptied `CD1`/`CD2` folders and every parent folder that became
@@ -185,8 +198,9 @@ ratings, and embedded cue sheets or logs. `--dry-run` reads the files and
 shows which tags would be removed.
 
 A playlist written by `album-m3u` that comes along with the album lists
-the old file names, so it is not moved: it is deleted and a fresh one is
-written in the new folder. Hand-made playlists are moved as they are.
+the old file names, so it is not moved: it goes to the trash
+(`~/.local/share/Trash`, where your file manager can restore it) and a
+fresh one is written in the new folder. Hand-made playlists are moved as they are.
 
 ## Options
 
@@ -204,8 +218,8 @@ written in the new folder. Hand-made playlists are moved as they are.
 | `--save-token` | Prompt for a token, save it, and exit. |
 | `--self-test` | Run the naming checks and exit. |
 | `--normalize-folders` | Rename album folders under `path` to the current naming rule. Preview unless `--apply`. |
-| `--undo-journal FILE` | Reverse the renames recorded in a journal. Preview unless `--apply`. |
-| `--apply` | Really rename (only with `--normalize-folders` or `--undo-journal`). |
+| `--undo-journal FILE` | Reverse everything recorded in a journal (an apply or `--normalize-folders`). Preview unless `--apply`. |
+| `--apply` | Really make the change (only with `--normalize-folders` or `--undo-journal`). |
 | `-h`, `--help` | Show this help. |
 
 Without a TTY, pass `--release-id` or `--auto`. Otherwise the album is
@@ -264,7 +278,7 @@ not valid UTF-8 are written byte for byte). A multi-disc album with
 `CD1`, `CD2`, ... folders gets one playlist in the album folder listing
 every disc in order.
 
-Only generated playlists are replaced or deleted: files with that marker
+Only generated playlists are replaced or sent to the trash: files with that marker
 line, and plain playlists from older versions (named after their folder,
 listing only that folder's audio files in order). Every other `.m3u` or
 `.m3u8` is left alone, even by `rebuild`. A hand-made playlist that lists
@@ -272,7 +286,7 @@ files that no longer exist is reported so you can review it.
 
 `update` creates missing playlists, rewrites generated ones that are out
 of date (renamed or added tracks), and removes generated playlists that a
-newer one replaces (old per-disc playlists, a playlist named after the
+newer one replaces (sent to the trash, never deleted outright: old per-disc playlists, a playlist named after the
 album folder's previous name).
 
 ## Tests
