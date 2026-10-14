@@ -12,12 +12,15 @@ Get a token (not an OAuth app):
 from __future__ import annotations
 
 import argparse
+import base64
 import errno
 import hashlib
 import json
 import os
+import pickle
 import re
 import shutil
+import stat
 import sys
 import time
 import unicodedata
@@ -70,6 +73,7 @@ DEFAULT_MUSIC: Path | None = Path(_env_music).expanduser() if _env_music else No
 
 TOKEN_PATH = Path.home() / ".config" / "discogs-tag" / "token"
 CACHE_DIR = Path.home() / ".cache" / "discogs-tag"
+CACHE_MAX_AGE = 6 * 60 * 60  # Discogs API terms cap cached data at 6 hours
 USER_AGENT = (
     f"music-manager/{mm_common.__version__} +https://github.com/JimmyWonko/music-manager"
 )
@@ -615,7 +619,8 @@ class Discogs:
 
     def _get(self, url: str, params: dict | None, cache_kind: str, cache_key: str) -> dict:
         cache = self._cache_path(cache_kind, cache_key)
-        if cache.exists() and time.time() - cache.stat().st_mtime < 30 * 86400:
+        # Discogs' API terms: don't show data more than 6 hours stale.
+        if cache.exists() and time.time() - cache.stat().st_mtime < CACHE_MAX_AGE:
             return json.loads(cache.read_text(encoding="utf-8"))
 
         self._wait()
@@ -1638,19 +1643,21 @@ def _move_across_devices(src: Path, dest: Path) -> None:
     os.rmdir(src)  # fails (and stops) if anything is still inside
 
 
-def _move(src: Path, dest: Path) -> Path:
+def _move(src: Path, dest: Path, journal: Journal | None = None) -> Path:
     """Move src to dest without ever overwriting a different file.
 
     Same drive: a rename. Different drive: copy, verify size and SHA-256,
     then delete the source, so a move never leaves a second copy behind.
     """
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    _mkdirs_logged(journal, dest.parent)
     if dest.exists() or dest.is_symlink():
         if _same_file(src, dest):
             if str(src) != str(dest):
+                _journal_rename(journal, "file", src, dest)
                 os.rename(src, dest)  # case-only rename on a case-insensitive drive
             return dest
         dest = unique_dest(dest)
+    _journal_rename(journal, "file", src, dest)
     try:
         os.rename(src, dest)
     except OSError as exc:
@@ -1660,7 +1667,141 @@ def _move(src: Path, dest: Path) -> Path:
     return dest
 
 
-def move_planned(items: list[PlannedFile], done: list[tuple[Path, Path]]) -> None:
+
+def file_sha256(path: Path) -> str | None:
+    """SHA-256 of a regular file, or None if it can't be read."""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
+def _tag_container(path: Path):
+    """(audio or None, tags or None) opened the same way write_tags opens them."""
+    if path.suffix.lower() == ".mp3":
+        try:
+            return None, ID3(path)
+        except ID3NoHeaderError:
+            return None, None
+    audio = MutagenFile(path)
+    if audio is None:
+        raise OSError(f"unrecognised audio file: {path}")
+    return audio, audio.tags
+
+
+def capture_tags(path: Path) -> dict:
+    """Snapshot of every tag in path, enough for restore_tags to put them all back.
+
+    ID3 keeps its frames and version; other formats keep their key/value
+    pairs. Values are pickled so binary fields (cover art, MP4 free-form
+    atoms) survive. Audio data is never copied.
+    """
+    _audio, tags = _tag_container(path)
+    if tags is None:
+        return {"kind": "none"}
+    if isinstance(tags, ID3):
+        payload = list(tags.values())
+        return {"kind": "id3", "version": list(tags.version),
+                "data": base64.b64encode(pickle.dumps(payload)).decode("ascii")}
+    if isinstance(tags, list):
+        # Vorbis comments and ASF are ordered lists of pairs; keep order and case.
+        snap = {"kind": "list", "data": base64.b64encode(pickle.dumps(list(list.__iter__(tags)))).decode("ascii")}
+        if hasattr(tags, "vendor"):
+            snap["vendor"] = tags.vendor
+        return snap
+    payload = [(k, v) for k, v in tags.items()]
+    return {"kind": "map", "data": base64.b64encode(pickle.dumps(payload)).decode("ascii")}
+
+
+def restore_tags(path: Path, snapshot: dict) -> None:
+    """Replace every tag in path with a capture_tags() snapshot."""
+    kind = snapshot.get("kind")
+    payload = pickle.loads(base64.b64decode(snapshot["data"])) if "data" in snapshot else []
+    if path.suffix.lower() == ".mp3":
+        if kind == "none":
+            try:
+                ID3(path).delete(path)
+            except ID3NoHeaderError:
+                pass
+            return
+        tags = ID3()
+        for frame in payload:
+            tags.add(frame)
+        version = (snapshot.get("version") or [2, 4, 0])[1]
+        tags.save(path, v2_version=3 if version == 3 else 4)
+        return
+    audio = MutagenFile(path)
+    if audio is None:
+        raise OSError(f"unrecognised audio file: {path}")
+    if kind == "none":
+        if audio.tags is not None:
+            audio.delete()
+        return
+    if audio.tags is None:
+        audio.add_tags()
+    if kind == "id3":
+        audio.tags.clear()
+        for frame in payload:
+            audio.tags.add(frame)
+        version = (snapshot.get("version") or [2, 4, 0])[1]
+        audio.save(v2_version=3 if version == 3 else 4)
+        return
+    if kind == "list" and isinstance(audio.tags, list):
+        list.__delitem__(audio.tags, slice(None))
+        list.extend(audio.tags, payload)
+        if "vendor" in snapshot and hasattr(audio.tags, "vendor"):
+            audio.tags.vendor = snapshot["vendor"]
+        audio.save()
+        return
+    for key in list(audio.tags.keys()):
+        del audio.tags[key]
+    for key, value in payload:
+        audio.tags[key] = value
+    audio.save()
+
+
+def _journal_rename(journal: "Journal | None", kind: str, src: Path, dest: Path) -> None:
+    """Record a rename before it happens, including the file's current hash."""
+    if journal is None:
+        return
+    st = os.lstat(src)
+    entry = {"action": "rename", "kind": kind, "old": str(src), "new": str(dest), "dev": st.st_dev, "ino": st.st_ino}
+    if stat.S_ISREG(st.st_mode):
+        entry["sha256"] = file_sha256(src)
+    journal.write(**entry)
+
+
+def _mkdirs_logged(journal: "Journal | None", folder: Path) -> None:
+    """mkdir -p, recording each folder it creates (outermost first) before creating it."""
+    missing = []
+    current = folder
+    while not os.path.lexists(current):
+        missing.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    for path in reversed(missing):
+        if journal is not None:
+            journal.write(action="mkdir", path=str(path))
+        path.mkdir(exist_ok=True)
+
+
+def _trash_logged(journal: "Journal | None", path: Path) -> Path:
+    """Move path to the trash, recording it first. Returns the trash location."""
+    sha = file_sha256(path) if path.is_file() else None
+    if journal is not None:
+        journal.write(action="trash", path=str(path.resolve()), sha256=sha)
+    trashed = mm_common.send_to_trash(path)
+    if journal is not None:
+        journal.write(action="trashed", path=str(path.resolve()), trashed=str(trashed), sha256=sha)
+    return trashed
+
+
+def move_planned(items: list[PlannedFile], done: list[tuple[Path, Path]], journal: Journal | None = None) -> None:
     """Move every item, appending (source, final destination) to done.
 
     When a destination is currently occupied by another file of the same
@@ -1680,6 +1821,7 @@ def move_planned(items: list[PlannedFile], done: list[tuple[Path, Path]]) -> Non
         if blocker is None:
             continue
         staged = unique_dest(blocker.with_name(f".discogs-tag-{os.getpid()}-{blocker.name}"))
+        _journal_rename(journal, "stage", blocker, staged)
         os.rename(blocker, staged)
         done.append((blocker, staged))
         for other in items:
@@ -1687,7 +1829,7 @@ def move_planned(items: list[PlannedFile], done: list[tuple[Path, Path]]) -> Non
                 other.source = staged
         sources = [i.source for i in items]
     for item in items:
-        final = _move(item.source, item.dest)
+        final = _move(item.source, item.dest, journal)
         done.append((item.source, final))
 
 
@@ -1713,6 +1855,7 @@ def apply_album(
     dry_run: bool,
     clear_other: bool = False,
     scan_root: Path | None = None,
+    journal_dir: Path | None = None,
 ) -> list[tuple[Path, Path]]:
     """Tag the album's files, then move them into place.
 
@@ -1805,65 +1948,81 @@ def apply_album(
                 print(f"  note  hand-made playlist {sidecar.name} is moved as-is; it may list old file names")
 
     # Phase 1: tags. Nothing moves unless every file was tagged.
+    # A real run journals every change before doing it, so the whole apply can be undone.
+    journal: Journal | None = None
+    if not dry_run:
+        journal = Journal("apply", journal_dir)
+        journal.write(action="start", command="apply", album=str(album.path), dest=str(target_dir))
     tagged: list[Path] = []
-    for item in plan:
-        try:
-            removed = write_tags(item.source, item.meta, clear_other=clear_other, dry_run=dry_run)
-        except Exception as exc:  # noqa: BLE001 - any failure must stop this album only
-            msg = f"tagging failed for {item.source}: {type(exc).__name__}: {exc}\n  nothing was moved"
-            if tagged and not dry_run:
-                msg += f"; {len(tagged)} file(s) were already re-tagged in place:\n"
-                msg += "\n".join(f"    {p}" for p in tagged)
-            raise AlbumApplyError(msg) from exc
-        if removed:
-            print(f"      {'would clear' if dry_run else 'cleared'}  {', '.join(removed)}  ({item.source.name})")
-        tagged.append(item.source)
-
-    moves: list[PlannedFile] = list(plan)
-    for extra_dir in album.extra_dirs:
-        print(f"  move  {extra_dir.name}/")
-        moves.append(PlannedFile(extra_dir, target_dir / extra_dir.name))
-    for sidecar in sidecars:
-        rel = sidecar.relative_to(album.path)
-        print(f"  move  {rel}")
-        moves.append(PlannedFile(sidecar, target_dir / rel))
-    for playlist in old_playlists:
-        print(f"  drop  {playlist.relative_to(album.path)}  (generated playlist; regenerated after the move)")
-
-    if dry_run:
-        return []
-
-    # Phase 2: moves.
-    done: list[tuple[Path, Path]] = []
     try:
-        target_dir.mkdir(parents=True, exist_ok=True)
-        move_planned(moves, done)
-    except Exception as exc:  # noqa: BLE001
-        moved_sources = {src for src, _ in done}
-        pending = [m for m in moves if m.source not in moved_sources]
-        raise AlbumApplyError(
-            f"move failed: {type(exc).__name__}: {exc}\n"
-            f"  all files were tagged; the album is split between\n"
-            f"    {album.path}\n    {target_dir}\n" + describe_moves(done, pending)
-        ) from exc
+        for item in plan:
+            try:
+                if journal is not None:
+                    journal.write(action="tags", phase="before", path=str(item.source), snapshot=capture_tags(item.source))
+                removed = write_tags(item.source, item.meta, clear_other=clear_other, dry_run=dry_run)
+            except Exception as exc:  # noqa: BLE001 - any failure must stop this album only
+                msg = f"tagging failed for {item.source}: {type(exc).__name__}: {exc}\n  nothing was moved"
+                if tagged and not dry_run:
+                    msg += f"; {len(tagged)} file(s) were already re-tagged in place:\n"
+                    msg += "\n".join(f"    {p}" for p in tagged)
+                raise AlbumApplyError(msg) from exc
+            if journal is not None:
+                journal.write(action="tags", phase="after", path=str(item.source), sha256=file_sha256(item.source))
+            if removed:
+                print(f"      {'would clear' if dry_run else 'cleared'}  {', '.join(removed)}  ({item.source.name})")
+            tagged.append(item.source)
+
+        moves: list[PlannedFile] = list(plan)
+        for extra_dir in album.extra_dirs:
+            print(f"  move  {extra_dir.name}/")
+            moves.append(PlannedFile(extra_dir, target_dir / extra_dir.name))
+        for sidecar in sidecars:
+            rel = sidecar.relative_to(album.path)
+            print(f"  move  {rel}")
+            moves.append(PlannedFile(sidecar, target_dir / rel))
+        for playlist in old_playlists:
+            print(f"  drop  {playlist.relative_to(album.path)}  (generated playlist; regenerated after the move)")
+
+        if dry_run:
+            return []
+
+        # Phase 2: moves.
+        done: list[tuple[Path, Path]] = []
+        try:
+            _mkdirs_logged(journal, target_dir)
+            move_planned(moves, done, journal)
+        except Exception as exc:  # noqa: BLE001
+            moved_sources = {src for src, _ in done}
+            pending = [m for m in moves if m.source not in moved_sources]
+            raise AlbumApplyError(
+                f"move failed: {type(exc).__name__}: {exc}\n"
+                f"  all files were tagged; the album is split between\n"
+                f"    {album.path}\n    {target_dir}\n" + describe_moves(done, pending)
+            ) from exc
 
     # Phase 3: playlists and cleanup.
-    if old_playlists:
-        regenerate_playlist(target_dir, old_playlists)
-    if album.path.resolve() != target_dir.resolve():
-        limit = prune_limit(album.path, dest_root, scan_root)
-        for gone in _prune_empty(album.path, limit, protect=[dest_root, target_dir]):
-            print(f"  removed empty folder  {gone}")
-    return done
+        if old_playlists:
+            regenerate_playlist(target_dir, old_playlists, journal)
+        if album.path.resolve() != target_dir.resolve():
+            limit = prune_limit(album.path, dest_root, scan_root)
+            for gone in _prune_empty(album.path, limit, protect=[dest_root, target_dir], journal=journal):
+                print(f"  removed empty folder  {gone}")
+        return done
+    finally:
+        if journal is not None:
+            journal.close()
+            print(f"journal: {journal.path}")
+            print(f"undo:    discogs-tag --undo-journal '{journal.path}'   (preview; add --apply to undo)")
 
 
-def regenerate_playlist(target_dir: Path, old_playlists: list[Path]) -> None:
+def regenerate_playlist(target_dir: Path, old_playlists: list[Path], journal: Journal | None = None) -> None:
+    """Generated playlists go to the trash (never unlink), then a fresh one is written."""
     for playlist in old_playlists:
         try:
             if playlist.exists():
-                playlist.unlink()
+                _trash_logged(journal, playlist)
         except OSError as exc:
-            print(f"  warning: could not delete old playlist {playlist}: {exc}")
+            print(f"  warning: could not trash old playlist {playlist}: {exc}")
     dest = mm_common.playlist_path(target_dir)
     if dest.exists() and not mm_common.is_generated_playlist(dest):
         print(f"  warning: not replacing hand-made playlist {dest}")
@@ -1872,7 +2031,11 @@ def regenerate_playlist(target_dir: Path, old_playlists: list[Path]) -> None:
     if not tracks:
         return
     try:
+        if journal is not None:
+            journal.write(action="create-intent", path=str(dest))
         mm_common.write_playlist_file(dest, mm_common.render_playlist(target_dir, tracks))
+        if journal is not None:
+            journal.write(action="create", path=str(dest), sha256=file_sha256(dest))
         print(f"  playlist  {dest.name}  ({len(tracks)} tracks)")
     except OSError as exc:
         print(f"  warning: could not write playlist {dest}: {exc}")
@@ -1901,7 +2064,13 @@ def prune_limit(album_path: Path, dest_root: Path, scan_root: Path | None) -> Pa
     return album
 
 
-def _remove_empty_tree(folder: Path, protected: set[Path]) -> list[Path]:
+def _rmdir_logged(journal: Journal | None, current: Path) -> None:
+    if journal is not None:
+        journal.write(action="rmdir", path=str(current))
+    os.rmdir(current)
+
+
+def _remove_empty_tree(folder: Path, protected: set[Path], journal: Journal | None = None) -> list[Path]:
     """rmdir every truly empty folder inside folder, deepest first."""
     removed: list[Path] = []
     for dirpath, _dirnames, filenames in os.walk(folder, topdown=False, followlinks=False):
@@ -1911,14 +2080,14 @@ def _remove_empty_tree(folder: Path, protected: set[Path]) -> list[Path]:
         if current.resolve() in protected or current.is_symlink() or os.path.ismount(current):
             continue
         try:
-            os.rmdir(current)
+            _rmdir_logged(journal, current)
             removed.append(current)
         except OSError:
             pass
     return removed
 
 
-def _prune_empty(start: Path, limit: Path, protect: list[Path] = ()) -> list[Path]:
+def _prune_empty(start: Path, limit: Path, protect: list[Path] = (), journal: Journal | None = None) -> list[Path]:
     """Remove folders left empty under start, then start and its parents.
 
     Uses os.rmdir only, which refuses to remove a folder holding anything at
@@ -1936,7 +2105,7 @@ def _prune_empty(start: Path, limit: Path, protect: list[Path] = ()) -> list[Pat
         protected |= {path, *path.parents}
     removed: list[Path] = []
     if start.is_dir() and not start.is_symlink():
-        removed += _remove_empty_tree(start, protected)
+        removed += _remove_empty_tree(start, protected, journal)
     current = start
     while True:
         try:
@@ -1948,7 +2117,7 @@ def _prune_empty(start: Path, limit: Path, protect: list[Path] = ()) -> list[Pat
         if resolved in protected or current.is_symlink() or not current.is_dir() or os.path.ismount(current):
             return removed
         try:
-            os.rmdir(current)
+            _rmdir_logged(journal, current)
         except OSError:
             return removed  # not empty: stop here
         removed.append(current)
@@ -2208,12 +2377,230 @@ def normalize_folders(root: Path, apply: bool, journal_dir: Path | None = None) 
     return 1 if failed else 0
 
 
-def undo_journal(journal_path: Path, apply: bool, journal_dir: Path | None = None) -> int:
-    """Reverse the renames in a journal, newest first.
+class _UndoView:
+    """The file system as undo sees it.
 
-    A rename is only reversed when the renamed item is still where the
-    journal left it (same device and inode) and nothing has taken its old
-    place. Anything else changed since and is skipped and reported.
+    Live mode looks at the disk. Preview mode layers the effect of every
+    step already listed on top, so later steps are checked as they would be
+    when they run (a file moved back frees its new name, a recreated folder
+    exists, and so on). Nothing on disk is changed in either mode.
+    """
+
+    _DIR = "<dir>"
+
+    def __init__(self, simulate: bool):
+        self.simulate = simulate
+        self.over: dict[str, str | None] = {}
+        self._hashes: dict[str, str | None] = {}
+
+    def exists(self, path: Path) -> bool:
+        key = str(path)
+        if key in self.over:
+            return self.over[key] is not None
+        return os.path.lexists(path)
+
+    def is_dir(self, path: Path) -> bool:
+        key = str(path)
+        if key in self.over:
+            real = self.over[key]
+            return real == self._DIR or (real is not None and os.path.isdir(real))
+        return path.is_dir() and not path.is_symlink()
+
+    def is_empty_dir(self, path: Path) -> bool:
+        if not self.is_dir(path):
+            return False
+        names: set[str] = set()
+        real = self.over.get(str(path), str(path))
+        if real not in (None, self._DIR):
+            try:
+                names = set(os.listdir(real))
+            except OSError:
+                names = set()
+        for key, value in self.over.items():
+            parent, _, name = key.rpartition("/")
+            if parent == str(path):
+                if value is None:
+                    names.discard(name)
+                else:
+                    names.add(name)
+        return not names
+
+    def sha256(self, path: Path) -> str | None:
+        real = self.over.get(str(path), str(path))
+        if real in (None, self._DIR):
+            return None
+        if not self.simulate:
+            return file_sha256(Path(real))
+        if real not in self._hashes:
+            self._hashes[real] = file_sha256(Path(real))
+        return self._hashes[real]
+
+    def moved(self, src: Path, dest: Path) -> None:
+        if self.simulate:
+            self.over[str(dest)] = self.over.get(str(src), str(src))
+            self.over[str(src)] = None
+
+    def made_dir(self, path: Path) -> None:
+        if self.simulate:
+            self.over[str(path)] = self._DIR
+
+    def removed(self, path: Path) -> None:
+        if self.simulate:
+            self.over[str(path)] = None
+
+
+@dataclass
+class UndoStep:
+    """One reversing action. check() says why it can't run ("" when it can)."""
+
+    label: str
+    check: object
+    run: object
+    simulate: object
+
+
+def _move_back(journal: Journal, current: Path, original: Path) -> None:
+    original.parent.mkdir(parents=True, exist_ok=True)
+    _journal_rename(journal, "undo", current, original)
+    try:
+        os.rename(current, original)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        _move_across_devices(current, original)
+
+
+def undo_plan(entries: list[dict]) -> list[UndoStep]:
+    """Reversing steps for a journal's entries, newest first.
+
+    Every step re-checks the disk before it runs: something that changed
+    since the journal was written (a file edited, moved, or replaced, or a
+    name that is taken again) is skipped and reported, never overwritten.
+    """
+    after_hash: dict[int, str | None] = {}
+    pending_before: dict[str, int] = {}
+    for i, entry in enumerate(entries):
+        if entry.get("action") != "tags":
+            continue
+        if entry.get("phase") == "before":
+            pending_before[entry.get("path", "")] = i
+        elif entry.get("phase") == "after" and entry.get("path") in pending_before:
+            after_hash[pending_before.pop(entry["path"])] = entry.get("sha256")
+
+    steps: list[UndoStep] = []
+    for i in range(len(entries) - 1, -1, -1):
+        entry = entries[i]
+        action = entry.get("action")
+
+        if action == "rename":
+            current, original = Path(entry["new"]), Path(entry["old"])
+
+            def check(view, e=entry, current=current, original=original):
+                if not view.exists(current):
+                    return "no longer exists"
+                if e.get("sha256"):
+                    if view.sha256(current) != e["sha256"]:
+                        return "changed since (contents differ)"
+                elif str(current) not in view.over:
+                    try:
+                        st = os.lstat(current)
+                    except OSError:
+                        return "no longer exists"
+                    if st.st_dev == e.get("dev") and st.st_ino != e.get("ino"):
+                        return "is not the item that was renamed (changed since)"
+                if view.exists(original):
+                    return f"{original.name!r} exists again"
+                return ""
+
+            steps.append(UndoStep(
+                f"move back  {current}\n    -> {original}",
+                check,
+                lambda j, c=current, o=original: _move_back(j, c, o),
+                lambda view, c=current, o=original: view.moved(c, o),
+            ))
+
+        elif action == "mkdir":
+            folder = Path(entry["path"])
+            steps.append(UndoStep(
+                f"remove the folder it created  {folder}",
+                lambda view, f=folder: "" if view.is_empty_dir(f) else ("no longer exists" if not view.exists(f) else "is not empty"),
+                lambda j, f=folder: _rmdir_logged(j, f),
+                lambda view, f=folder: view.removed(f),
+            ))
+
+        elif action == "rmdir":
+            folder = Path(entry["path"])
+            steps.append(UndoStep(
+                f"recreate empty folder  {folder}",
+                lambda view, f=folder: "" if not view.exists(f) else ("" if view.is_dir(f) else "a file now has that name"),
+                lambda j, f=folder: _mkdirs_logged(j, f),
+                lambda view, f=folder: view.made_dir(f),
+            ))
+
+        elif action == "trashed":
+            original, trashed = Path(entry["path"]), Path(entry["trashed"])
+
+            def check(view, e=entry, original=original, trashed=trashed):
+                if not view.exists(trashed):
+                    return "is no longer in the trash"
+                if e.get("sha256") and view.sha256(trashed) != e["sha256"]:
+                    return "the trashed copy changed"
+                if view.exists(original):
+                    return f"{original.name!r} exists again"
+                return ""
+
+            def run(j, original=original, trashed=trashed):
+                _move_back(j, trashed, original)
+                info = trashed.parent.parent / "info" / f"{trashed.name}.trashinfo"
+                if info.is_file():
+                    info.unlink()
+
+            steps.append(UndoStep(
+                f"restore from trash  {original}", check, run,
+                lambda view, o=original, t=trashed: view.moved(t, o),
+            ))
+
+        elif action == "create":
+            created = Path(entry["path"])
+            steps.append(UndoStep(
+                f"trash the playlist it wrote  {created}",
+                lambda view, f=created, h=entry.get("sha256"): (
+                    "no longer exists" if not view.exists(f)
+                    else "changed since (contents differ)" if view.sha256(f) != h else ""),
+                lambda j, f=created: _trash_logged(j, f),
+                lambda view, f=created: view.removed(f),
+            ))
+
+        elif action == "tags" and entry.get("phase") == "before":
+            path = Path(entry["path"])
+            expected = after_hash.get(i)
+            finished = i in after_hash
+
+            def check(view, path=path, expected=expected, finished=finished):
+                if not view.exists(path):
+                    return "is not back in its old place"
+                if finished and view.sha256(path) != expected:
+                    return "changed since it was tagged"
+                return ""
+
+            def run(j, path=path, snapshot=entry.get("snapshot") or {"kind": "none"}):
+                j.write(action="tags", phase="before", path=str(path), snapshot=capture_tags(path))
+                restore_tags(path, snapshot)
+                j.write(action="tags", phase="after", path=str(path), sha256=file_sha256(path))
+
+            label = f"restore the original tags  {path}"
+            if not finished:
+                label += "  (the tag write never finished)"
+            steps.append(UndoStep(label, check, run, lambda view: None))
+
+    return steps
+
+
+def undo_journal(journal_path: Path, apply: bool, journal_dir: Path | None = None) -> int:
+    """Reverse everything a journal recorded, newest first.
+
+    Without apply this is the undo plan: every step that would run and every
+    step that would be skipped, with nothing changed on disk.
     """
     entries = []
     with open(journal_path, encoding="utf-8") as fh:
@@ -2221,64 +2608,51 @@ def undo_journal(journal_path: Path, apply: bool, journal_dir: Path | None = Non
             if not line.strip():
                 continue
             try:
-                entry = json.loads(line)
+                entries.append(json.loads(line))
             except json.JSONDecodeError:
                 print(f"  warning: line {n} of the journal is not valid JSON; ignored")
-                continue
-            if entry.get("action") == "rename":
-                entries.append(entry)
-    mode = "APPLY" if apply else "PREVIEW (nothing is renamed; add --apply to undo)"
+    steps = undo_plan(entries)
+    mode = "APPLY" if apply else "PREVIEW (nothing is changed; add --apply to undo)"
     print(f"undo {journal_path}\n{mode}\n")
 
-    def blocker(entry: dict, current: Path, original: Path) -> str:
-        try:
-            st = os.lstat(current)
-        except OSError:
-            return "no longer exists"
-        if (st.st_dev, st.st_ino) != (entry.get("dev"), entry.get("ino")):
-            return "is not the item that was renamed (changed since)"
-        if os.path.lexists(original):
-            return f"{original.name!r} exists again"
-        return ""
-
-    plan = [(e, Path(e["new"]), Path(e["old"])) for e in reversed(entries)]
-    skipped: list[tuple[Path, str]] = []
+    skipped: list[tuple[str, str]] = []
     if not apply:
-        # Playlists are renamed inside their (still renamed) folder and are
-        # undone before it, so every step can be checked as things are now.
+        view = _UndoView(simulate=True)
         ready = 0
-        for entry, current, original in plan:
-            reason = blocker(entry, current, original)
+        for step in steps:
+            reason = step.check(view)
             if reason:
-                skipped.append((current, reason))
+                skipped.append((step.label, reason))
                 continue
+            step.simulate(view)
             ready += 1
-            print(f"  {current}\n    -> {original.name}")
-        for path, reason in skipped:
-            print(f"  would skip {path}: {reason}")
-        print(f"\n{ready} renames would be reversed, {len(skipped)} skipped")
+            print(f"  {step.label}")
+        for label, reason in skipped:
+            print(f"  would skip  {label}: {reason}")
+        print(f"\n{ready} changes would be reversed, {len(skipped)} skipped")
         return 0
 
+    view = _UndoView(simulate=False)
     journal = Journal("undo", journal_dir)
     journal.write(action="start", command="undo-journal", journal=str(journal_path))
     done = 0
     try:
-        for entry, current, original in plan:
-            reason = blocker(entry, current, original)
+        for step in steps:
+            reason = step.check(view)
             if not reason:
                 try:
-                    _rename_logged(journal, entry.get("kind", "folder"), current, original)
-                    print(f"  {current}\n    -> {original.name}")
+                    step.run(journal)
+                    print(f"  {step.label}")
                     done += 1
                     continue
                 except OSError as exc:
                     reason = str(exc)
-            skipped.append((current, reason))
+            skipped.append((step.label, reason))
     finally:
         journal.close()
-    for path, reason in skipped:
-        print(f"  skipped {path}: {reason}")
-    print(f"\nreversed {done} renames, {len(skipped)} skipped")
+    for label, reason in skipped:
+        print(f"  skipped  {label}: {reason}")
+    print(f"\nreversed {done} changes, {len(skipped)} skipped")
     print(f"journal of this undo: {journal.path}")
     return 1 if skipped else 0
 
@@ -2760,6 +3134,11 @@ library cleanup (no Discogs, no tag changes):
   journal in ~/.local/state/discogs-tag/journal/ ($XDG_STATE_HOME);
   --undo-journal FILE --apply reverses it newest first, skipping anything
   that changed since. Without --apply, --undo-journal only previews.
+
+Undo:
+  Every real apply also writes a journal (tags before and after, moves,
+  folders, playlists). Its path is printed at the end of the run, and
+  --undo-journal FILE undoes the whole apply the same way.
 """.strip(),
     )
     parser.add_argument(
@@ -2803,12 +3182,12 @@ library cleanup (no Discogs, no tag changes):
         "--undo-journal",
         type=Path,
         metavar="FILE",
-        help="reverse the renames recorded in a --normalize-folders journal (preview unless --apply)",
+        help="reverse everything recorded in a journal from an apply or --normalize-folders (preview unless --apply)",
     )
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="really rename for --normalize-folders / --undo-journal (default is a preview)",
+        help="really make the changes for --normalize-folders / --undo-journal (default is a preview)",
     )
     return parser.parse_args(argv)
 

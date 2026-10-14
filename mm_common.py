@@ -13,7 +13,7 @@ with this header::
 
 Only playlists that carry that marker, or legacy playlists written by older
 versions of album-m3u (see is_legacy_generated), are ever replaced or
-deleted. Every other .m3u/.m3u8 file is treated as hand-made and left alone.
+moved to the trash. Every other .m3u/.m3u8 file is treated as hand-made and left alone.
 """
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ __version__ = "0.1.0"
 
 import os
 import re
+import shutil
+import time
 from pathlib import Path
 
 AUDIO_EXTS = {
@@ -250,3 +252,40 @@ def write_playlist_file(dest: Path, lines: list[str]) -> None:
     finally:
         if tmp.exists():
             tmp.unlink()
+
+
+def trash_root() -> Path:
+    """Freedesktop trash for this user ($XDG_DATA_HOME/Trash, else ~/.local/share/Trash)."""
+    data = os.environ.get("XDG_DATA_HOME", "").strip()
+    base = Path(data).expanduser() if data else Path.home() / ".local" / "share"
+    return base / "Trash"
+
+
+def send_to_trash(path: Path) -> Path:
+    """Move a file into the freedesktop trash. Returns where it landed.
+
+    Writes the .trashinfo file first. On a different drive the move copies,
+    checks size, then removes the original, so a failure never loses the file.
+    Raises OSError and leaves the original in place when the trash can't be written.
+    """
+    path = Path(path)
+    if not path.exists() and not path.is_symlink():
+        raise FileNotFoundError(path)
+    root = trash_root()
+    files, info = root / "files", root / "info"
+    files.mkdir(parents=True, exist_ok=True)
+    info.mkdir(parents=True, exist_ok=True)
+    dest = files / path.name
+    n = 1
+    while dest.exists() or (info / f"{dest.name}.trashinfo").exists():
+        n += 1
+        dest = files / f"{path.name}.{n}"
+    info_path = info / f"{dest.name}.trashinfo"
+    when = time.strftime("%Y-%m-%dT%H:%M:%S")
+    info_path.write_text(f"[Trash Info]\nPath={path.resolve()}\nDeletionDate={when}\n", encoding="utf-8")
+    try:
+        shutil.move(str(path), dest)
+    except BaseException:
+        info_path.unlink(missing_ok=True)
+        raise
+    return dest
