@@ -166,7 +166,6 @@ POS_CD = re.compile(r"^(?:(?:cd|dvd|disc|disk)\s*)?(\d+)\s*[-–.]\s*(\d+)[a-z]?
 POS_NUM = re.compile(r"^(\d+)([a-z]|\.\d+)?$", re.I)
 POS_VINYL = re.compile(r"^([A-Z]{1,2})\s*(\d*)([a-z]|\.\d+)?$", re.I)
 RELEASE_URL = re.compile(r"discogs\.com/(?:.+/)?release/(\d+)", re.I)
-MASTER_URL = re.compile(r"discogs\.com/(?:.+/)?master/(\d+)", re.I)
 
 
 def natural_key(name: str) -> list:
@@ -214,10 +213,6 @@ def stays_behind(path: Path) -> bool:
 
 def is_audio(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in AUDIO_EXTS
-
-
-def is_sidecar(path: Path) -> bool:
-    return path.is_file() and path.suffix.lower() in SIDECAR_EXTS
 
 
 def audio_in(folder: Path) -> list[Path]:
@@ -1447,14 +1442,6 @@ def write_tags(path: Path, meta: dict, clear_other: bool = False, dry_run: bool 
     if not dry_run:
         audio.save()
     return removed
-
-
-def _write_mp3(path: Path, meta: dict) -> None:
-    write_tags(path, meta)
-
-
-def _write_mp4(path: Path, meta: dict) -> None:
-    write_tags(path, meta)
 
 
 # ---------------------------------------------------------------------------
@@ -2881,7 +2868,7 @@ def self_test() -> int:
         bare.write_bytes(b"not an mpeg frame")
         assert already_tagged(bare) is None
         assert read_easy_tags(bare) == {}
-        _write_mp3(
+        write_tags(
             bare,
             {
                 "title": "Song",
