@@ -1846,6 +1846,42 @@ def describe_moves(done: list[tuple[Path, Path]], pending: list[PlannedFile]) ->
     return "\n".join(lines)
 
 
+def validate_layout(album: AlbumFolder, dest_root: Path, target_dir: Path) -> None:
+    """Refuse layouts that would make an apply write into or through its own source.
+
+    Raises AlbumApplyError (before anything is written) when the destination
+    library or the album's target folder lies inside the source album, when the
+    target folder contains the source album (the album would be emptied into
+    one of its parents), or when a symlink in the album points outside it
+    (tagging would modify a file elsewhere). Re-tagging in place (target is
+    the album folder itself) is allowed.
+    """
+    src = album.path.resolve()
+    target = target_dir.resolve()
+    root = dest_root.resolve()
+    if target != src:
+        if root == src or root.is_relative_to(src):
+            raise AlbumApplyError(f"refusing: destination {dest_root} is inside the source album {album.path}\n  nothing was changed")
+        if target.is_relative_to(src):
+            raise AlbumApplyError(f"refusing: target folder {target_dir} is inside the source album {album.path}\n  nothing was changed")
+        if src.is_relative_to(target):
+            raise AlbumApplyError(
+                f"refusing: target folder {target_dir} contains the source album {album.path}\n  nothing was changed")
+    escaping: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(album.path, followlinks=False):
+        for name in dirnames + filenames:
+            entry = Path(dirpath) / name
+            if not entry.is_symlink():
+                continue
+            real = entry.resolve()
+            if real != src and not real.is_relative_to(src):
+                escaping.append(f"    {entry}  ->  {real}")
+    if escaping:
+        raise AlbumApplyError(
+            "refusing: symlinks in the album point outside it (their targets would be re-tagged or moved):\n"
+            + "\n".join(escaping) + "\n  nothing was changed")
+
+
 def apply_album(
     album: AlbumFolder,
     dest_root: Path,
@@ -1886,6 +1922,7 @@ def apply_album(
     target_dir = dest_root / folder_artist / folder
 
     print(f"  dest  {target_dir}")
+    validate_layout(album, dest_root, target_dir)
 
     pairs, legacy = match_tracks(album, dtracks)
     if legacy:
