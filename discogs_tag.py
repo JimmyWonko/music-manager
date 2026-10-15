@@ -158,6 +158,9 @@ NAMED_ALBUM_DIR = re.compile(
     r"^\[(?P<y1>\d{4}|)\]\s+(?P<title>.+?)(?:\s+\[(?P<y2>\d{4})\])?(?:\s+\[(?P<cat>[^\]]*)\])?\s*$"
 )
 TRACK_PREFIX = re.compile(r"^(\d{1,3})\s*[\.\-_]\s*")
+# "06 Title": a leading number separated only by spaces (used by match_tracks
+# after TRACK_PREFIX; matched only against track numbers the release has)
+SPACED_TRACK_PREFIX = re.compile(r"^(\d{1,3})\s+(?=\S)")
 # "2-05 Title" / "2.05 Title": disc 2, track 5 (only trusted on multi-disc releases)
 DISC_TRACK_PREFIX = re.compile(r"^(\d{1,2})[-.](\d{1,3})(?=[\s._-])")
 # "B2. Title" / "A1 - Title": vinyl/cassette side + track (only trusted when
@@ -581,6 +584,23 @@ def collect_albums(root: Path) -> list[AlbumFolder]:
 # Discogs API
 # ---------------------------------------------------------------------------
 
+def _write_cache_atomic(cache: Path, text: str) -> None:
+    """Write a cache file so readers only ever see the old or the complete new file."""
+    fd, tmp_name = tempfile.mkstemp(dir=cache.parent, prefix=f".{cache.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, cache)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 class DiscogsError(RuntimeError):
     pass
 
@@ -622,7 +642,14 @@ class Discogs:
         cache = self._cache_path(cache_kind, cache_key)
         # Discogs' API terms: don't show data more than 6 hours stale.
         if cache.exists() and time.time() - cache.stat().st_mtime < CACHE_MAX_AGE:
-            return json.loads(cache.read_text(encoding="utf-8"))
+            try:
+                return json.loads(cache.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, ValueError):
+                # Truncated or corrupt (e.g. an old non-atomic write): drop it and refetch.
+                try:
+                    cache.unlink()
+                except OSError:
+                    pass
 
         self._wait()
         for attempt in range(5):
@@ -640,7 +667,7 @@ class Discogs:
             if response.status_code >= 400:
                 raise DiscogsError(f"Discogs HTTP {response.status_code}: {response.text[:300]}")
             data = response.json()
-            cache.write_text(json.dumps(data), encoding="utf-8")
+            _write_cache_atomic(cache, json.dumps(data))
             return data
         raise DiscogsError(f"Discogs request failed after retries: {url}")
 
@@ -776,18 +803,39 @@ def split_result_title(title: str) -> tuple[str, str]:
     return "", title or ""
 
 
-def score_result(result: dict, guess: dict[str, str]) -> float:
+# --auto only applies a match when the best search hit scores at least
+# AUTO_MIN_SCORE and beats the runner-up by at least AUTO_MIN_MARGIN.
+# The margin used to be 0.08; 0.10 means two hits that differ only by the
+# year bonus (0.07) or a near-identical title can never be auto-picked.
+AUTO_MIN_SCORE = 0.90
+AUTO_MIN_MARGIN = 0.10
+
+
+def score_components(result: dict, guess: dict[str, str]) -> dict[str, float]:
+    """Weighted parts of score_result, so --auto can show why it picked a hit."""
     r_artist, r_album = split_result_title(result.get("title") or "")
-    score = 0.40 * similar(guess.get("album", ""), r_album)
-    score += 0.35 * similar(guess.get("artist", ""), r_artist)
+    parts = {
+        "album": 0.40 * similar(guess.get("album", ""), r_album),
+        "artist": 0.35 * similar(guess.get("artist", ""), r_artist),
+        "catno": 0.0,
+        "year": 0.0,
+    }
     cat = (guess.get("catno") or "").replace(" ", "").upper()
     rcat = (result.get("catno") or "").replace(" ", "").upper()
     if cat and rcat and (cat == rcat or cat in rcat or rcat in cat):
-        score += 0.18
+        parts["catno"] = 0.18
     gy, ry = guess.get("year", ""), str(result.get("year") or "")
     if gy and ry and gy == ry:
-        score += 0.07
-    return min(score, 1.0)
+        parts["year"] = 0.07
+    return parts
+
+
+def format_score_components(parts: dict[str, float]) -> str:
+    return "  ".join(f"{k} {v:.2f}" for k, v in parts.items())
+
+
+def score_result(result: dict, guess: dict[str, str]) -> float:
+    return min(sum(score_components(result, guess).values()), 1.0)
 
 
 def parse_position(position: str) -> tuple[int, int]:
@@ -1541,6 +1589,20 @@ def _disc_from_folder(local: Path, album_path: Path) -> int | None:
     return int(match.group(0)) if match else None
 
 
+# Minimum similar() score for pairing an unnumbered file with a track by title.
+TITLE_MATCH_MIN = 0.80
+
+
+def _title_from_stem(stem: str) -> str:
+    """The title part of a file name: track/side/disc prefixes stripped."""
+    for pattern in (SIDE_PREFIX, DISC_TRACK_PREFIX, TRACK_PREFIX, SPACED_TRACK_PREFIX):
+        m = pattern.match(stem)
+        if m:
+            stem = stem[m.end():]
+            break
+    return stem.strip(" .-_")
+
+
 def match_tracks(album: AlbumFolder, dtracks: list[DiscogsTrack]) -> tuple[list[tuple[Path, DiscogsTrack | None]], bool]:
     """Pair local files with Discogs tracks.
 
@@ -1550,7 +1612,10 @@ def match_tracks(album: AlbumFolder, dtracks: list[DiscogsTrack]) -> tuple[list[
        against the track numbers; a CD1/CD2 folder limits it to that disc.
        Files renamed by older versions (B1 = 21) are recognised and matched
        by that old number when that fits the folder better.
-    3. Anything left takes the remaining tracks in tracklist order.
+    3. Anything left is matched by title similarity (TITLE_MATCH_MIN).
+    4. If the folder has exactly as many files as the release has tracks,
+       whatever is still left takes the remaining tracks in order. Otherwise
+       it stays unmatched (None): reported and not tagged or moved.
 
     Returns the pairs and whether the old vinyl numbering was detected.
     """
@@ -1567,7 +1632,7 @@ def match_tracks(album: AlbumFolder, dtracks: list[DiscogsTrack]) -> tuple[list[
         stem = local.stem
         side = SIDE_PREFIX.match(stem)
         disc_track = DISC_TRACK_PREFIX.match(stem)
-        plain = TRACK_PREFIX.match(stem)
+        plain = TRACK_PREFIX.match(stem) or SPACED_TRACK_PREFIX.match(stem)
         if side and side.group(1).casefold() in side_positions:
             side_index = side_positions[side.group(1).casefold()]
         elif disc_track and len(discs) > 1 and disc_hint is None and 1 <= int(disc_track.group(1)) <= max_disc:
@@ -1606,15 +1671,38 @@ def match_tracks(album: AlbumFolder, dtracks: list[DiscogsTrack]) -> tuple[list[
             used.add(i)
             break
 
-    for k, (_local, disc_hint, _number, _side) in enumerate(info):
+    # 3. Leftovers: match by normalized title, best pairs first.
+    candidates: list[tuple[float, int, int]] = []
+    for k, (local, disc_hint, _number, _side) in enumerate(info):
         if chosen[k] is not None:
             continue
-        free = [i for i in range(len(dtracks)) if i not in used]
-        if disc_hint is not None:
-            free = [i for i in free if dtracks[i].disc == disc_hint] or free
-        if free:
-            chosen[k] = free[0]
-            used.add(free[0])
+        local_title = _title_from_stem(local.stem)
+        if not local_title:
+            continue
+        for i, dt in enumerate(dtracks):
+            if i in used or (disc_hint is not None and dt.disc != disc_hint):
+                continue
+            score = similar(local_title, dt.title)
+            if score >= TITLE_MATCH_MIN:
+                candidates.append((score, k, i))
+    for _score, k, i in sorted(candidates, key=lambda c: (-c[0], c[1], c[2])):
+        if chosen[k] is None and i not in used:
+            chosen[k] = i
+            used.add(i)
+
+    # 4. Position fallback, only when the folder has exactly as many files as
+    #    the release has tracks (so every leftover file has a leftover track).
+    #    Otherwise unmatched files stay None: reported and left untagged.
+    if len(info) == len(dtracks):
+        for k, (_local, disc_hint, _number, _side) in enumerate(info):
+            if chosen[k] is not None:
+                continue
+            free = [i for i in range(len(dtracks)) if i not in used]
+            if disc_hint is not None:
+                free = [i for i in free if dtracks[i].disc == disc_hint] or free
+            if free:
+                chosen[k] = free[0]
+                used.add(free[0])
 
     pairs = [(info[k][0], dtracks[i] if i is not None else None) for k, i in enumerate(chosen)]
     return pairs, use_legacy
@@ -1664,10 +1752,11 @@ def _copy_verified(src: Path, dest: Path) -> None:
     it given its real name. On any problem the partial file is removed and
     the source is untouched.
     """
-    partial = dest.with_name(f".{dest.name}.discogs-tag-partial-{os.getpid()}")
+    fd, partial_name = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.discogs-tag-partial-")
+    partial = Path(partial_name)
     src_hash = hashlib.sha256()
     try:
-        with open(src, "rb") as fin, open(partial, "xb") as fout:
+        with open(src, "rb") as fin, os.fdopen(fd, "wb") as fout:
             while chunk := fin.read(COPY_CHUNK):
                 src_hash.update(chunk)
                 fout.write(chunk)
@@ -1896,9 +1985,13 @@ def move_planned(items: list[PlannedFile], done: list[tuple[Path, Path]], journa
         )
         if blocker is None:
             continue
-        staged = unique_dest(blocker.with_name(f".discogs-tag-{os.getpid()}-{blocker.name}"))
-        _journal_rename(journal, "stage", blocker, staged)
-        os.rename(blocker, staged)
+        staged = _reserve_staging_name(blocker)
+        try:
+            _journal_rename(journal, "stage", blocker, staged)
+            os.rename(blocker, staged)
+        except BaseException:
+            _release_staging_name(staged)
+            raise
         done.append((blocker, staged))
         for other in items:
             if other.source is blocker:
@@ -1907,6 +2000,32 @@ def move_planned(items: list[PlannedFile], done: list[tuple[Path, Path]], journa
     for item in items:
         final = _move(item.source, item.dest, journal)
         done.append((item.source, final))
+
+
+def _reserve_staging_name(blocker: Path) -> Path:
+    """Atomically reserve a unique hidden name next to blocker for staging it.
+
+    An empty placeholder of the same kind (file or directory) is created, so
+    no other process (or a stale leftover) can take the name; the rename
+    then replaces the placeholder.
+    """
+    prefix = f".discogs-tag-stage-{blocker.name}."
+    if blocker.is_dir() and not blocker.is_symlink():
+        return Path(tempfile.mkdtemp(dir=blocker.parent, prefix=prefix))
+    fd, name = tempfile.mkstemp(dir=blocker.parent, prefix=prefix)
+    os.close(fd)
+    return Path(name)
+
+
+def _release_staging_name(staged: Path) -> None:
+    """Remove an unused staging placeholder (only if it is still empty)."""
+    try:
+        if staged.is_dir() and not staged.is_symlink():
+            staged.rmdir()
+        elif staged.is_file() and staged.stat().st_size == 0:
+            staged.unlink()
+    except OSError:
+        pass
 
 
 def describe_moves(done: list[tuple[Path, Path]], pending: list[PlannedFile]) -> str:
@@ -2773,10 +2892,15 @@ def choose_release(
     if auto and ranked:
         top = ranked[0][0]
         second = ranked[1][0] if len(ranked) > 1 else 0.0
-        if top >= 0.90 and top - second >= 0.08:
-            print(f"  auto  {int(top * 100)}%  {ranked[0][1].get('title')}")
+        print(f"  best  {top:.2f}  [{format_score_components(score_components(ranked[0][1], guess))}]  "
+              f"{ranked[0][1].get('title')}")
+        if len(ranked) > 1:
+            print(f"  next  {second:.2f}  [{format_score_components(score_components(ranked[1][1], guess))}]  "
+                  f"{ranked[1][1].get('title')}")
+        if top >= AUTO_MIN_SCORE and top - second >= AUTO_MIN_MARGIN:
+            print(f"  auto  {int(top * 100)}%  margin {top - second:.2f}  {ranked[0][1].get('title')}")
             return api.release(int(ranked[0][1]["id"]))
-        print("  no confident auto-match")
+        print(f"  no confident auto-match (need score >= {AUTO_MIN_SCORE:.2f} and margin >= {AUTO_MIN_MARGIN:.2f})")
         return None
 
     if not sys.stdin.isatty():
@@ -2825,8 +2949,13 @@ def process_album(
     release_id: int | None,
     clear_other: bool = False,
     scan_root: Path | None = None,
+    allow_track_mismatch: bool = False,
 ) -> str:
-    """Returns "applied", "skipped", or "skipped-tagged" (not counted by --limit)."""
+    """Returns "applied", "skipped", or "skipped-tagged" (not counted by --limit).
+
+    In --auto mode a release whose track count differs from the local files
+    is not applied unless allow_track_mismatch is set.
+    """
     if skip_tagged:
         tagged = album_release_ids(album.tracks)
         ids = set(tagged.values())
@@ -2881,6 +3010,9 @@ def process_album(
 
     if len(dtracks) != len(album.tracks):
         print(f"  warning: {len(album.tracks)} local files vs {len(dtracks)} Discogs tracks")
+        if auto and not release_id and not allow_track_mismatch:
+            print("  skipped: track count mismatch in --auto mode (use --allow-track-mismatch to apply anyway)")
+            return "skipped"
 
     if not yes and sys.stdin.isatty() and not dry_run:
         ans = prompt("  apply tags + rename? [Y/n] ").lower()
@@ -3242,6 +3374,11 @@ Undo:
     )
     parser.add_argument("--auto", action="store_true", help="apply only high-confidence matches")
     parser.add_argument("-y", "--yes", action="store_true", help="do not ask before writing")
+    parser.add_argument(
+        "--allow-track-mismatch",
+        action="store_true",
+        help="with --auto, apply a match even when its track count differs from the local files",
+    )
     parser.add_argument("--skip-tagged", action="store_true", help="skip albums whose files all carry the same Discogs release id")
     parser.add_argument("--release-id", type=int, help="use this Discogs release id (single album)")
     parser.add_argument(
@@ -3365,6 +3502,7 @@ def main(argv: list[str] | None = None) -> int:
                     release_id=args.release_id,
                     clear_other=args.clear_other_tags,
                     scan_root=root,
+                    allow_track_mismatch=args.allow_track_mismatch,
                 )
             except KeyboardInterrupt:
                 raise
