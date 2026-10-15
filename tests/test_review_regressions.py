@@ -39,3 +39,51 @@ def _tree(root: Path) -> list[str]:
 @pytest.mark.parametrize("name", ["MASTER_URL", "is_sidecar", "_write_mp3", "_write_mp4"])
 def test_review11_dead_code_removed(dt, name):
     assert not hasattr(dt, name), f"{name} is unused and should be removed"
+
+
+def test_review9_crash_during_tag_save_leaves_original_intact(dt, sample, meta, monkeypatch):
+    path = sample("flac")
+    original = path.read_bytes()
+
+    def crashing_save(self, *a, **k):
+        target = getattr(self, "filename", None) or a[0]
+        with open(target, "r+b") as fh:
+            fh.truncate(16)  # half-written file
+        raise OSError(errno.EIO, "simulated crash during save")
+
+    monkeypatch.setattr(FLAC, "save", crashing_save)
+    with pytest.raises(OSError):
+        dt.write_tags(path, meta)
+    assert path.read_bytes() == original
+
+
+
+def test_review9_atomic_save_keeps_mode_link_and_leaves_no_temp(dt, sample, meta):
+    path = sample("flac")
+    os.chmod(path, 0o640)
+    link = path.with_name("link.flac")
+    link.symlink_to(path.name)
+    ino = os.stat(path).st_ino
+    dt.write_tags(link, meta)
+    assert link.is_symlink() and FLAC(path)["TITLE"]
+    assert (os.stat(path).st_mode & 0o777) == 0o640
+    assert os.stat(path).st_ino != ino  # replaced, not edited in place
+    assert sorted(p.name for p in path.parent.iterdir() if ".discogs-tag-" in p.name) == []
+
+
+def test_review9_crash_during_restore_leaves_file_intact(dt, sample, meta, monkeypatch):
+    path = sample("flac")
+    snap = dt.capture_tags(path)
+    dt.write_tags(path, meta)
+    tagged = path.read_bytes()
+
+    def crashing_save(self, *a, **k):
+        with open(self.filename, "r+b") as fh:
+            fh.truncate(16)
+        raise OSError(errno.EIO, "simulated crash during save")
+
+    monkeypatch.setattr(FLAC, "save", crashing_save)
+    with pytest.raises(OSError):
+        dt.restore_tags(path, snap)
+    assert path.read_bytes() == tagged
+    assert [p.name for p in path.parent.iterdir() if ".discogs-tag-" in p.name] == []
