@@ -581,6 +581,23 @@ def collect_albums(root: Path) -> list[AlbumFolder]:
 # Discogs API
 # ---------------------------------------------------------------------------
 
+def _write_cache_atomic(cache: Path, text: str) -> None:
+    """Write a cache file so readers only ever see the old or the complete new file."""
+    fd, tmp_name = tempfile.mkstemp(dir=cache.parent, prefix=f".{cache.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, cache)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 class DiscogsError(RuntimeError):
     pass
 
@@ -622,7 +639,14 @@ class Discogs:
         cache = self._cache_path(cache_kind, cache_key)
         # Discogs' API terms: don't show data more than 6 hours stale.
         if cache.exists() and time.time() - cache.stat().st_mtime < CACHE_MAX_AGE:
-            return json.loads(cache.read_text(encoding="utf-8"))
+            try:
+                return json.loads(cache.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, ValueError):
+                # Truncated or corrupt (e.g. an old non-atomic write): drop it and refetch.
+                try:
+                    cache.unlink()
+                except OSError:
+                    pass
 
         self._wait()
         for attempt in range(5):
@@ -640,7 +664,7 @@ class Discogs:
             if response.status_code >= 400:
                 raise DiscogsError(f"Discogs HTTP {response.status_code}: {response.text[:300]}")
             data = response.json()
-            cache.write_text(json.dumps(data), encoding="utf-8")
+            _write_cache_atomic(cache, json.dumps(data))
             return data
         raise DiscogsError(f"Discogs request failed after retries: {url}")
 
@@ -1674,10 +1698,11 @@ def _copy_verified(src: Path, dest: Path) -> None:
     it given its real name. On any problem the partial file is removed and
     the source is untouched.
     """
-    partial = dest.with_name(f".{dest.name}.discogs-tag-partial-{os.getpid()}")
+    fd, partial_name = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.discogs-tag-partial-")
+    partial = Path(partial_name)
     src_hash = hashlib.sha256()
     try:
-        with open(src, "rb") as fin, open(partial, "xb") as fout:
+        with open(src, "rb") as fin, os.fdopen(fd, "wb") as fout:
             while chunk := fin.read(COPY_CHUNK):
                 src_hash.update(chunk)
                 fout.write(chunk)
@@ -1906,9 +1931,13 @@ def move_planned(items: list[PlannedFile], done: list[tuple[Path, Path]], journa
         )
         if blocker is None:
             continue
-        staged = unique_dest(blocker.with_name(f".discogs-tag-{os.getpid()}-{blocker.name}"))
-        _journal_rename(journal, "stage", blocker, staged)
-        os.rename(blocker, staged)
+        staged = _reserve_staging_name(blocker)
+        try:
+            _journal_rename(journal, "stage", blocker, staged)
+            os.rename(blocker, staged)
+        except BaseException:
+            _release_staging_name(staged)
+            raise
         done.append((blocker, staged))
         for other in items:
             if other.source is blocker:
@@ -1917,6 +1946,32 @@ def move_planned(items: list[PlannedFile], done: list[tuple[Path, Path]], journa
     for item in items:
         final = _move(item.source, item.dest, journal)
         done.append((item.source, final))
+
+
+def _reserve_staging_name(blocker: Path) -> Path:
+    """Atomically reserve a unique hidden name next to blocker for staging it.
+
+    An empty placeholder of the same kind (file or directory) is created, so
+    no other process (or a stale leftover) can take the name; the rename
+    then replaces the placeholder.
+    """
+    prefix = f".discogs-tag-stage-{blocker.name}."
+    if blocker.is_dir() and not blocker.is_symlink():
+        return Path(tempfile.mkdtemp(dir=blocker.parent, prefix=prefix))
+    fd, name = tempfile.mkstemp(dir=blocker.parent, prefix=prefix)
+    os.close(fd)
+    return Path(name)
+
+
+def _release_staging_name(staged: Path) -> None:
+    """Remove an unused staging placeholder (only if it is still empty)."""
+    try:
+        if staged.is_dir() and not staged.is_symlink():
+            staged.rmdir()
+        elif staged.is_file() and staged.stat().st_size == 0:
+            staged.unlink()
+    except OSError:
+        pass
 
 
 def describe_moves(done: list[tuple[Path, Path]], pending: list[PlannedFile]) -> str:
