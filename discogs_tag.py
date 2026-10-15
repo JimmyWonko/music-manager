@@ -16,8 +16,9 @@ import base64
 import errno
 import hashlib
 import json
+import io
 import os
-import pickle
+import pickle  # only for --trust-legacy-journal (old v1 snapshots)
 import re
 import shutil
 import stat
@@ -1693,34 +1694,172 @@ def _tag_container(path: Path):
     return audio, audio.tags
 
 
+SNAPSHOT_VERSION = 2
+
+
+class LegacySnapshotError(ValueError):
+    """A journal tag snapshot from before v2 (pickle); only restored on explicit trust."""
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(bytes(data)).decode("ascii")
+
+
+def _unb64(text: str) -> bytes:
+    return base64.b64decode(text.encode("ascii"), validate=True)
+
+
+def _encode_value(value) -> dict:
+    """One tag value as plain JSON, keeping its exact type. Raises TypeError for unknown types."""
+    from mutagen.apev2 import APEBinaryValue, APEExtValue, APETextValue
+    from mutagen.asf import ASFBaseAttribute
+    from mutagen.mp4 import MP4Cover
+
+    if isinstance(value, MP4Cover):
+        return {"t": "mp4cover", "v": _b64(value), "fmt": int(value.imageformat)}
+    if isinstance(value, MP4FreeForm):
+        return {"t": "mp4ff", "v": _b64(value), "fmt": int(value.dataformat), "ver": int(value.version)}
+    if isinstance(value, ASFBaseAttribute):
+        out = {"t": "asf", "k": int(value.TYPE), "v": _encode_value(value.value)}
+        if getattr(value, "language", None) is not None:
+            out["lang"] = value.language
+        if getattr(value, "stream", None) is not None:
+            out["stream"] = value.stream
+        return out
+    if isinstance(value, (APETextValue, APEBinaryValue, APEExtValue)):
+        return {"t": "ape", "k": int(value.kind), "v": _encode_value(value.value)}
+    if isinstance(value, bool):
+        return {"t": "bool", "v": value}
+    if isinstance(value, int):
+        return {"t": "int", "v": int(value)}
+    if isinstance(value, str):
+        return {"t": "str", "v": str(value)}
+    if isinstance(value, (bytes, bytearray)):
+        return {"t": "bytes", "v": _b64(value)}
+    if isinstance(value, tuple):
+        return {"t": "tuple", "v": [_encode_value(v) for v in value]}
+    if isinstance(value, list):
+        return {"t": "list", "v": [_encode_value(v) for v in value]}
+    raise TypeError(f"cannot snapshot tag value of type {type(value).__name__}")
+
+
+def _decode_value(obj: dict):
+    """Inverse of _encode_value. Only builds the known, inert value types."""
+    from mutagen.apev2 import APEValue
+    from mutagen.asf import ASFValue
+    from mutagen.mp4 import MP4Cover
+
+    if not isinstance(obj, dict):
+        raise ValueError("bad snapshot value")
+    t, v = obj.get("t"), obj.get("v")
+    if t == "str" and isinstance(v, str):
+        return v
+    if t == "bool" and isinstance(v, bool):
+        return v
+    if t == "int" and isinstance(v, int) and not isinstance(v, bool):
+        return v
+    if t == "bytes" and isinstance(v, str):
+        return _unb64(v)
+    if t == "tuple" and isinstance(v, list):
+        return tuple(_decode_value(x) for x in v)
+    if t == "list" and isinstance(v, list):
+        return [_decode_value(x) for x in v]
+    if t == "mp4cover" and isinstance(v, str):
+        return MP4Cover(_unb64(v), imageformat=int(obj.get("fmt", MP4Cover.FORMAT_JPEG)))
+    if t == "mp4ff" and isinstance(v, str):
+        return MP4FreeForm(_unb64(v), dataformat=int(obj.get("fmt", 1)), version=int(obj.get("ver", 0)))
+    if t == "asf":
+        kwargs = {k: obj[k] for k in ("lang", "stream") if obj.get(k) is not None}
+        if "lang" in kwargs:
+            kwargs["language"] = kwargs.pop("lang")
+        return ASFValue(_decode_value(v), int(obj["k"]), **kwargs)
+    if t == "ape":
+        return APEValue(_decode_value(v), int(obj["k"]))
+    raise ValueError(f"unknown snapshot value type {t!r}")
+
+
+def _id3_to_bytes(tags: ID3) -> str:
+    """A complete ID3v2.4 tag (header + frames) as base64; mutagen re-parses it on restore.
+
+    Saved as v2.4 because mutagen holds frames upgraded to v2.4 in memory;
+    the file's own version is stored separately and used when restoring.
+    """
+    copy = ID3()
+    for frame in tags.values():
+        copy.add(frame)
+    buf = io.BytesIO()
+    copy.save(buf, v2_version=4, padding=lambda info: 0)
+    return _b64(buf.getvalue())
+
+
+def _id3_from_bytes(data: str) -> ID3:
+    raw = _unb64(data)
+    if not raw.startswith(b"ID3"):
+        raise ValueError("bad ID3 snapshot")
+    return ID3(io.BytesIO(raw))
+
+
 def capture_tags(path: Path) -> dict:
     """Snapshot of every tag in path, enough for restore_tags to put them all back.
 
-    ID3 keeps its frames and version; other formats keep their key/value
-    pairs. Values are pickled so binary fields (cover art, MP4 free-form
-    atoms) survive. Audio data is never copied.
+    Plain JSON (snapshot format v2), never pickle. ID3 keeps its whole tag as
+    raw bytes (re-parsed by mutagen on restore) and its version (2.3/2.4);
+    other formats keep their key/value pairs with typed values, binary data
+    (cover art, MP4 free-form atoms, APE/ASF binary fields) base64-encoded.
+    Audio data is never copied.
     """
     _audio, tags = _tag_container(path)
     if tags is None:
         return {"kind": "none"}
     if isinstance(tags, ID3):
-        payload = list(tags.values())
-        return {"kind": "id3", "version": list(tags.version),
-                "data": base64.b64encode(pickle.dumps(payload)).decode("ascii")}
+        return {"kind": "id3", "v": SNAPSHOT_VERSION, "version": list(tags.version), "id3": _id3_to_bytes(tags)}
     if isinstance(tags, list):
         # Vorbis comments and ASF are ordered lists of pairs; keep order and case.
-        snap = {"kind": "list", "data": base64.b64encode(pickle.dumps(list(list.__iter__(tags)))).decode("ascii")}
+        pairs = [[k, _encode_value(v)] for k, v in list.__iter__(tags)]
+        snap = {"kind": "list", "v": SNAPSHOT_VERSION, "pairs": pairs}
         if hasattr(tags, "vendor"):
             snap["vendor"] = tags.vendor
         return snap
-    payload = [(k, v) for k, v in tags.items()]
-    return {"kind": "map", "data": base64.b64encode(pickle.dumps(payload)).decode("ascii")}
+    pairs = [[k, _encode_value(v)] for k, v in tags.items()]
+    return {"kind": "map", "v": SNAPSHOT_VERSION, "pairs": pairs}
 
 
-def restore_tags(path: Path, snapshot: dict) -> None:
-    """Replace every tag in path with a capture_tags() snapshot."""
+def _snapshot_payload(snapshot: dict, trust_legacy: bool):
+    """The snapshot's frames / pairs, decoded. Old pickle snapshots only with trust_legacy."""
     kind = snapshot.get("kind")
-    payload = pickle.loads(base64.b64decode(snapshot["data"])) if "data" in snapshot else []
+    if kind == "none":
+        return []
+    version = snapshot.get("v")
+    if version is None and "data" in snapshot:
+        if not trust_legacy:
+            raise LegacySnapshotError(
+                "old journal snapshot (pickle, v1): refusing to load it because a crafted journal could run code; "
+                "re-run with --trust-legacy-journal only if you are sure this journal was written by discogs-tag")
+        return pickle.loads(base64.b64decode(snapshot["data"]))  # noqa: S301 - explicitly trusted legacy journal
+    if version != SNAPSHOT_VERSION:
+        raise ValueError(f"unsupported tag snapshot version {version!r}")
+    if kind == "id3":
+        return list(_id3_from_bytes(snapshot["id3"]).values())
+    if kind in ("list", "map"):
+        pairs = snapshot.get("pairs")
+        if not isinstance(pairs, list):
+            raise ValueError("bad tag snapshot")
+        out = []
+        for pair in pairs:
+            if not (isinstance(pair, list) and len(pair) == 2 and isinstance(pair[0], str)):
+                raise ValueError("bad tag snapshot pair")
+            out.append((pair[0], _decode_value(pair[1])))
+        return out
+    raise ValueError(f"unknown tag snapshot kind {kind!r}")
+
+
+def restore_tags(path: Path, snapshot: dict, trust_legacy: bool = False) -> None:
+    """Replace every tag in path with a capture_tags() snapshot.
+
+    The snapshot is fully decoded and validated before the file is touched.
+    """
+    kind = snapshot.get("kind")
+    payload = _snapshot_payload(snapshot, trust_legacy)
     if path.suffix.lower() == ".mp3":
         if kind == "none":
             try:
@@ -2470,7 +2609,7 @@ def _move_back(journal: Journal, current: Path, original: Path) -> None:
         _move_across_devices(current, original)
 
 
-def undo_plan(entries: list[dict]) -> list[UndoStep]:
+def undo_plan(entries: list[dict], trust_legacy: bool = False) -> list[UndoStep]:
     """Reversing steps for a journal's entries, newest first.
 
     Every step re-checks the disk before it runs: something that changed
@@ -2576,16 +2715,22 @@ def undo_plan(entries: list[dict]) -> list[UndoStep]:
             expected = after_hash.get(i)
             finished = i in after_hash
 
-            def check(view, path=path, expected=expected, finished=finished):
+            snap = entry.get("snapshot") or {"kind": "none"}
+            legacy = snap.get("kind") != "none" and "v" not in snap and "data" in snap
+
+            def check(view, path=path, expected=expected, finished=finished, legacy=legacy):
+                if legacy and not trust_legacy:
+                    return ("old journal format (pickled tag snapshot); not loaded for safety. "
+                            "Re-run with --trust-legacy-journal if this journal is your own")
                 if not view.exists(path):
                     return "is not back in its old place"
                 if finished and view.sha256(path) != expected:
                     return "changed since it was tagged"
                 return ""
 
-            def run(j, path=path, snapshot=entry.get("snapshot") or {"kind": "none"}):
+            def run(j, path=path, snapshot=snap):
                 j.write(action="tags", phase="before", path=str(path), snapshot=capture_tags(path))
-                restore_tags(path, snapshot)
+                restore_tags(path, snapshot, trust_legacy=trust_legacy)
                 j.write(action="tags", phase="after", path=str(path), sha256=file_sha256(path))
 
             label = f"restore the original tags  {path}"
@@ -2596,7 +2741,8 @@ def undo_plan(entries: list[dict]) -> list[UndoStep]:
     return steps
 
 
-def undo_journal(journal_path: Path, apply: bool, journal_dir: Path | None = None) -> int:
+def undo_journal(journal_path: Path, apply: bool, journal_dir: Path | None = None,
+                 trust_legacy: bool = False) -> int:
     """Reverse everything a journal recorded, newest first.
 
     Without apply this is the undo plan: every step that would run and every
@@ -2611,7 +2757,7 @@ def undo_journal(journal_path: Path, apply: bool, journal_dir: Path | None = Non
                 entries.append(json.loads(line))
             except json.JSONDecodeError:
                 print(f"  warning: line {n} of the journal is not valid JSON; ignored")
-    steps = undo_plan(entries)
+    steps = undo_plan(entries, trust_legacy=trust_legacy)
     mode = "APPLY" if apply else "PREVIEW (nothing is changed; add --apply to undo)"
     print(f"undo {journal_path}\n{mode}\n")
 
@@ -2645,7 +2791,7 @@ def undo_journal(journal_path: Path, apply: bool, journal_dir: Path | None = Non
                     print(f"  {step.label}")
                     done += 1
                     continue
-                except OSError as exc:
+                except (OSError, ValueError, TypeError) as exc:
                     reason = str(exc)
             skipped.append((step.label, reason))
     finally:
@@ -3189,6 +3335,12 @@ Undo:
         action="store_true",
         help="really make the changes for --normalize-folders / --undo-journal (default is a preview)",
     )
+    parser.add_argument(
+        "--trust-legacy-journal",
+        action="store_true",
+        help="with --undo-journal: also restore tag snapshots from journals written before the JSON format "
+        "(they are pickled; only use this on journals discogs-tag itself wrote)",
+    )
     return parser.parse_args(argv)
 
 
@@ -3210,7 +3362,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.undo_journal is not None:
         apply = args.apply and not args.dry_run
-        return undo_journal(args.undo_journal.expanduser(), apply=apply)
+        return undo_journal(args.undo_journal.expanduser(), apply=apply, trust_legacy=args.trust_legacy_journal)
 
     if args.path is None:
         print("error: pass an album folder or tree", file=sys.stderr)
