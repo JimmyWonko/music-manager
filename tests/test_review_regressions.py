@@ -289,3 +289,38 @@ def test_review1_complete_cross_device_dir_move_undoes_cleanly(dt, tmp_path, exd
     assert _tree(src) == ["1-front.jpg", "inner/2-back.jpg", "link.jpg"]
     assert (src / "link.jpg").is_symlink()
     assert not (tmp_path / "b").exists()
+
+
+def test_review2_dest_inside_source_album_is_refused(dt, tmp_path):
+    src = make_album(tmp_path / "in" / "Testers - Side Story", [f"{n:02d} track.flac" for n in range(1, 11)])
+    before = _tree(src)
+    with pytest.raises((ValueError, dt.AlbumApplyError)):
+        run_apply(dt, src, src / "library", release("vinyl_lp"))
+    assert _tree(src) == before
+
+
+def test_review2_symlinked_track_escaping_source_is_refused(dt, tmp_path):
+    outside = make_album(tmp_path / "elsewhere", ["01 track.flac"])
+    src = make_album(tmp_path / "in" / "Testers - Side Story", [f"{n:02d} track.flac" for n in range(2, 11)])
+    (src / "01 track.flac").symlink_to(outside / "01 track.flac")
+    outside_bytes = (outside / "01 track.flac").read_bytes()
+    with pytest.raises((ValueError, dt.AlbumApplyError)):
+        run_apply(dt, src, tmp_path / "lib", release("vinyl_lp"))
+    assert (outside / "01 track.flac").read_bytes() == outside_bytes  # file outside the tree not re-tagged
+
+
+def test_review2_target_containing_source_is_refused(dt, tmp_path):
+    lib = tmp_path / "lib"
+    # The album sits inside the folder it would be moved into.
+    src = make_album(lib / "Testers, The" / "[1985]  Side Story [WAX001]" / "old rip", ["01 track.flac"])
+    with pytest.raises(dt.AlbumApplyError, match="contains the source album"):
+        run_apply(dt, src, lib, release("vinyl_lp"))
+    assert _tree(src) == ["01 track.flac"]
+
+
+def test_review2_symlink_inside_album_is_allowed(dt, tmp_path):
+    src = make_album(tmp_path / "in" / "Testers - Side Story", [f"{n:02d} track.flac" for n in range(1, 11)])
+    (src / "Scans").mkdir()
+    (src / "Scans" / "front.jpg").write_bytes(b"jpg")
+    (src / "cover.jpg").symlink_to("Scans/front.jpg")
+    dt.validate_layout(next(a for a in dt.collect_albums(src) if a.path == src), tmp_path / "lib", tmp_path / "lib" / "x")
