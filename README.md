@@ -214,7 +214,7 @@ fresh one is written in the new folder. Hand-made playlists are moved as they ar
 | `--auto` | Apply only a high-confidence match. |
 | `--allow-track-mismatch` | With `--auto`, apply even when the release's track count differs from the local files. |
 | `-y`, `--yes` | Do not ask before writing. |
-| `--skip-tagged` | Skip an album whose first file already has a Discogs release id. |
+| `--skip-tagged` | Skip an album only when every file carries the same Discogs release id; partially or mixed-tagged albums are reported and processed. |
 | `--release-id ID` | Use this release. One album only. |
 | `--limit N` | Process at most N albums. `0` means all. Albums skipped by `--skip-tagged` do not count. |
 | `--clear-other-tags` | Also remove text tags this tool does not write. See above for what is always kept. |

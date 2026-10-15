@@ -202,3 +202,41 @@ def test_review5_unmatched_file_is_not_given_an_arbitrary_track(dt, tmp_path):
     pairs, _ = dt.match_tracks(album, dt.flatten_tracklist(rel, dt.release_artists(rel)))
     got = {p.name: (t.title if t else None) for p, t in pairs}
     assert got["bonus demo.flac"] is None
+
+
+# (6) --skip-tagged checks only the first track --------------------------------
+def test_review6_skip_tagged_does_not_skip_partially_tagged_album(dt, tmp_path):
+    src = make_album(tmp_path / "in" / "Testers - Side Story", ["01 a.flac", "02 b.flac", "03 c.flac"])
+    first = FLAC(src / "01 a.flac")
+    first["DISCOGS_RELEASE_ID"] = ["1000001"]
+    first.save()  # only track 1 is tagged
+    album = next(a for a in dt.collect_albums(src) if a.path == src)
+
+    class NoResults:
+        def search_releases(self, *a, **k):
+            return []
+
+    result = dt.process_album(NoResults(), album, tmp_path / "lib", dry_run=True, auto=True,
+                              yes=True, skip_tagged=True, release_id=None)
+    assert result != "skipped-tagged"
+
+
+def test_review6_skip_tagged_skips_only_when_all_tracks_share_one_id(dt, tmp_path, capsys):
+    src = make_album(tmp_path / "in" / "Testers - Side Story", ["01 a.flac", "02 b.flac"])
+    for name, rid in (("01 a.flac", "1000001"), ("02 b.flac", "1000001")):
+        f = FLAC(src / name)
+        f["DISCOGS_RELEASE_ID"] = [rid]
+        f.save()
+    album = next(a for a in dt.collect_albums(src) if a.path == src)
+
+    class NoResults:
+        def search_releases(self, *a, **k):
+            return []
+
+    kw = dict(dry_run=True, auto=True, yes=True, skip_tagged=True, release_id=None)
+    assert dt.process_album(NoResults(), album, tmp_path / "lib", **kw) == "skipped-tagged"
+    f = FLAC(src / "02 b.flac")
+    f["DISCOGS_RELEASE_ID"] = ["2000002"]
+    f.save()
+    assert dt.process_album(NoResults(), album, tmp_path / "lib", **kw) != "skipped-tagged"
+    assert "mixed tags" in capsys.readouterr().out
