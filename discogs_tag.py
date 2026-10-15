@@ -158,6 +158,9 @@ NAMED_ALBUM_DIR = re.compile(
     r"^\[(?P<y1>\d{4}|)\]\s+(?P<title>.+?)(?:\s+\[(?P<y2>\d{4})\])?(?:\s+\[(?P<cat>[^\]]*)\])?\s*$"
 )
 TRACK_PREFIX = re.compile(r"^(\d{1,3})\s*[\.\-_]\s*")
+# "06 Title": a leading number separated only by spaces (used by match_tracks
+# after TRACK_PREFIX; matched only against track numbers the release has)
+SPACED_TRACK_PREFIX = re.compile(r"^(\d{1,3})\s+(?=\S)")
 # "2-05 Title" / "2.05 Title": disc 2, track 5 (only trusted on multi-disc releases)
 DISC_TRACK_PREFIX = re.compile(r"^(\d{1,2})[-.](\d{1,3})(?=[\s._-])")
 # "B2. Title" / "A1 - Title": vinyl/cassette side + track (only trusted when
@@ -1575,6 +1578,20 @@ def _disc_from_folder(local: Path, album_path: Path) -> int | None:
     return int(match.group(0)) if match else None
 
 
+# Minimum similar() score for pairing an unnumbered file with a track by title.
+TITLE_MATCH_MIN = 0.80
+
+
+def _title_from_stem(stem: str) -> str:
+    """The title part of a file name: track/side/disc prefixes stripped."""
+    for pattern in (SIDE_PREFIX, DISC_TRACK_PREFIX, TRACK_PREFIX, SPACED_TRACK_PREFIX):
+        m = pattern.match(stem)
+        if m:
+            stem = stem[m.end():]
+            break
+    return stem.strip(" .-_")
+
+
 def match_tracks(album: AlbumFolder, dtracks: list[DiscogsTrack]) -> tuple[list[tuple[Path, DiscogsTrack | None]], bool]:
     """Pair local files with Discogs tracks.
 
@@ -1584,7 +1601,10 @@ def match_tracks(album: AlbumFolder, dtracks: list[DiscogsTrack]) -> tuple[list[
        against the track numbers; a CD1/CD2 folder limits it to that disc.
        Files renamed by older versions (B1 = 21) are recognised and matched
        by that old number when that fits the folder better.
-    3. Anything left takes the remaining tracks in tracklist order.
+    3. Anything left is matched by title similarity (TITLE_MATCH_MIN).
+    4. If the folder has exactly as many files as the release has tracks,
+       whatever is still left takes the remaining tracks in order. Otherwise
+       it stays unmatched (None): reported and not tagged or moved.
 
     Returns the pairs and whether the old vinyl numbering was detected.
     """
@@ -1601,7 +1621,7 @@ def match_tracks(album: AlbumFolder, dtracks: list[DiscogsTrack]) -> tuple[list[
         stem = local.stem
         side = SIDE_PREFIX.match(stem)
         disc_track = DISC_TRACK_PREFIX.match(stem)
-        plain = TRACK_PREFIX.match(stem)
+        plain = TRACK_PREFIX.match(stem) or SPACED_TRACK_PREFIX.match(stem)
         if side and side.group(1).casefold() in side_positions:
             side_index = side_positions[side.group(1).casefold()]
         elif disc_track and len(discs) > 1 and disc_hint is None and 1 <= int(disc_track.group(1)) <= max_disc:
@@ -1640,15 +1660,38 @@ def match_tracks(album: AlbumFolder, dtracks: list[DiscogsTrack]) -> tuple[list[
             used.add(i)
             break
 
-    for k, (_local, disc_hint, _number, _side) in enumerate(info):
+    # 3. Leftovers: match by normalized title, best pairs first.
+    candidates: list[tuple[float, int, int]] = []
+    for k, (local, disc_hint, _number, _side) in enumerate(info):
         if chosen[k] is not None:
             continue
-        free = [i for i in range(len(dtracks)) if i not in used]
-        if disc_hint is not None:
-            free = [i for i in free if dtracks[i].disc == disc_hint] or free
-        if free:
-            chosen[k] = free[0]
-            used.add(free[0])
+        local_title = _title_from_stem(local.stem)
+        if not local_title:
+            continue
+        for i, dt in enumerate(dtracks):
+            if i in used or (disc_hint is not None and dt.disc != disc_hint):
+                continue
+            score = similar(local_title, dt.title)
+            if score >= TITLE_MATCH_MIN:
+                candidates.append((score, k, i))
+    for _score, k, i in sorted(candidates, key=lambda c: (-c[0], c[1], c[2])):
+        if chosen[k] is None and i not in used:
+            chosen[k] = i
+            used.add(i)
+
+    # 4. Position fallback, only when the folder has exactly as many files as
+    #    the release has tracks (so every leftover file has a leftover track).
+    #    Otherwise unmatched files stay None: reported and left untagged.
+    if len(info) == len(dtracks):
+        for k, (_local, disc_hint, _number, _side) in enumerate(info):
+            if chosen[k] is not None:
+                continue
+            free = [i for i in range(len(dtracks)) if i not in used]
+            if disc_hint is not None:
+                free = [i for i in free if dtracks[i].disc == disc_hint] or free
+            if free:
+                chosen[k] = free[0]
+                used.add(free[0])
 
     pairs = [(info[k][0], dtracks[i] if i is not None else None) for k, i in enumerate(chosen)]
     return pairs, use_legacy
