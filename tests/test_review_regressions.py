@@ -240,3 +240,9 @@ def test_review6_skip_tagged_skips_only_when_all_tracks_share_one_id(dt, tmp_pat
     f.save()
     assert dt.process_album(NoResults(), album, tmp_path / "lib", **kw) != "skipped-tagged"
     assert "mixed tags" in capsys.readouterr().out
+
+
+# (11) dead code ------------------------------------------------------------------
+@pytest.mark.parametrize("name", ["MASTER_URL", "is_sidecar", "_write_mp3", "_write_mp4"])
+def test_review11_dead_code_removed(dt, name):
+    assert not hasattr(dt, name), f"{name} is unused and should be removed"
