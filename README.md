@@ -55,7 +55,9 @@ discogs-tag --dry-run "/path/to/album"
 
 Apply it. On a terminal it asks before writing. `--yes` skips that
 question. `--auto` applies only when the top Discogs hit scores at least
-90% and leads the next hit by 8 points.
+90% and leads the next hit by 10 points (`AUTO_MIN_SCORE`, `AUTO_MIN_MARGIN`),
+and only when the release has as many tracks as the folder has files
+(`--allow-track-mismatch` overrides that). It prints the score breakdown.
 
 ```sh
 discogs-tag "/path/to/album"
@@ -210,6 +212,7 @@ fresh one is written in the new folder. Hand-made playlists are moved as they ar
 | `--dest DIR` | Library root to write into. |
 | `--dry-run` | Search and print the plan. Write nothing. |
 | `--auto` | Apply only a high-confidence match. |
+| `--allow-track-mismatch` | With `--auto`, apply even when the release's track count differs from the local files. |
 | `-y`, `--yes` | Do not ask before writing. |
 | `--skip-tagged` | Skip an album whose first file already has a Discogs release id. |
 | `--release-id ID` | Use this release. One album only. |

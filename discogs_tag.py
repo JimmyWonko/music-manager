@@ -775,18 +775,39 @@ def split_result_title(title: str) -> tuple[str, str]:
     return "", title or ""
 
 
-def score_result(result: dict, guess: dict[str, str]) -> float:
+# --auto only applies a match when the best search hit scores at least
+# AUTO_MIN_SCORE and beats the runner-up by at least AUTO_MIN_MARGIN.
+# The margin used to be 0.08; 0.10 means two hits that differ only by the
+# year bonus (0.07) or a near-identical title can never be auto-picked.
+AUTO_MIN_SCORE = 0.90
+AUTO_MIN_MARGIN = 0.10
+
+
+def score_components(result: dict, guess: dict[str, str]) -> dict[str, float]:
+    """Weighted parts of score_result, so --auto can show why it picked a hit."""
     r_artist, r_album = split_result_title(result.get("title") or "")
-    score = 0.40 * similar(guess.get("album", ""), r_album)
-    score += 0.35 * similar(guess.get("artist", ""), r_artist)
+    parts = {
+        "album": 0.40 * similar(guess.get("album", ""), r_album),
+        "artist": 0.35 * similar(guess.get("artist", ""), r_artist),
+        "catno": 0.0,
+        "year": 0.0,
+    }
     cat = (guess.get("catno") or "").replace(" ", "").upper()
     rcat = (result.get("catno") or "").replace(" ", "").upper()
     if cat and rcat and (cat == rcat or cat in rcat or rcat in cat):
-        score += 0.18
+        parts["catno"] = 0.18
     gy, ry = guess.get("year", ""), str(result.get("year") or "")
     if gy and ry and gy == ry:
-        score += 0.07
-    return min(score, 1.0)
+        parts["year"] = 0.07
+    return parts
+
+
+def format_score_components(parts: dict[str, float]) -> str:
+    return "  ".join(f"{k} {v:.2f}" for k, v in parts.items())
+
+
+def score_result(result: dict, guess: dict[str, str]) -> float:
+    return min(sum(score_components(result, guess).values()), 1.0)
 
 
 def parse_position(position: str) -> tuple[int, int]:
@@ -2694,10 +2715,15 @@ def choose_release(
     if auto and ranked:
         top = ranked[0][0]
         second = ranked[1][0] if len(ranked) > 1 else 0.0
-        if top >= 0.90 and top - second >= 0.08:
-            print(f"  auto  {int(top * 100)}%  {ranked[0][1].get('title')}")
+        print(f"  best  {top:.2f}  [{format_score_components(score_components(ranked[0][1], guess))}]  "
+              f"{ranked[0][1].get('title')}")
+        if len(ranked) > 1:
+            print(f"  next  {second:.2f}  [{format_score_components(score_components(ranked[1][1], guess))}]  "
+                  f"{ranked[1][1].get('title')}")
+        if top >= AUTO_MIN_SCORE and top - second >= AUTO_MIN_MARGIN:
+            print(f"  auto  {int(top * 100)}%  margin {top - second:.2f}  {ranked[0][1].get('title')}")
             return api.release(int(ranked[0][1]["id"]))
-        print("  no confident auto-match")
+        print(f"  no confident auto-match (need score >= {AUTO_MIN_SCORE:.2f} and margin >= {AUTO_MIN_MARGIN:.2f})")
         return None
 
     if not sys.stdin.isatty():
@@ -2746,8 +2772,13 @@ def process_album(
     release_id: int | None,
     clear_other: bool = False,
     scan_root: Path | None = None,
+    allow_track_mismatch: bool = False,
 ) -> str:
-    """Returns "applied", "skipped", or "skipped-tagged" (not counted by --limit)."""
+    """Returns "applied", "skipped", or "skipped-tagged" (not counted by --limit).
+
+    In --auto mode a release whose track count differs from the local files
+    is not applied unless allow_track_mismatch is set.
+    """
     if skip_tagged:
         tagged = already_tagged(album.tracks[0])
         if tagged:
@@ -2796,6 +2827,9 @@ def process_album(
 
     if len(dtracks) != len(album.tracks):
         print(f"  warning: {len(album.tracks)} local files vs {len(dtracks)} Discogs tracks")
+        if auto and not release_id and not allow_track_mismatch:
+            print("  skipped: track count mismatch in --auto mode (use --allow-track-mismatch to apply anyway)")
+            return "skipped"
 
     if not yes and sys.stdin.isatty() and not dry_run:
         ans = prompt("  apply tags + rename? [Y/n] ").lower()
@@ -3157,6 +3191,11 @@ Undo:
     )
     parser.add_argument("--auto", action="store_true", help="apply only high-confidence matches")
     parser.add_argument("-y", "--yes", action="store_true", help="do not ask before writing")
+    parser.add_argument(
+        "--allow-track-mismatch",
+        action="store_true",
+        help="with --auto, apply a match even when its track count differs from the local files",
+    )
     parser.add_argument("--skip-tagged", action="store_true", help="skip albums that already have a Discogs id")
     parser.add_argument("--release-id", type=int, help="use this Discogs release id (single album)")
     parser.add_argument(
@@ -3280,6 +3319,7 @@ def main(argv: list[str] | None = None) -> int:
                     release_id=args.release_id,
                     clear_other=args.clear_other_tags,
                     scan_root=root,
+                    allow_track_mismatch=args.allow_track_mismatch,
                 )
             except KeyboardInterrupt:
                 raise
