@@ -1770,11 +1770,14 @@ def _copy_verified(src: Path, dest: Path) -> None:
         raise
 
 
-def _move_across_devices(src: Path, dest: Path) -> None:
+def _move_across_devices(src: Path, dest: Path, journal: "Journal | None" = None) -> None:
     """True move between drives: verified copy first, then delete the source.
 
     Directories are moved file by file the same way; their emptied source
-    folders are then removed with rmdir (only when truly empty).
+    folders are then removed with rmdir (only when truly empty). With a
+    journal, every child step (mkdir, file/symlink move, rmdir) is recorded
+    before it happens, so an interrupted directory move can be undone file
+    by file.
     """
     if src.is_symlink():
         os.symlink(os.readlink(src), dest)
@@ -1784,11 +1787,16 @@ def _move_across_devices(src: Path, dest: Path) -> None:
         _copy_verified(src, dest)
         os.unlink(src)
         return
+    if journal is not None:
+        journal.write(action="mkdir", path=str(dest))
     dest.mkdir()
     shutil.copystat(src, dest, follow_symlinks=False)
     for entry in sorted(src.iterdir()):
-        _move_across_devices(entry, dest / entry.name)
-    os.rmdir(src)  # fails (and stops) if anything is still inside
+        child = dest / entry.name
+        if journal is not None and (entry.is_symlink() or not entry.is_dir()):
+            _journal_rename(journal, "file", entry, child)
+        _move_across_devices(entry, child, journal)
+    _rmdir_logged(journal, src)  # fails (and stops) if anything is still inside
 
 
 def _move(src: Path, dest: Path, journal: Journal | None = None) -> Path:
@@ -1798,22 +1806,22 @@ def _move(src: Path, dest: Path, journal: Journal | None = None) -> Path:
     then delete the source, so a move never leaves a second copy behind.
     """
     _mkdirs_logged(journal, dest.parent)
+    kind = "dir" if src.is_dir() and not src.is_symlink() else "file"
     if dest.exists() or dest.is_symlink():
         if _same_file(src, dest):
             if str(src) != str(dest):
-                _journal_rename(journal, "file", src, dest)
+                _journal_rename(journal, kind, src, dest)
                 os.rename(src, dest)  # case-only rename on a case-insensitive drive
             return dest
         dest = unique_dest(dest)
-    _journal_rename(journal, "file", src, dest)
+    _journal_rename(journal, kind, src, dest)
     try:
         os.rename(src, dest)
     except OSError as exc:
         if exc.errno != errno.EXDEV:
             raise
-        _move_across_devices(src, dest)
+        _move_across_devices(src, dest, journal)
     return dest
-
 
 
 def file_sha256(path: Path) -> str | None:
@@ -1924,6 +1932,8 @@ def _journal_rename(journal: "Journal | None", kind: str, src: Path, dest: Path)
     entry = {"action": "rename", "kind": kind, "old": str(src), "new": str(dest), "dev": st.st_dev, "ino": st.st_ino}
     if stat.S_ISREG(st.st_mode):
         entry["sha256"] = file_sha256(src)
+    elif stat.S_ISLNK(st.st_mode):
+        entry["link"] = os.readlink(src)  # a cross-device move recreates the link (new inode)
     journal.write(**entry)
 
 
@@ -2643,13 +2653,40 @@ class UndoStep:
 
 def _move_back(journal: Journal, current: Path, original: Path) -> None:
     original.parent.mkdir(parents=True, exist_ok=True)
+    if current.is_dir() and not current.is_symlink() and original.is_dir() and not original.is_symlink():
+        _merge_back(journal, current, original)
+        return
     _journal_rename(journal, "undo", current, original)
     try:
         os.rename(current, original)
     except OSError as exc:
         if exc.errno != errno.EXDEV:
             raise
-        _move_across_devices(current, original)
+        _move_across_devices(current, original, journal)
+
+
+def _merge_back(journal: Journal, current: Path, original: Path) -> None:
+    """Move a folder's contents back into a source folder that still exists.
+
+    Never overwrites: a name already taken in original is left in current and
+    reported (current is then kept).
+    """
+    blocked: list[str] = []
+    for entry in sorted(current.iterdir()):
+        target = original / entry.name
+        if os.path.lexists(target):
+            if entry.is_dir() and not entry.is_symlink() and target.is_dir() and not target.is_symlink():
+                try:
+                    _merge_back(journal, entry, target)
+                    continue
+                except OSError:
+                    pass
+            blocked.append(entry.name)
+            continue
+        _move_back(journal, entry, target)
+    if blocked:
+        raise OSError(errno.EEXIST, f"already exist in {original}, left in {current}: {', '.join(blocked)}")
+    _rmdir_logged(journal, current)
 
 
 def undo_plan(entries: list[dict]) -> list[UndoStep]:
@@ -2677,12 +2714,27 @@ def undo_plan(entries: list[dict]) -> list[UndoStep]:
         if action == "rename":
             current, original = Path(entry["new"]), Path(entry["old"])
 
-            def check(view, e=entry, current=current, original=original):
+            is_dir = entry.get("kind") == "dir"
+
+            def check(view, e=entry, current=current, original=original, is_dir=is_dir):
                 if not view.exists(current):
+                    if is_dir and view.is_dir(original):
+                        return ""  # moved back child by child (cross-device move)
                     return "no longer exists"
                 if e.get("sha256"):
                     if view.sha256(current) != e["sha256"]:
                         return "changed since (contents differ)"
+                elif "link" in e and str(current) not in view.over:
+                    try:
+                        if os.readlink(current) != e["link"]:
+                            return "is not the link that was moved (changed since)"
+                    except OSError:
+                        return "is not the link that was moved (changed since)"
+                elif is_dir and str(current) not in view.over:
+                    # A cross-device folder move recreates it (new inode); its contents
+                    # are journaled one by one, and merging back never overwrites.
+                    if not view.is_dir(current):
+                        return "is no longer a folder"
                 elif str(current) not in view.over:
                     try:
                         st = os.lstat(current)
@@ -2691,15 +2743,22 @@ def undo_plan(entries: list[dict]) -> list[UndoStep]:
                     if st.st_dev == e.get("dev") and st.st_ino != e.get("ino"):
                         return "is not the item that was renamed (changed since)"
                 if view.exists(original):
+                    if is_dir and view.is_dir(original) and view.is_dir(current):
+                        return ""  # partial cross-device move: merge back into it
                     return f"{original.name!r} exists again"
                 return ""
 
-            steps.append(UndoStep(
-                f"move back  {current}\n    -> {original}",
-                check,
-                lambda j, c=current, o=original: _move_back(j, c, o),
-                lambda view, c=current, o=original: view.moved(c, o),
-            ))
+            def run(j, c=current, o=original):
+                if os.path.lexists(c):
+                    _move_back(j, c, o)
+
+            def simulate(view, c=current, o=original):
+                if view.exists(c) and not view.exists(o):
+                    view.moved(c, o)
+                elif view.exists(c):
+                    view.removed(c)
+
+            steps.append(UndoStep(f"move back  {current}\n    -> {original}", check, run, simulate))
 
         elif action == "mkdir":
             folder = Path(entry["path"])
