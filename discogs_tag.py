@@ -990,6 +990,17 @@ def already_tagged(path: Path) -> str | None:
     return None
 
 
+def album_release_ids(tracks: list[Path]) -> dict[Path, str | None]:
+    """Discogs release id of every track (None when a track has none or can't be read)."""
+    out: dict[Path, str | None] = {}
+    for track in tracks:
+        try:
+            out[track] = already_tagged(track)
+        except Exception:  # noqa: BLE001 - unreadable counts as untagged
+            out[track] = None
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Tag writing
 #
@@ -2691,6 +2702,9 @@ def choose_release(
         return api.release(release_id)
 
     ranked = sorted(((score_result(r, guess), r) for r in results), key=lambda x: -x[0])
+    if auto and not ranked:
+        print("  no search results; nothing to auto-match")
+        return None
     if auto and ranked:
         top = ranked[0][0]
         second = ranked[1][0] if len(ranked) > 1 else 0.0
@@ -2749,10 +2763,16 @@ def process_album(
 ) -> str:
     """Returns "applied", "skipped", or "skipped-tagged" (not counted by --limit)."""
     if skip_tagged:
-        tagged = already_tagged(album.tracks[0])
-        if tagged:
-            print(f"skip tagged (Discogs {tagged}): {album.path}")
+        tagged = album_release_ids(album.tracks)
+        ids = set(tagged.values())
+        if len(ids) == 1 and None not in ids:
+            print(f"skip tagged (Discogs {ids.pop()}): {album.path}")
             return "skipped-tagged"
+        if ids - {None}:
+            untagged = sum(1 for v in tagged.values() if v is None)
+            found = ", ".join(sorted(i for i in ids if i))
+            print(f"mixed tags: {album.path}: release id(s) {found}; {untagged} of {len(tagged)} file(s) untagged"
+                  " - not skipped")
 
     guess = guess_from_album_dir(album.path, album.tracks)
     print()
@@ -3157,7 +3177,7 @@ Undo:
     )
     parser.add_argument("--auto", action="store_true", help="apply only high-confidence matches")
     parser.add_argument("-y", "--yes", action="store_true", help="do not ask before writing")
-    parser.add_argument("--skip-tagged", action="store_true", help="skip albums that already have a Discogs id")
+    parser.add_argument("--skip-tagged", action="store_true", help="skip albums whose files all carry the same Discogs release id")
     parser.add_argument("--release-id", type=int, help="use this Discogs release id (single album)")
     parser.add_argument(
         "--limit",
