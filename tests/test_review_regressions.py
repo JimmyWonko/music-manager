@@ -184,3 +184,21 @@ def test_review4_allow_track_mismatch_flag_applies(dt, tmp_path):
     result = dt.process_album(FakeApi(release("vinyl_lp"), hit), album, tmp_path / "lib", dry_run=True, auto=True,
                               yes=True, skip_tagged=False, release_id=None, allow_track_mismatch=True)
     assert result == "applied"
+
+
+def test_review5_unnumbered_files_match_by_title_not_position(dt, tmp_path):
+    src = make_album(tmp_path / "in" / "Album", ["Closing.flac", "Opening.flac"])
+    album = next(a for a in dt.collect_albums(src) if a.path == src)
+    rel = release("vinyl_lp")
+    pairs, _ = dt.match_tracks(album, dt.flatten_tracklist(rel, dt.release_artists(rel)))
+    got = {p.name: (t.title if t else None) for p, t in pairs}
+    assert got == {"Closing.flac": "Closing", "Opening.flac": "Opening"}
+
+
+def test_review5_unmatched_file_is_not_given_an_arbitrary_track(dt, tmp_path):
+    src = make_album(tmp_path / "in" / "Album", ["01 track.flac", "bonus demo.flac"])
+    album = next(a for a in dt.collect_albums(src) if a.path == src)
+    rel = release("vinyl_lp")
+    pairs, _ = dt.match_tracks(album, dt.flatten_tracklist(rel, dt.release_artists(rel)))
+    got = {p.name: (t.title if t else None) for p, t in pairs}
+    assert got["bonus demo.flac"] is None
