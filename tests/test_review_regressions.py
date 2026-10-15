@@ -35,22 +35,16 @@ def _tree(root: Path) -> list[str]:
     return sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()) if root.exists() else []
 
 
-def test_review5_unnumbered_files_match_by_title_not_position(dt, tmp_path):
-    src = make_album(tmp_path / "in" / "Album", ["Closing.flac", "Opening.flac"])
-    album = next(a for a in dt.collect_albums(src) if a.path == src)
-    rel = release("vinyl_lp")
-    pairs, _ = dt.match_tracks(album, dt.flatten_tracklist(rel, dt.release_artists(rel)))
-    got = {p.name: (t.title if t else None) for p, t in pairs}
-    assert got == {"Closing.flac": "Closing", "Opening.flac": "Opening"}
-
-
-def test_review5_unmatched_file_is_not_given_an_arbitrary_track(dt, tmp_path):
-    src = make_album(tmp_path / "in" / "Album", ["01 track.flac", "bonus demo.flac"])
-    album = next(a for a in dt.collect_albums(src) if a.path == src)
-    rel = release("vinyl_lp")
-    pairs, _ = dt.match_tracks(album, dt.flatten_tracklist(rel, dt.release_artists(rel)))
-    got = {p.name: (t.title if t else None) for p, t in pairs}
-    assert got["bonus demo.flac"] is None
+# (10) pid-named partial file ----------------------------------------------------
+def test_review10_stale_partial_with_same_pid_does_not_block_copy(dt, tmp_path):
+    src = tmp_path / "a" / "song.flac"
+    src.parent.mkdir()
+    src.write_bytes(b"audio" * 100)
+    dest = tmp_path / "b" / "song.flac"
+    dest.parent.mkdir()
+    (dest.parent / f".{dest.name}.discogs-tag-partial-{os.getpid()}").write_bytes(b"stale")
+    dt._copy_verified(src, dest)
+    assert dest.read_bytes() == b"audio" * 100
 
 
 def test_review9_crash_during_tag_save_leaves_original_intact(dt, sample, meta, monkeypatch):
@@ -99,3 +93,112 @@ def test_review9_crash_during_restore_leaves_file_intact(dt, sample, meta, monke
         dt.restore_tags(path, snap)
     assert path.read_bytes() == tagged
     assert [p.name for p in path.parent.iterdir() if ".discogs-tag-" in p.name] == []
+
+
+# (7) Non-atomic cache writes, no recovery from corrupt cache -----------------
+class _Resp:
+    status_code = 200
+    headers: dict = {}
+
+    def json(self):
+        return {"ok": True}
+
+
+def test_review7_corrupt_cache_file_is_refetched(dt, monkeypatch):
+    client = dt.Discogs("token", None, None)
+    client.min_interval = 0
+    monkeypatch.setattr(client.session, "get", lambda *a, **kw: _Resp())
+    client._cache_path("release", "1").write_text('{"truncat', encoding="utf-8")
+    assert client._get("https://example.invalid/x", None, "release", "1") == {"ok": True}
+
+
+def test_review7_interrupted_cache_write_leaves_no_partial_json(dt, monkeypatch):
+    client = dt.Discogs("token", None, None)
+    client.min_interval = 0
+    monkeypatch.setattr(client.session, "get", lambda *a, **kw: _Resp())
+    cache = client._cache_path("release", "2")
+
+    def half_then_die(self, data, *a, **k):  # process killed mid-write
+        with open(self, "w", encoding="utf-8") as fh:
+            fh.write(data[: len(data) // 2])
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Path, "write_text", half_then_die)
+    try:
+        client._get("https://example.invalid/x", None, "release", "2")
+    except KeyboardInterrupt:
+        pass
+    monkeypatch.undo()
+    assert not cache.exists() or json.loads(cache.read_text(encoding="utf-8")) == {"ok": True}
+
+
+# (4)+(5) Auto-match ignores track counts; leftovers assigned by position ------
+class FakeApi:
+    def __init__(self, rel, result):
+        self.rel, self.result = rel, result
+
+    def search_releases(self, *a, **k):
+        return [self.result]
+
+    def release(self, _id):
+        return self.rel
+
+    def master(self, _id):
+        raise dt_error("no master in tests")
+
+
+def test_review4_auto_mode_refuses_track_count_mismatch(dt, tmp_path, monkeypatch):
+    global dt_error
+    dt_error = dt.DiscogsError
+    src = make_album(tmp_path / "in" / "Testers" / "[1985]  Side Story [WAX001]", ["01 track.flac", "02 track.flac", "03 track.flac"])
+    album = next(a for a in dt.collect_albums(src) if a.path == src)
+    guess = dt.guess_from_album_dir(album.path, album.tracks)
+    hit = {"id": 1000001, "title": f"{guess['artist']} - {guess['album']}", "catno": guess.get("catno") or "WAX001", "year": guess.get("year") or "1985"}
+    assert dt.score_result(hit, guess) >= 0.90  # precondition: the search hit alone is "confident"
+    result = dt.process_album(FakeApi(release("vinyl_lp"), hit), album, tmp_path / "lib", dry_run=False, auto=True,
+                              yes=True, skip_tagged=False, release_id=None)
+    assert result == "skipped"  # 3 local files vs 10 Discogs tracks must not auto-apply
+    assert _tree(src) == ["01 track.flac", "02 track.flac", "03 track.flac"]
+
+
+def test_review4_auto_needs_clear_margin_over_runner_up(dt):
+    guess = {"artist": "Testers", "album": "Side Story", "catno": "WAX001", "year": "1985"}
+    best = {"id": 1, "title": "Testers - Side Story", "catno": "WAX001", "year": "1985"}
+    close = {"id": 2, "title": "Testers - Side Story", "catno": "WAX001", "year": "1986"}
+
+    class Api:
+        def release(self, _id):
+            raise AssertionError("must not auto-pick")
+
+    assert dt.score_result(best, guess) - dt.score_result(close, guess) < dt.AUTO_MIN_MARGIN
+    assert dt.choose_release(Api(), guess, [best, close], auto=True, release_id=None) is None
+
+
+def test_review4_allow_track_mismatch_flag_applies(dt, tmp_path):
+    src = make_album(tmp_path / "in" / "Testers" / "[1985]  Side Story [WAX001]", ["01 track.flac", "02 track.flac", "03 track.flac"])
+    album = next(a for a in dt.collect_albums(src) if a.path == src)
+    guess = dt.guess_from_album_dir(album.path, album.tracks)
+    hit = {"id": 1000001, "title": f"{guess['artist']} - {guess['album']}", "catno": guess.get("catno") or "WAX001", "year": guess.get("year") or "1985"}
+    global dt_error
+    dt_error = dt.DiscogsError
+    result = dt.process_album(FakeApi(release("vinyl_lp"), hit), album, tmp_path / "lib", dry_run=True, auto=True,
+                              yes=True, skip_tagged=False, release_id=None, allow_track_mismatch=True)
+    assert result == "applied"
+
+
+def test_review5_unnumbered_files_match_by_title_not_position(dt, tmp_path):
+    src = make_album(tmp_path / "in" / "Album", ["Closing.flac", "Opening.flac"])
+    album = next(a for a in dt.collect_albums(src) if a.path == src)
+    rel = release("vinyl_lp")
+    pairs, _ = dt.match_tracks(album, dt.flatten_tracklist(rel, dt.release_artists(rel)))
+    got = {p.name: (t.title if t else None) for p, t in pairs}
+    assert got == {"Closing.flac": "Closing", "Opening.flac": "Opening"}
+
+
+def test_review5_unmatched_file_is_not_given_an_arbitrary_track(dt, tmp_path):
+    src = make_album(tmp_path / "in" / "Album", ["01 track.flac", "bonus demo.flac"])
+    album = next(a for a in dt.collect_albums(src) if a.path == src)
+    rel = release("vinyl_lp")
+    pairs, _ = dt.match_tracks(album, dt.flatten_tracklist(rel, dt.release_artists(rel)))
+    got = {p.name: (t.title if t else None) for p, t in pairs}
+    assert got["bonus demo.flac"] is None
