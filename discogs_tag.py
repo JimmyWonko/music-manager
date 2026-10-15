@@ -22,6 +22,7 @@ import re
 import shutil
 import stat
 import sys
+import tempfile
 import time
 import unicodedata
 from dataclasses import dataclass, field
@@ -580,6 +581,23 @@ def collect_albums(root: Path) -> list[AlbumFolder]:
 # Discogs API
 # ---------------------------------------------------------------------------
 
+def _write_cache_atomic(cache: Path, text: str) -> None:
+    """Write a cache file so readers only ever see the old or the complete new file."""
+    fd, tmp_name = tempfile.mkstemp(dir=cache.parent, prefix=f".{cache.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, cache)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 class DiscogsError(RuntimeError):
     pass
 
@@ -621,7 +639,14 @@ class Discogs:
         cache = self._cache_path(cache_kind, cache_key)
         # Discogs' API terms: don't show data more than 6 hours stale.
         if cache.exists() and time.time() - cache.stat().st_mtime < CACHE_MAX_AGE:
-            return json.loads(cache.read_text(encoding="utf-8"))
+            try:
+                return json.loads(cache.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, ValueError):
+                # Truncated or corrupt (e.g. an old non-atomic write): drop it and refetch.
+                try:
+                    cache.unlink()
+                except OSError:
+                    pass
 
         self._wait()
         for attempt in range(5):
@@ -639,7 +664,7 @@ class Discogs:
             if response.status_code >= 400:
                 raise DiscogsError(f"Discogs HTTP {response.status_code}: {response.text[:300]}")
             data = response.json()
-            cache.write_text(json.dumps(data), encoding="utf-8")
+            _write_cache_atomic(cache, json.dumps(data))
             return data
         raise DiscogsError(f"Discogs request failed after retries: {url}")
 
