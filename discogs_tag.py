@@ -29,6 +29,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Any, NotRequired, TypedDict, cast
 
 import requests
 from mutagen import File as MutagenFile
@@ -72,6 +73,131 @@ import mm_common  # noqa: E402
 # used only when the user has set it.
 _env_music = os.getenv("DEFAULT_MUSIC", "").strip()
 DEFAULT_MUSIC: Path | None = Path(_env_music).expanduser() if _env_music else None
+
+# --- data shapes (review #13) ---------------------------------------------------
+# Plain dicts at runtime; these only describe the keys the code reads and writes.
+# Discogs JSON is described loosely (total=False): the API omits keys freely.
+
+
+class DiscogsArtist(TypedDict, total=False):
+    id: int
+    name: str
+    anv: str
+    join: str
+
+
+class DiscogsLabel(TypedDict, total=False):
+    id: int
+    name: str
+    catno: str
+
+
+class DiscogsFormat(TypedDict, total=False):
+    name: str
+    qty: str
+    descriptions: list[str]
+
+
+class DiscogsTrackJSON(TypedDict, total=False):
+    position: str
+    type_: str
+    title: str
+    duration: str
+    artists: list[DiscogsArtist]
+    sub_tracks: list["DiscogsTrackJSON"]
+
+
+class DiscogsRelease(TypedDict, total=False):
+    """A /releases/{id} response (also used for /masters/{id})."""
+    id: int
+    title: str
+    year: int | str
+    released: str
+    master_id: int
+    artists: list[DiscogsArtist]
+    artists_sort: str
+    labels: list[DiscogsLabel]
+    formats: list[DiscogsFormat]
+    genres: list[str]
+    styles: list[str]
+    tracklist: list[DiscogsTrackJSON]
+
+
+class SearchResult(TypedDict, total=False):
+    """One item of a /database/search response."""
+    id: int
+    title: str
+    year: str
+    catno: str
+    label: list[str]
+    format: list[str]
+    country: str
+    master_id: int
+
+
+class TrackMeta(TypedDict):
+    """Everything write_tags() writes for one track."""
+    title: str
+    artist: str
+    albumartist: str
+    album: str
+    track: int
+    tracktotal: int
+    disc: int
+    disctotal: int
+    date: str
+    originaldate: str
+    label: str
+    catalognumber: str
+    genre: str
+    release_id: int | None
+    master_id: int
+    position: NotRequired[str]
+
+
+class EncodedValue(TypedDict, total=False):
+    """One JSON-encoded tag value inside a TagSnapshot ("t" says which kind)."""
+    t: str
+    v: Any
+    fmt: int
+    ver: int
+    k: int
+    lang: str | None
+    stream: int | None
+
+
+class TagSnapshot(TypedDict, total=False):
+    """capture_tags() output, stored in the journal. v1 (pickle) snapshots have "data" and no "v"."""
+    kind: str
+    v: int
+    version: list[int]
+    id3: str
+    pairs: list[list[Any]]
+    vendor: str
+    data: str
+
+
+class JournalEntry(TypedDict, total=False):
+    """One JSON line of a journal. Which keys appear depends on "action"."""
+    time: str
+    action: str
+    command: str
+    album: str
+    dest: str
+    root: str
+    journal: str
+    phase: str
+    path: str
+    snapshot: TagSnapshot
+    sha256: str | None
+    kind: str
+    old: str
+    new: str
+    dev: int
+    ino: int
+    link: str
+    trashed: str
+
 
 TOKEN_PATH = Path.home() / ".config" / "discogs-tag" / "token"
 CACHE_DIR = Path.home() / ".cache" / "discogs-tag"
@@ -667,7 +793,7 @@ class Discogs:
             return data
         raise DiscogsError(f"Discogs request failed after retries: {url}")
 
-    def search_releases(self, artist: str, album: str, catno: str = "", year: str = "") -> list[dict]:
+    def search_releases(self, artist: str, album: str, catno: str = "", year: str = "") -> list[SearchResult]:
         """Search releases. year only re-orders results; it never filters them."""
         params: dict[str, str] = {"type": "release", "per_page": "15"}
         if artist:
@@ -685,14 +811,14 @@ class Discogs:
         data = self._get(f"{API}/database/search", fallback, "search", json.dumps(fallback, sort_keys=True))
         return rank_by_year(list(data.get("results") or []), year)
 
-    def release(self, release_id: int) -> dict:
-        return self._get(f"{API}/releases/{release_id}", None, "release", str(release_id))
+    def release(self, release_id: int) -> DiscogsRelease:
+        return cast(DiscogsRelease, self._get(f"{API}/releases/{release_id}", None, "release", str(release_id)))
 
-    def master(self, master_id: int) -> dict:
-        return self._get(f"{API}/masters/{master_id}", None, "master", str(master_id))
+    def master(self, master_id: int) -> DiscogsRelease:
+        return cast(DiscogsRelease, self._get(f"{API}/masters/{master_id}", None, "master", str(master_id)))
 
 
-def rank_by_year(results: list[dict], year: str) -> list[dict]:
+def rank_by_year(results: list[SearchResult], year: str) -> list[SearchResult]:
     """Stable sort: exact year first, then nearest years, then unknown years.
 
     Nothing is dropped, so a wrong or missing year in the folder name can
@@ -702,7 +828,7 @@ def rank_by_year(results: list[dict], year: str) -> list[dict]:
     if not wanted:
         return results
 
-    def distance(item: dict) -> int:
+    def distance(item: SearchResult) -> int:
         got = year4(item.get("year"))
         return abs(int(got) - int(wanted)) if got else 10_000
 
@@ -807,7 +933,7 @@ AUTO_MIN_SCORE = 0.90
 AUTO_MIN_MARGIN = 0.10
 
 
-def score_components(result: dict, guess: dict[str, str]) -> dict[str, float]:
+def score_components(result: SearchResult, guess: dict[str, str]) -> dict[str, float]:
     """Weighted parts of score_result, so --auto can show why it picked a hit."""
     r_artist, r_album = split_result_title(result.get("title") or "")
     parts = {
@@ -830,7 +956,7 @@ def format_score_components(parts: dict[str, float]) -> str:
     return "  ".join(f"{k} {v:.2f}" for k, v in parts.items())
 
 
-def score_result(result: dict, guess: dict[str, str]) -> float:
+def score_result(result: SearchResult, guess: dict[str, str]) -> float:
     return min(sum(score_components(result, guess).values()), 1.0)
 
 
@@ -889,7 +1015,7 @@ class DiscogsTrack:
     side: str | None = None  # normalised side position (A1) when its whole disc uses sides
 
 
-def _track_artist(item: dict, fallback: str) -> str:
+def _track_artist(item: DiscogsTrackJSON, fallback: str) -> str:
     artists = item.get("artists") or []
     if not artists:
         return fallback
@@ -899,7 +1025,7 @@ def _track_artist(item: dict, fallback: str) -> str:
     )
 
 
-def _tracklist_entries(release: dict, album_artist: str) -> list[tuple[str, str, str]]:
+def _tracklist_entries(release: DiscogsRelease, album_artist: str) -> list[tuple[str, str, str]]:
     """(position, title, artist) for every playable track, in tracklist order.
 
     Headings are dropped. Index tracks (a work split into movements) are
@@ -930,7 +1056,7 @@ def _tracklist_entries(release: dict, album_artist: str) -> list[tuple[str, str,
     return entries
 
 
-def flatten_tracklist(release: dict, album_artist: str) -> list[DiscogsTrack]:
+def flatten_tracklist(release: DiscogsRelease, album_artist: str) -> list[DiscogsTrack]:
     """Discogs tracklist -> numbered tracks.
 
     Each disc keeps Discogs' own numbers (1, 2, ... or 1-1, 1-2, ...) when
@@ -982,7 +1108,7 @@ def flatten_tracklist(release: dict, album_artist: str) -> list[DiscogsTrack]:
     return out
 
 
-def release_artists(release: dict) -> str:
+def release_artists(release: DiscogsRelease) -> str:
     names = []
     for artist in release.get("artists") or []:
         name = ARTIST_NUM_SUFFIX.sub("", artist.get("name") or "").strip()
@@ -992,7 +1118,7 @@ def release_artists(release: dict) -> str:
     return ARTIST_NUM_SUFFIX.sub("", joined).strip()
 
 
-def release_catno(release: dict, preferred: str = "") -> str:
+def release_catno(release: DiscogsRelease, preferred: str = "") -> str:
     cats = []
     for label in release.get("labels") or []:
         cat = (label.get("catno") or "").strip()
@@ -1006,7 +1132,7 @@ def release_catno(release: dict, preferred: str = "") -> str:
     return "; ".join(cats)
 
 
-def release_discs(release: dict, tracks: list[DiscogsTrack]) -> int:
+def release_discs(release: DiscogsRelease, tracks: list[DiscogsTrack]) -> int:
     from_tracks = max((t.disc for t in tracks), default=1)
     qty = 1
     for fmt in release.get("formats") or []:
@@ -1119,7 +1245,7 @@ def clean_date(value: str | int | None) -> str:
     return f"{year}-{month}-{day}"
 
 
-def tag_values(meta: dict) -> dict[str, str | None]:
+def tag_values(meta: TrackMeta) -> dict[str, str | None]:
     """meta -> canonical field values as text; None means 'no value'."""
 
     def text(value) -> str | None:
@@ -1277,14 +1403,14 @@ def _always_clearable(_tags, _key) -> bool:
     return True
 
 
-def _write_vorbis(audio, meta: dict, clear_other: bool, replace: set[str]) -> list[str]:
+def _write_vorbis(audio, meta: TrackMeta, clear_other: bool, replace: set[str]) -> list[str]:
     if audio.tags is None:
         audio.add_tags()
     values = {name: ([v] if v is not None else None) for name, v in tag_values(meta).items()}
     return _apply_fields(audio.tags, VORBIS_FIELDS, values, clear_other, _always_clearable, replace)
 
 
-def _write_ape(audio, meta: dict, clear_other: bool, replace: set[str]) -> list[str]:
+def _write_ape(audio, meta: TrackMeta, clear_other: bool, replace: set[str]) -> list[str]:
     if audio.tags is None:
         audio.add_tags()
     tv = tag_values(meta)
@@ -1299,7 +1425,7 @@ def _write_ape(audio, meta: dict, clear_other: bool, replace: set[str]) -> list[
     return _apply_fields(audio.tags, APE_FIELDS, values, clear_other, clearable, replace)
 
 
-def _write_asf(audio, meta: dict, clear_other: bool, replace: set[str]) -> list[str]:
+def _write_asf(audio, meta: TrackMeta, clear_other: bool, replace: set[str]) -> list[str]:
     from mutagen.asf import ASFUnicodeAttribute
 
     if audio.tags is None:
@@ -1315,7 +1441,7 @@ def _write_asf(audio, meta: dict, clear_other: bool, replace: set[str]) -> list[
     return _apply_fields(audio.tags, ASF_FIELDS, values, clear_other, clearable, replace)
 
 
-def _write_mp4_tags(audio, meta: dict, clear_other: bool, replace: set[str]) -> list[str]:
+def _write_mp4_tags(audio, meta: TrackMeta, clear_other: bool, replace: set[str]) -> list[str]:
     if audio.tags is None:
         audio.add_tags()
     tv = tag_values(meta)
@@ -1378,7 +1504,7 @@ def _del_txxx(tags: ID3, descs) -> list[str]:
     return removed
 
 
-def _apply_id3(tags: ID3, meta: dict, clear_other: bool, replace: set[str]) -> list[str]:
+def _apply_id3(tags: ID3, meta: TrackMeta, clear_other: bool, replace: set[str]) -> list[str]:
     tv = tag_values(meta)
     removed: list[str] = []
 
@@ -1498,7 +1624,7 @@ def _atomic_tag_update(path: Path, edit):
     return result
 
 
-def write_tags(path: Path, meta: dict, clear_other: bool = False, dry_run: bool = False) -> list[str]:
+def write_tags(path: Path, meta: TrackMeta, clear_other: bool = False, dry_run: bool = False) -> list[str]:
     """Write meta into path with the format's own tag names, atomically.
 
     Returns the tag keys that were removed and not rewritten. With dry_run
@@ -1512,7 +1638,7 @@ def write_tags(path: Path, meta: dict, clear_other: bool = False, dry_run: bool 
     return _atomic_tag_update(path, lambda tmp: _write_tags_file(tmp, meta, clear_other, previous=previous))
 
 
-def _write_tags_file(path: Path, meta: dict, clear_other: bool = False, dry_run: bool = False,
+def _write_tags_file(path: Path, meta: TrackMeta, clear_other: bool = False, dry_run: bool = False,
                      previous: str | None = None) -> list[str]:
     """Write meta into path with the format's own tag names.
 
@@ -1708,7 +1834,7 @@ class AlbumApplyError(RuntimeError):
 class PlannedFile:
     source: Path
     dest: Path
-    meta: dict | None = None  # None for sidecars and extra folders
+    meta: TrackMeta | None = None  # None for sidecars and extra folders
 
 
 def unique_dest(path: Path) -> Path:
@@ -1865,7 +1991,7 @@ def _unb64(text: str) -> bytes:
     return base64.b64decode(text.encode("ascii"), validate=True)
 
 
-def _encode_value(value) -> dict:
+def _encode_value(value) -> EncodedValue:
     """One tag value as plain JSON, keeping its exact type. Raises TypeError for unknown types."""
     from mutagen.apev2 import APEBinaryValue, APEExtValue, APETextValue
     from mutagen.asf import ASFBaseAttribute
@@ -1876,7 +2002,7 @@ def _encode_value(value) -> dict:
     if isinstance(value, MP4FreeForm):
         return {"t": "mp4ff", "v": _b64(value), "fmt": int(value.dataformat), "ver": int(value.version)}
     if isinstance(value, ASFBaseAttribute):
-        out = {"t": "asf", "k": int(value.TYPE), "v": _encode_value(value.value)}
+        out: EncodedValue = {"t": "asf", "k": int(value.TYPE), "v": _encode_value(value.value)}
         if getattr(value, "language", None) is not None:
             out["lang"] = value.language
         if getattr(value, "stream", None) is not None:
@@ -1899,7 +2025,7 @@ def _encode_value(value) -> dict:
     raise TypeError(f"cannot snapshot tag value of type {type(value).__name__}")
 
 
-def _decode_value(obj: dict):
+def _decode_value(obj: EncodedValue):
     """Inverse of _encode_value. Only builds the known, inert value types."""
     from mutagen.apev2 import APEValue
     from mutagen.asf import ASFValue
@@ -1955,7 +2081,7 @@ def _id3_from_bytes(data: str) -> ID3:
     return ID3(io.BytesIO(raw))
 
 
-def capture_tags(path: Path) -> dict:
+def capture_tags(path: Path) -> TagSnapshot:
     """Snapshot of every tag in path, enough for restore_tags to put them all back.
 
     Plain JSON (snapshot format v2), never pickle. ID3 keeps its whole tag as
@@ -1972,7 +2098,7 @@ def capture_tags(path: Path) -> dict:
     if isinstance(tags, list):
         # Vorbis comments and ASF are ordered lists of pairs; keep order and case.
         pairs = [[k, _encode_value(v)] for k, v in list.__iter__(tags)]
-        snap = {"kind": "list", "v": SNAPSHOT_VERSION, "pairs": pairs}
+        snap: TagSnapshot = {"kind": "list", "v": SNAPSHOT_VERSION, "pairs": pairs}
         if hasattr(tags, "vendor"):
             snap["vendor"] = tags.vendor
         return snap
@@ -1980,7 +2106,7 @@ def capture_tags(path: Path) -> dict:
     return {"kind": "map", "v": SNAPSHOT_VERSION, "pairs": pairs}
 
 
-def _snapshot_payload(snapshot: dict, trust_legacy: bool):
+def _snapshot_payload(snapshot: TagSnapshot, trust_legacy: bool):
     """The snapshot's frames / pairs, decoded. Old pickle snapshots only with trust_legacy."""
     kind = snapshot.get("kind")
     if kind == "none":
@@ -2009,7 +2135,7 @@ def _snapshot_payload(snapshot: dict, trust_legacy: bool):
     raise ValueError(f"unknown tag snapshot kind {kind!r}")
 
 
-def restore_tags(path: Path, snapshot: dict, trust_legacy: bool = False) -> None:
+def restore_tags(path: Path, snapshot: TagSnapshot, trust_legacy: bool = False) -> None:
     """Replace every tag in path with a capture_tags() snapshot.
 
     The snapshot is fully decoded and validated before the file is touched.
@@ -2018,7 +2144,7 @@ def restore_tags(path: Path, snapshot: dict, trust_legacy: bool = False) -> None
     _atomic_tag_update(path, lambda tmp: _restore_tags_file(tmp, snapshot, payload))
 
 
-def _restore_tags_file(path: Path, snapshot: dict, payload: list) -> None:
+def _restore_tags_file(path: Path, snapshot: TagSnapshot, payload: list) -> None:
     kind = snapshot.get("kind")
     if path.suffix.lower() == ".mp3":
         if kind == "none":
@@ -2068,7 +2194,7 @@ def _journal_rename(journal: "Journal | None", kind: str, src: Path, dest: Path)
     if journal is None:
         return
     st = os.lstat(src)
-    entry = {"action": "rename", "kind": kind, "old": str(src), "new": str(dest), "dev": st.st_dev, "ino": st.st_ino}
+    entry: JournalEntry = {"action": "rename", "kind": kind, "old": str(src), "new": str(dest), "dev": st.st_dev, "ino": st.st_ino}
     if stat.S_ISREG(st.st_mode):
         entry["sha256"] = file_sha256(src)
     elif stat.S_ISLNK(st.st_mode):
@@ -2216,7 +2342,7 @@ def validate_layout(album: AlbumFolder, dest_root: Path, target_dir: Path) -> No
 def apply_album(
     album: AlbumFolder,
     dest_root: Path,
-    release: dict,
+    release: DiscogsRelease,
     dtracks: list[DiscogsTrack],
     original_year: str,
     dry_run: bool,
@@ -2269,7 +2395,7 @@ def apply_album(
             print(f"  skip  extra file  {local.name}  (left in place)")
             continue
         disc_tracks = by_disc.get(dt.disc, dtracks)
-        meta = {
+        meta: TrackMeta = {
             "artist": dt.artist or album_artist,
             "albumartist": album_artist,
             "album": title,
@@ -2678,9 +2804,9 @@ class Journal:
         else:
             raise OSError(f"cannot create a journal in {directory}")
 
-    def write(self, **entry) -> None:
-        entry = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **entry}
-        self._fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    def write(self, **entry: Any) -> None:
+        line = cast(JournalEntry, {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **entry})
+        self._fh.write(json.dumps(line, ensure_ascii=False) + "\n")
         self._fh.flush()
         os.fsync(self._fh.fileno())
 
@@ -2865,7 +2991,7 @@ def _merge_back(journal: Journal, current: Path, original: Path) -> None:
     _rmdir_logged(journal, current)
 
 
-def undo_plan(entries: list[dict], trust_legacy: bool = False) -> list[UndoStep]:
+def undo_plan(entries: list[JournalEntry], trust_legacy: bool = False) -> list[UndoStep]:
     """Reversing steps for a journal's entries, newest first.
 
     Every step re-checks the disk before it runs: something that changed
@@ -3085,7 +3211,7 @@ def undo_journal(journal_path: Path, apply: bool, journal_dir: Path | None = Non
 # Interactive flow
 # ---------------------------------------------------------------------------
 
-def print_candidates(results: list[tuple[float, dict]]) -> None:
+def print_candidates(results: list[tuple[float, SearchResult]]) -> None:
     for i, (score, item) in enumerate(results, 1):
         artist, album = split_result_title(item.get("title") or "")
         fmt = ", ".join(item.get("format") or [])
@@ -3107,10 +3233,10 @@ def prompt(text: str) -> str:
 def choose_release(
     api: Discogs,
     guess: dict[str, str],
-    results: list[dict],
+    results: list[SearchResult],
     auto: bool,
     release_id: int | None,
-) -> dict | None:
+) -> DiscogsRelease | None:
     if release_id:
         return api.release(release_id)
 
@@ -3405,11 +3531,11 @@ def _self_test_fixes() -> None:
     import stat
     import tempfile
 
-    def track(pos, title, kind="track", **extra):
+    def track(pos, title, kind="track", **extra) -> Any:
         return {"position": pos, "type_": kind, "title": title, **extra}
 
     # Vinyl: sequential across sides, original position kept.
-    lp = {"tracklist": [track("A1", "a"), track("A2", "b"), track("", "Side B", "heading"), track("B1", "c"), track("B2", "d")]}
+    lp: DiscogsRelease = {"tracklist": [track("A1", "a"), track("A2", "b"), track("", "Side B", "heading"), track("B1", "c"), track("B2", "d")]}
     tracks = flatten_tracklist(lp, "X")
     assert [(t.number, t.position) for t in tracks] == [(1, "A1"), (2, "A2"), (3, "B1"), (4, "B2")], tracks
     assert tracks[2].legacy_number == 21
@@ -3418,7 +3544,7 @@ def _self_test_fixes() -> None:
     assert track_filename(track_prefix(tracks[2], side_names=False), "c", ".flac") == "3. c.flac"
 
     # Index tracks: sub-tracks included, numbered in order.
-    work = {"tracklist": [
+    work: DiscogsRelease = {"tracklist": [
         track("1", "Intro"),
         track("", "Suite", "index", sub_tracks=[track("2a", "Part 1"), track("2b", "Part 2")]),
         track("3", "Outro"),
@@ -3465,7 +3591,7 @@ def _self_test_fixes() -> None:
         assert mm_common.is_generated_playlist(marked)
 
         # Tag writing: ID3v2.4 in WAV and AIFF, ID3 in MP3, nothing Vorbis-style.
-        meta = {
+        meta: TrackMeta = {
             "title": "Ünïcode", "artist": "A", "albumartist": "A", "album": "B", "track": 2, "tracktotal": 9,
             "disc": 1, "disctotal": 1, "date": "2001-00-00", "originaldate": "1990", "label": "L",
             "catalognumber": "C1", "genre": "G", "release_id": 77, "master_id": 0, "position": "A2",
