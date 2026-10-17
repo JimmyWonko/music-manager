@@ -234,6 +234,7 @@ class Candidate:
     artwork: Path | None
     fetched: bool
     source: ProviderCredit
+    auto_score: float | None = None  # the --auto score (search-result parts only); auto_accept uses it
 
 
 @dataclass(frozen=True)

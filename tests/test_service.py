@@ -84,7 +84,8 @@ def test_types_are_frozen_with_the_contract_fields_and_defaults():
     assert names(service.AlbumPlan) == ["album_id", "release_id", "folder_before", "folder_after", "files", "problems",
                                         "artist", "title"]  # artist, title: additive, default ""
     assert names(service.FileChange) == ["kind", "path_before", "path_after", "tags", "skip_reason"]
-    assert names(service.Candidate) == ["release_id", "master_id", "artist", "title", "year", "country", "label",
+    assert names(service.Candidate)[-1] == "auto_score"  # additive, default None
+    assert names(service.Candidate)[:-1] == ["release_id", "master_id", "artist", "title", "year", "country", "label",
                                         "catno", "formats", "score", "margin", "breakdown", "alignment",
                                         "artwork_url", "thumb_url", "artwork", "fetched", "source"]
     assert names(service.Operation)[-2:] == ["journal_format", "legacy"]
@@ -234,10 +235,12 @@ def test_albums_paging_sorting_filtering(lib):
     status = [r.status for r in rows(AlbumSort.STATUS)]
     assert status == [MatchStatus.NEEDS_REVIEW, MatchStatus.MATCHED, MatchStatus.NO_MATCH, MatchStatus.APPLIED]
     conf = [r.confidence for r in rows(AlbumSort.CONFIDENCE)]
-    assert conf[:2] == [0.75, 1.0] and conf[2:] == [None, None]
+    side_conf = (0.75 * 0.75 + 0.20) / 0.95  # --auto 0.75, 10 tracks = 10, no Discogs durations
+    double_conf = 0.75 * 1.0 + 0.20 * 1.0 + 0.05 * 0.0  # --auto 1.0, 4 = 4, the silent samples' durations miss
+    assert conf[:2] == pytest.approx([side_conf, double_conf]) and conf[2:] == [None, None]
     conf_desc = [r.confidence for r in service.library.albums(AlbumFilter(), AlbumSort.CONFIDENCE, 0, 10,
                                                               descending=True).items]
-    assert conf_desc[:2] == [1.0, 0.75] and conf_desc[2:] == [None, None]
+    assert conf_desc[:2] == pytest.approx([double_conf, side_conf]) and conf_desc[2:] == [None, None]
     assert [r.title for r in rows(status={MatchStatus.NEEDS_REVIEW, MatchStatus.NO_MATCH})] == [
         "Tape Loops", "Side Story"]
     assert [r.title for r in rows(max_confidence=0.90)] == ["Side Story"]
@@ -277,19 +280,26 @@ def test_find_scores_like_the_cli_and_fetches_candidates(lib):
     assert (d, 1000004) in ready and (d, 7777) in ready
     assert d in changed
     by = {r.folder: r for r in rows()}
-    assert by[lib.double].status is MatchStatus.MATCHED and by[lib.double].confidence == 1.0
+    assert by[lib.double].status is MatchStatus.MATCHED
     assert by[lib.side].status is MatchStatus.NEEDS_REVIEW
     assert by[lib.tape].status is MatchStatus.NO_MATCH
     cands = service.match.candidates(d)
     assert [c.release_id for c in cands] == [1000004, 7777]
     top, second = cands
-    assert top.score == 1.0 and top.margin == pytest.approx(top.score - second.score) and second.margin is None
+    assert top.auto_score == 1.0  # the --auto score
+    assert top.score == pytest.approx(0.95)  # 75% * 1.0 + 20% count match + 5% * 0.0 (sample durations miss)
+    assert by[lib.double].confidence == pytest.approx(top.score)
+    assert top.margin == pytest.approx(top.score - second.score) and second.margin is None
     assert top.source == service.ProviderCredit("Discogs", "Data provided by Discogs", "https://www.discogs.com/")
     assert top.fetched and top.alignment is not None
     parts = {p.field: p for p in top.breakdown}
     assert [p.field for p in top.breakdown] == ["album", "artist", "catno", "year", "track_count", "durations"]
-    assert [parts[f].weight for f in ("album", "artist", "catno", "year")] == [0.40, 0.35, 0.18, 0.07]
-    assert parts["track_count"].weight == 0.0 and parts["track_count"].ok
+    assert [parts[f].weight for f in ("album", "artist", "catno", "year")] == pytest.approx(
+        [0.30, 0.2625, 0.135, 0.0525])  # the --auto weights, 75% of the score
+    assert parts["track_count"].weight == pytest.approx(0.20) and parts["track_count"].ok
+    assert parts["durations"].weight == pytest.approx(0.05) and parts["durations"].value == 0.0
+    assert sum(p.weight for p in top.breakdown) == pytest.approx(1.0)
+    assert sum(p.weight * p.value for p in top.breakdown) == pytest.approx(top.score)
     assert all(p.ok for p in top.alignment) and {p.method for p in top.alignment} == {"number"}
     assert [p.remote.duration_s for p in top.alignment] == [181.0, 202.0, 213.0, 244.0]
     assert top.artwork_url == "https://img.example/1000004.jpg" and top.thumb_url.endswith("1000004-150.jpg")
@@ -323,7 +333,8 @@ def test_auto_rules_and_auto_accept_match_the_cli(lib):
     top = cands[0]
 
     def c(score, fetched=True):
-        return dataclasses.replace(top, score=score, alignment=top.alignment if fetched else None, fetched=fetched)
+        return dataclasses.replace(top, score=score, auto_score=score, alignment=top.alignment if fetched else None,
+                                   fetched=fetched)
 
     # --auto: score >= 0.90 and lead >= 0.10; a lone result leads by its whole score
     assert service.match.auto_accept([c(0.95), c(0.84)]) is not None

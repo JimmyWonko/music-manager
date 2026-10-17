@@ -192,32 +192,71 @@ def _mmss(seconds: float) -> str:
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
+# The service score: the --auto score (search-result parts) is 75%; once the full release is
+# fetched, a matching track count adds 20% and track durations 5% (when both sides have them).
+# Weights are shares of what is known, so an unfetched candidate's score is its --auto score.
+SEARCH_SHARE = 0.75
+TRACK_COUNT_WEIGHT = 0.20
+DURATIONS_WEIGHT = 0.05
+
+
+def _count_value(local_count: int, remote_count: int) -> float:
+    """1.0 for the same number of tracks, else 0.0: an extra or missing track is a different release."""
+    return 1.0 if local_count == remote_count else 0.0
+
+
+def _durations_value(pairs: list[TrackPair]) -> float | None:
+    timed = [p for p in pairs if p.duration_delta_s is not None]
+    if not timed:
+        return None
+    return sum(1 for p in timed if abs(p.duration_delta_s) <= DURATION_TOLERANCE_S) / len(timed)
+
+
+def service_score(auto_score: float, pairs: list[TrackPair] | None, local_count: int,
+                  remote_count: int | None) -> float:
+    """Candidate.score: the --auto score blended with track count and durations once fetched."""
+    if pairs is None or remote_count is None:
+        return auto_score
+    total = SEARCH_SHARE * auto_score + TRACK_COUNT_WEIGHT * _count_value(local_count, remote_count)
+    known = SEARCH_SHARE + TRACK_COUNT_WEIGHT
+    durations = _durations_value(pairs)
+    if durations is not None:
+        total += DURATIONS_WEIGHT * durations
+        known += DURATIONS_WEIGHT
+    return min(total / known, 1.0)
+
+
 def breakdown(search: SearchResult, guess: dict, pairs: list[TrackPair] | None, local_count: int,
               remote_count: int | None) -> list[ScorePart]:
+    """Every part of Candidate.score: score == sum(weight * value) over these parts."""
     comps = score_components(search, guess)
     r_artist, r_album = split_result_title(search.get("title") or "")
     remote = {"album": r_album, "artist": r_artist, "catno": search.get("catno") or "",
               "year": str(search.get("year") or "")}
+    fetched = pairs is not None and remote_count is not None
+    durations = _durations_value(pairs) if fetched else None
+    known = 1.0
+    search_share = 1.0
+    if fetched:
+        known = SEARCH_SHARE + TRACK_COUNT_WEIGHT + (DURATIONS_WEIGHT if durations is not None else 0.0)
+        search_share = SEARCH_SHARE / known
     parts = []
     for name, weight in WEIGHTS.items():
-        value = round(comps[name] / weight, 4) if weight else 0.0
+        value = comps[name] / weight if weight else 0.0
         ok = value >= TITLE_MATCH_MIN if name in ("album", "artist") else value >= 1.0
-        parts.append(ScorePart(name, weight, value, str(guess.get(name, "")), remote[name], ok))
-    if pairs is not None and remote_count is not None:
-        diff = abs(remote_count - local_count)
-        value = 1.0 if diff == 0 else max(0.0, 1.0 - diff / max(remote_count, local_count, 1))
-        # weight 0: today's score (and so --auto / auto_accept) is the four search-result parts only
-        parts.append(ScorePart("track_count", 0.0, round(value, 4), str(local_count), str(remote_count), diff == 0))
-        timed = [p for p in pairs if p.duration_delta_s is not None]
-        if timed:
-            close = sum(1 for p in timed if abs(p.duration_delta_s) <= DURATION_TOLERANCE_S)
+        parts.append(ScorePart(name, weight * search_share, value, str(guess.get(name, "")), remote[name], ok))
+    if fetched:
+        count = _count_value(local_count, remote_count)
+        parts.append(ScorePart("track_count", TRACK_COUNT_WEIGHT / known, count, str(local_count), str(remote_count),
+                               count == 1.0))
+        if durations is not None:
+            timed = [p for p in pairs if p.duration_delta_s is not None]
             local_total = sum(p.local.duration_s for p in timed if p.local and p.local.duration_s)
             remote_total = sum(p.remote.duration_s for p in timed if p.remote and p.remote.duration_s)
-            value = close / len(timed)
-            parts.append(ScorePart("durations", 0.0, round(value, 4), _mmss(local_total), _mmss(remote_total),
-                                   value >= 0.8))
+            parts.append(ScorePart("durations", DURATIONS_WEIGHT / known, durations, _mmss(local_total),
+                                   _mmss(remote_total), durations >= 0.8))
         else:
-            parts.append(ScorePart("durations", 0.0, 0.0, "", "", False))
+            parts.append(ScorePart("durations", 0.0, 0.0, "", "", False))  # not known: no share of the score
     return parts
 
 
@@ -247,11 +286,12 @@ def build_candidates(album_id: int, st: State | None = None) -> list[Candidate]:
             dtracks = album_tracks(release)
             pairs = alignment(folder, locals_, dtracks)
             remote_count = len(dtracks)
-        score = score_result(search, guess)  # exactly the --auto score
-        scored.append((score, crow["rank"], crow, search, release, pairs, remote_count))
+        auto = score_result(search, guess)  # exactly the --auto score
+        score = service_score(auto, pairs, len(locals_), remote_count)
+        scored.append((score, crow["rank"], crow, search, release, pairs, remote_count, auto))
     scored.sort(key=lambda x: (-x[0], x[1]))
     out = []
-    for i, (score, _rank, crow, search, release, pairs, remote_count) in enumerate(scored):
+    for i, (score, _rank, crow, search, release, pairs, remote_count, auto) in enumerate(scored):
         margin = score - scored[i + 1][0] if i + 1 < len(scored) else None
         r_artist, r_title = split_result_title(search.get("title") or "")
         if release is not None:
@@ -278,6 +318,7 @@ def build_candidates(album_id: int, st: State | None = None) -> list[Candidate]:
             artwork=None,
             fetched=release is not None,
             source=DISCOGS_CREDIT,
+            auto_score=auto,
         ))
     return out
 

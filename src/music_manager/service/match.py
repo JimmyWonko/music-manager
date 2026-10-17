@@ -42,6 +42,9 @@ def auto_accept(candidates: list[Candidate], rules: AutoRules | None = None,
                 local_track_count: int | None = None) -> Candidate | None:
     """The --auto check: the best candidate when it clears min_score and leads the runner-up by min_margin.
 
+    Ranked by Candidate.auto_score (the --auto score), not Candidate.score,
+    so it accepts exactly what discogs-tag --auto would.
+
     Like --auto, a lone candidate leads by its whole score. With
     require_track_count and a local_track_count, the release must have
     that many tracks; a candidate that is not fetched yet cannot be checked
@@ -57,10 +60,13 @@ def auto_accept(candidates: list[Candidate], rules: AutoRules | None = None,
     rules = rules or auto_rules()
     if not candidates:
         return None
-    ranked = sorted(candidates, key=lambda c: -c.score)
+    def auto(c: Candidate) -> float:
+        return c.auto_score if c.auto_score is not None else c.score
+
+    ranked = sorted(candidates, key=lambda c: -auto(c))
     top = ranked[0]
-    second = ranked[1].score if len(ranked) > 1 else 0.0
-    if top.score < rules.min_score or top.score - second < rules.min_margin:
+    second = auto(ranked[1]) if len(ranked) > 1 else 0.0
+    if auto(top) < rules.min_score or auto(top) - second < rules.min_margin:
         return None
     if rules.require_track_count and local_track_count is not None:
         if top.alignment is None:
@@ -119,9 +125,11 @@ def _match_one(st, client, album_id: int, ctx) -> str:
             fetch_release(album_id, int(result["id"]), st, search=result)
         except ProviderError:
             continue
-    best = auto_accept(build_candidates(album_id, st), local_track_count=row["track_count"])
+    cands = build_candidates(album_id, st)
+    best = auto_accept(cands, local_track_count=row["track_count"])
     if previous not in KEEP_STATUS:
-        set_status(album_id, MatchStatus.MATCHED if best else MatchStatus.NEEDS_REVIEW, confidence=top_score)
+        confidence = cands[0].score if cands else top_score  # the best service score, as the review shows it
+        set_status(album_id, MatchStatus.MATCHED if best else MatchStatus.NEEDS_REVIEW, confidence=confidence)
     return "matched" if best else "review"
 
 
