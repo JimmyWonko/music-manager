@@ -46,6 +46,13 @@ def auto_accept(candidates: list[Candidate], rules: AutoRules | None = None,
     require_track_count and a local_track_count, the release must have
     that many tracks; a candidate that is not fetched yet cannot be checked
     and is not accepted (None).
+
+    rules.title_match_min: alignments are made at
+    match.auto_rules().title_match_min (the --auto value, 0.80). With a
+    stricter rules.title_match_min, a file paired by title below it does
+    not count as a sure pair, so the candidate is not a clear winner
+    (None). With the default rules this never happens, exactly as with
+    --auto.
     """
     rules = rules or auto_rules()
     if not candidates:
@@ -61,6 +68,9 @@ def auto_accept(candidates: list[Candidate], rules: AutoRules | None = None,
         remote = sum(1 for p in top.alignment if p.remote is not None)
         if remote != local_track_count:
             return None
+    if top.alignment is not None and any(
+            p.method == "title" and p.title_similarity < rules.title_match_min for p in top.alignment):
+        return None
     return top
 
 

@@ -20,6 +20,13 @@ from ._types import (
 )
 
 
+def title_match_min() -> float:
+    """The title-pass pairing threshold every service pairing uses: match.auto_rules().title_match_min."""
+    from .match import auto_rules
+
+    return auto_rules().title_match_min
+
+
 def now_utc() -> datetime:
     return datetime.now(UTC)
 

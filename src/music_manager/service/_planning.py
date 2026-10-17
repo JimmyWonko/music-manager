@@ -10,7 +10,7 @@ from ..apply import AlbumLayout, check_layout, layout_album, release_info, templ
 from ..fs import AlbumFolder, is_audio
 from ..naming.templates import PRESETS, CompiledTemplate, TemplateError, TemplateStructureError, compile_template
 from ..providers.discogs import DiscogsRelease, DiscogsTrack
-from ._common import album_folder, album_record, root_for
+from ._common import album_folder, album_record, root_for, title_match_min
 from ._releases import album_tracks, candidate_row, candidate_rows, release_for, release_from_search
 from ._state import State, state
 from ._types import ConfigError, MMError, NotFound, Problem, ProblemKind, Template, ValidationError
@@ -150,7 +150,8 @@ def album_target(album_id: int, release_id: int | None, template: CompiledTempla
         result.problems.append(Problem(LAYOUT_KIND[kind], message, list(paths)))
     if fetched:
         layout = layout_album(album, root, release, dtracks, original_year, target_dir=target, file_name=namer,
-                              check=False, log=lambda _line: None)
+                              check=False, log=lambda _line: None,
+                              title_match_min=title_match_min())
         result.layout = layout
         result.problems += _album_problems(result, row["track_count"])
     result.problems += _occupied(result, st)

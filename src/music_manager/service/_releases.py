@@ -21,6 +21,7 @@ from ..providers.discogs import (
     split_result_title,
 )
 from ._common import album_folder, album_record, local_tracks
+from ._common import title_match_min as rules_title_match_min
 from ._state import State, events, state
 from ._types import (
     DISCOGS_CREDIT,
@@ -160,9 +161,12 @@ def _remote(dt: DiscogsTrack) -> RemoteTrack:
 
 
 def alignment(album: AlbumFolder, locals_: list[LocalTrack], dtracks: list[DiscogsTrack],
-              title_match_min: float = TITLE_MATCH_MIN) -> list[TrackPair]:
+              title_match_min: float | None = None) -> list[TrackPair]:
+    """The engine's pairing, as TrackPairs. title_match_min: None = match.auto_rules().title_match_min."""
+    if title_match_min is None:
+        title_match_min = rules_title_match_min()
     by_path = {t.path: t for t in locals_}
-    triples, _legacy = align_tracks(album, dtracks)
+    triples, _legacy = align_tracks(album, dtracks, title_match_min)
     used: set[int] = set()
     pairs: list[TrackPair] = []
     for path, dt, method in triples:
