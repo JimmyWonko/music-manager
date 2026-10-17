@@ -14,6 +14,7 @@ from .match import align_tracks
 from .moves import PlannedFile, _mkdirs_logged, _prune_empty, _trash_logged, describe_moves, move_planned, prune_limit
 from .naming import (
     album_folder_name,
+    folder_lead_year,
     format_artist,
     format_catalog,
     reissue_original_year,
@@ -21,6 +22,7 @@ from .naming import (
     track_prefix,
     year4,
 )
+from .naming.templates import CompiledTemplate, album_fields, track_fields
 from .playlists import (
     PLAYLIST_EXTS,
     album_playlist_tracks,
@@ -174,6 +176,49 @@ def default_target_dir(dest_root: Path, info: ReleaseInfo) -> Path:
 
 def default_file_name(dt: DiscogsTrack, local: Path) -> str:
     return track_filename(track_prefix(dt), dt.title, local.suffix)
+
+
+def template_album_fields(release: DiscogsRelease, info: ReleaseInfo) -> dict[str, str]:
+    """The album-level template fields (%albumartist%, %leadyear%, ...) of a release."""
+    return album_fields(
+        album_artist=info.album_artist,
+        title=info.title,
+        lead_year=folder_lead_year(info.original_year, info.release_year),
+        original_year=folder_lead_year(info.original_year, info.release_year),
+        reissue_year=info.release_year if reissue_original_year(info.original_year, info.release_year) else "",
+        catno=info.catno,
+        label=info.label,
+        formats=list(release.get("formats") or []),
+        discs=info.discs,
+    )
+
+
+def template_track_fields(dt: DiscogsTrack, side_names: bool | None = None) -> dict[str, str]:
+    return track_fields(title=dt.title, artist=dt.artist, number=dt.number,
+                        position=track_prefix(dt, side_names), disc=dt.disc)
+
+
+def template_paths(
+    template: CompiledTemplate | None,
+    dest_root: Path,
+    release: DiscogsRelease,
+    dtracks: list[DiscogsTrack],
+    original_year: str,
+    side_names: bool | None = None,
+) -> tuple[Path, Callable[[DiscogsTrack, Path], str]]:
+    """(target folder, file namer) for a template; None is the built-in archivist layout.
+
+    The built-in archivist preset is today's layout exactly (default_target_dir
+    and track_filename), including the "2CD" a multi-disc folder gets, which
+    the preset's text has no field for.
+    """
+    info = release_info(release, dtracks, original_year)
+    if template is None:
+        return default_target_dir(dest_root, info), (
+            lambda dt, local: track_filename(track_prefix(dt, side_names), dt.title, local.suffix))
+    fields = template_album_fields(release, info)
+    target = dest_root.joinpath(*template.folder_parts(fields))
+    return target, lambda dt, local: template.file_name(fields, template_track_fields(dt, side_names), local.suffix)
 
 
 @dataclass
