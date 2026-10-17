@@ -170,3 +170,26 @@ def test_requests_from_two_threads_are_serialised():
     starts = sorted(Session.starts)
     assert overlap == [] and len(starts) == 30
     assert min(b - a for a, b in zip(starts, starts[1:], strict=False)) >= discogs_mod.MIN_INTERVAL
+
+
+def test_cache_write_off_reads_the_cache_but_never_writes_it(tmp_path, monkeypatch):
+    """cache_write = False (the read-only swap check): fresh cache files are used; nothing is created or removed."""
+    import hashlib
+    import json
+
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(discogs_mod, "CACHE_DIR", cache)
+    client, _clock, transport, _waits = paced_client()
+    client.cache_write = False
+    assert client.release(7)["id"] == "7"  # fetched (paced), not cached
+    assert not cache.exists() and len(transport.starts) == 1
+
+    cached = cache / "release" / f"{hashlib.sha1(b'8').hexdigest()}.json"
+    cached.parent.mkdir(parents=True)
+    cached.write_text(json.dumps({"id": 8, "title": "cached"}), encoding="utf-8")
+    corrupt = cache / "release" / f"{hashlib.sha1(b'9').hexdigest()}.json"
+    corrupt.write_text("{not json", encoding="utf-8")
+    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in cache.rglob("*") if p.is_file()}
+    assert client.release(8)["title"] == "cached" and len(transport.starts) == 1
+    assert client.release(9)["id"] == "9" and len(transport.starts) == 2
+    assert {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in cache.rglob("*") if p.is_file()} == before

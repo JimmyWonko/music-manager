@@ -195,6 +195,8 @@ class Discogs:
         # Stand-ins for tests (a fake clock); None means time.monotonic / time.sleep.
         self.clock: Callable[[], float] | None = None
         self.sleeper: Callable[[float], None] | None = None
+        # False: read fresh cache files but never create, replace or delete one (read-only checks).
+        self.cache_write = True
         self._lock = threading.RLock()
 
     def _now(self) -> float:
@@ -226,7 +228,8 @@ class Discogs:
     def _cache_path(self, kind: str, key: str) -> Path:
         digest = hashlib.sha1(key.encode()).hexdigest()
         path = cache_dir() / kind / f"{digest}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if getattr(self, "cache_write", True):
+            path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
     def _get(self, url: str, params: dict | None, cache_kind: str, cache_key: str) -> dict:
@@ -237,10 +240,11 @@ class Discogs:
                 return json.loads(cache.read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError, ValueError):
                 # Truncated or corrupt (e.g. an old non-atomic write): drop it and refetch.
-                try:
-                    cache.unlink()
-                except OSError:
-                    pass
+                if getattr(self, "cache_write", True):
+                    try:
+                        cache.unlink()
+                    except OSError:
+                        pass
 
         with self._lock:
             retry_after: float | None = None
@@ -261,7 +265,8 @@ class Discogs:
                 if response.status_code >= 400:
                     raise DiscogsError(f"Discogs HTTP {response.status_code}: {response.text[:300]}")
                 data = response.json()
-                _write_cache_atomic(cache, json.dumps(data))
+                if getattr(self, "cache_write", True):
+                    _write_cache_atomic(cache, json.dumps(data))
                 return data
             if retry_after is not None:
                 raise DiscogsError(f"Discogs HTTP 429: rate limited after retries: {url}", retry_after=retry_after)
