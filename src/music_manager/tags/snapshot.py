@@ -220,27 +220,34 @@ def restore_tags(path: Path, snapshot: TagSnapshot, trust_legacy: bool = False) 
 
 
 def _restore_tags_file(path: Path, snapshot: TagSnapshot, payload: list) -> None:
+    _get_tags, save = _prepare_restore(path, snapshot, payload)
+    save()
+
+
+def _prepare_restore(path: Path, snapshot: TagSnapshot, payload: list):
+    """Load path and put the snapshot's tags in place in memory: (tag container getter, save)."""
     kind = snapshot.get("kind")
     if path.suffix.lower() == ".mp3":
         if kind == "none":
-            try:
-                ID3(path).delete(path)
-            except ID3NoHeaderError:
-                pass
-            return
+            def delete_id3():
+                try:
+                    ID3(path).delete(path)
+                except ID3NoHeaderError:
+                    pass
+            return (lambda: None), delete_id3
         tags = ID3()
         for frame in payload:
             tags.add(frame)
         version = (snapshot.get("version") or [2, 4, 0])[1]
-        tags.save(path, v2_version=3 if version == 3 else 4)
-        return
+        return (lambda: tags), (lambda: tags.save(path, v2_version=3 if version == 3 else 4))
     audio = MutagenFile(path)
     if audio is None:
         raise OSError(f"unrecognised audio file: {path}")
     if kind == "none":
-        if audio.tags is not None:
-            audio.delete()
-        return
+        def delete_tags():
+            if audio.tags is not None:
+                audio.delete()
+        return (lambda: None), delete_tags
     if audio.tags is None:
         audio.add_tags()
     if kind == "id3":
@@ -248,17 +255,31 @@ def _restore_tags_file(path: Path, snapshot: TagSnapshot, payload: list) -> None
         for frame in payload:
             audio.tags.add(frame)
         version = (snapshot.get("version") or [2, 4, 0])[1]
-        audio.save(v2_version=3 if version == 3 else 4)
-        return
+        return (lambda: audio.tags), (lambda: audio.save(v2_version=3 if version == 3 else 4))
     if kind == "list" and isinstance(audio.tags, list):
         list.__delitem__(audio.tags, slice(None))
         list.extend(audio.tags, payload)
         if "vendor" in snapshot and hasattr(audio.tags, "vendor"):
             audio.tags.vendor = snapshot["vendor"]
-        audio.save()
-        return
+        return (lambda: audio.tags), audio.save
     for key in list(audio.tags.keys()):
         del audio.tags[key]
     for key, value in payload:
         audio.tags[key] = value
-    audio.save()
+    return (lambda: audio.tags), audio.save
+
+
+def preview_restore(path: Path, snapshot: TagSnapshot, trust_legacy: bool = False
+                    ) -> list[tuple[str, str | None, str | None]]:
+    """What restore_tags would change, without saving: (key, before, after) per changed tag.
+
+    Raises LegacySnapshotError for an old pickle snapshot unless trust_legacy.
+    """
+    from .textmap import tag_text_map
+
+    payload = _snapshot_payload(snapshot, trust_legacy)
+    before = tag_text_map(_tag_container(path)[1])
+    get_tags, _save = _prepare_restore(path, snapshot, payload)
+    after = tag_text_map(get_tags())
+    return [(k, before.get(k), after.get(k)) for k in list(before) + [k for k in after if k not in before]
+            if before.get(k) != after.get(k)]

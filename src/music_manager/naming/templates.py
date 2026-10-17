@@ -74,6 +74,10 @@ class _Func:
     args: tuple[tuple, ...]  # each arg is a tuple of nodes
 
 
+class TemplateStructureError(TemplateError):
+    """Valid fields and syntax, but not a usable path layout (no folder, empty segment, ...)."""
+
+
 _SEP = object()  # top-level "/"
 
 
@@ -275,11 +279,12 @@ def compile_template(text: str) -> CompiledTemplate:
         else:
             segments[-1].append(node)
     if len(segments) < 2:
-        raise TemplateError("the template needs at least one folder (use / between parts)", field="text")
+        raise TemplateStructureError("the template needs at least one folder (use / between parts)", field="text")
     if any(not seg for seg in segments):
-        raise TemplateError("the template has an empty path segment (// or a leading or trailing /)", field="text")
+        raise TemplateStructureError("the template has an empty path segment (// or a leading or trailing /)",
+                                     field="text")
     if not any(isinstance(n, (_Field, _Func)) for n in segments[-1]):
-        raise TemplateError("the file name part needs a field such as %title%", field="text")
+        raise TemplateStructureError("the file name part needs a field such as %title%", field="text")
     return CompiledTemplate(text, tuple(tuple(s) for s in segments[:-1]), tuple(segments[-1]))
 
 
