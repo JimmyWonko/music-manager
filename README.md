@@ -303,6 +303,12 @@ A desktop app (or any other front end) drives the same engine through
 `journal` (history and undo), `templates`, `settings`, `jobs` and the
 `events` object (Qt signals when PySide6 is installed, plain callbacks
 otherwise). Slow calls return a job id and run on one worker thread.
+`plan.build` never calls Discogs: when a chosen release is missing or
+older than Discogs' 6-hour caching limit, the plan marks that album
+`release_not_fetched`, downloads the release in a background job
+(`Plan.fetch_job`) and you build the plan again when the job is done.
+Requests to Discogs are paced to at most 55 a minute and wait out
+`Retry-After` on HTTP 429.
 
 The service keeps its settings in `$XDG_CONFIG_HOME/music-manager/config.toml`
 and its index and journals under
