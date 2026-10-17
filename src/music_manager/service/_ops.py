@@ -88,7 +88,7 @@ def _entry_time(entry: dict) -> datetime | None:
 def register_cli_journals(st: State) -> None:
     """Add journals written by discogs-tag (and not yet listed) to the history."""
     known = {r["journal"] for r in st.index.query("SELECT journal FROM operations WHERE journal IS NOT NULL")}
-    folders = [journal_mod.STATE_DIR / "journal", journal_dir(st)]
+    folders = [journal_mod.state_dir() / "journal", journal_dir(st)]
     paths = []
     for folder in folders:
         if folder.is_dir():

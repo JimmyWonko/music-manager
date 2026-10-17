@@ -38,14 +38,24 @@ class JournalEntry(TypedDict, total=False):
     trashed: str
 
 
-STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "discogs-tag"
+# None: $XDG_STATE_HOME/discogs-tag (else ~/.local/state/discogs-tag), read when needed, never at
+# import. service.configure(data_dir=...) sets it; tests may too.
+STATE_DIR: Path | None = None
+
+
+def state_dir() -> Path:
+    """Where journals live: STATE_DIR when set, else $XDG_STATE_HOME/discogs-tag (~/.local/state)."""
+    if STATE_DIR is not None:
+        return Path(STATE_DIR)
+    base = os.environ.get("XDG_STATE_HOME", "").strip()
+    return (Path(base).expanduser() if base else Path.home() / ".local" / "state") / "discogs-tag"
 
 
 class Journal:
     """Append-only JSON-lines record of renames, flushed and fsynced per line."""
 
     def __init__(self, kind: str, directory: Path | None = None):
-        directory = directory or STATE_DIR / "journal"
+        directory = directory or state_dir() / "journal"
         directory.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
         for n in range(1000):

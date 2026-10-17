@@ -51,7 +51,6 @@ from ..normalize import normalize_folders, plan_folder_rename
 from ..playlists import GENERATED_MARKER, album_playlist_tracks, encode_lines, is_generated_playlist, render_playlist
 from ..providers.discogs import (
     RELEASE_URL,
-    TOKEN_PATH,
     Discogs,
     DiscogsError,
     DiscogsRelease,
@@ -65,6 +64,7 @@ from ..providers.discogs import (
     release_discs,
     save_token,
     split_result_title,
+    token_path,
 )
 from ..tags.fields import TrackMeta, clean_date
 from ..tags.read import album_release_ids, already_tagged, read_easy_tags
@@ -673,7 +673,7 @@ def main(argv: list[str] | None = None) -> int:
             print("no token entered", file=sys.stderr)
             return 1
         save_token(token)
-        print(f"saved {TOKEN_PATH}")
+        print(f"saved {token_path()}")
         return 0
 
     if args.undo_journal is not None:

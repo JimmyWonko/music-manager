@@ -90,8 +90,17 @@ class SearchResult(TypedDict, total=False):
     master_id: int
 
 
-TOKEN_PATH = Path.home() / ".config" / "discogs-tag" / "token"
-CACHE_DIR = Path.home() / ".cache" / "discogs-tag"
+# None: the defaults below, resolved when needed (never at import). service.configure sets them.
+TOKEN_PATH: Path | None = None  # default ~/.config/discogs-tag/token
+CACHE_DIR: Path | None = None  # default ~/.cache/discogs-tag
+
+
+def token_path() -> Path:
+    return Path(TOKEN_PATH) if TOKEN_PATH is not None else Path.home() / ".config" / "discogs-tag" / "token"
+
+
+def cache_dir() -> Path:
+    return Path(CACHE_DIR) if CACHE_DIR is not None else Path.home() / ".cache" / "discogs-tag"
 CACHE_MAX_AGE = 6 * 60 * 60  # Discogs API terms cap cached data at 6 hours
 USER_AGENT = (
     f"music-manager/{__version__} +https://github.com/JimmyWonko/music-manager"
@@ -216,7 +225,7 @@ class Discogs:
 
     def _cache_path(self, kind: str, key: str) -> Path:
         digest = hashlib.sha1(key.encode()).hexdigest()
-        path = CACHE_DIR / kind / f"{digest}.json"
+        path = cache_dir() / kind / f"{digest}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -314,8 +323,9 @@ def load_token() -> tuple[str | None, str | None, str | None]:
     secret = os.environ.get("DISCOGS_SECRET", "").strip() or None
     if env_token:
         return env_token, key, secret
-    if TOKEN_PATH.exists():
-        token = TOKEN_PATH.read_text(encoding="utf-8").strip() or None
+    path = token_path()
+    if path.exists():
+        token = path.read_text(encoding="utf-8").strip() or None
         return token, key, secret
     return None, key, secret
 
@@ -326,7 +336,7 @@ def save_token(token: str, path: Path | None = None) -> None:
     The file is created under a temporary name with O_CREAT|O_EXCL and mode
     0600, written, fsynced, then renamed over the old token file.
     """
-    path = path or TOKEN_PATH
+    path = path or token_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)

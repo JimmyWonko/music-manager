@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from .. import config as config_mod
+from .. import fs as fs_mod
+from .. import journal as journal_mod
 from ..index import LibraryIndex
 from ..providers import discogs as discogs_mod
 from ._events import Events
@@ -73,15 +75,48 @@ _state: State | None = None
 _state_lock = threading.Lock()
 
 
+_saved_paths: tuple | None = None  # module paths as they were before configure() moved them
+
+
+def _redirect_paths(data_dir: Path | None, config_dir: Path | None) -> None:
+    """Point every file the engine writes or reads inside the configured directories.
+
+    data_dir: discogs-tag journals (data_dir/state/journal), the Discogs
+    response cache (data_dir/cache/discogs) and the trash (data_dir/Trash).
+    config_dir: the Discogs token (config_dir/discogs-token). reset() puts them back.
+    """
+    global _saved_paths
+    if data_dir is None and config_dir is None:
+        return
+    _saved_paths = (journal_mod.STATE_DIR, discogs_mod.CACHE_DIR, discogs_mod.TOKEN_PATH, fs_mod.TRASH_DIR)
+    if data_dir is not None:
+        journal_mod.STATE_DIR = data_dir / "state"
+        discogs_mod.CACHE_DIR = data_dir / "cache" / "discogs"
+        fs_mod.TRASH_DIR = data_dir / "Trash"
+    if config_dir is not None:
+        discogs_mod.TOKEN_PATH = config_dir / "discogs-token"
+
+
+def _restore_paths() -> None:
+    global _saved_paths
+    if _saved_paths is not None:
+        journal_mod.STATE_DIR, discogs_mod.CACHE_DIR, discogs_mod.TOKEN_PATH, fs_mod.TRASH_DIR = _saved_paths
+        _saved_paths = None
+
+
 def configure(data_dir: Path | None = None, config_dir: Path | None = None, discogs: Any = None) -> None:
     """(Re)start the service with these directories and, optionally, a Discogs client stand-in.
 
     Defaults: $XDG_DATA_HOME/music-manager and $XDG_CONFIG_HOME/music-manager.
-    Mainly for tests and for embedding; the UI just imports the module.
+    A directory passed here also holds the files the engine would otherwise
+    keep under ~ (see _redirect_paths), so an embedder that configures both
+    never touches the home folder. Mainly for tests and for embedding; the UI
+    just imports the module.
     """
     global _state
     with _state_lock:
         _shutdown_locked()
+        _redirect_paths(Path(data_dir) if data_dir else None, Path(config_dir) if config_dir else None)
         data = Path(data_dir) if data_dir else config_mod.data_dir()
         conf = Path(config_dir) if config_dir else config_mod.config_dir()
         _state = State(config_path=conf / "config.toml", data_dir=data,
@@ -100,6 +135,7 @@ def _shutdown_locked() -> None:
         _state.runner.shutdown()
         _state.index.close()
         _state = None
+    _restore_paths()
 
 
 def state() -> State:

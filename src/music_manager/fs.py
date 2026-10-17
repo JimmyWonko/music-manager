@@ -237,8 +237,14 @@ def disc_dirs_with_audio(folder: Path) -> list[Path]:
     return found
 
 
+# None: the user's freedesktop trash. service.configure(data_dir=...) points it inside that dir.
+TRASH_DIR: Path | None = None
+
+
 def trash_root() -> Path:
-    """Freedesktop trash for this user ($XDG_DATA_HOME/Trash, else ~/.local/share/Trash)."""
+    """TRASH_DIR when set, else the freedesktop trash ($XDG_DATA_HOME/Trash, else ~/.local/share/Trash)."""
+    if TRASH_DIR is not None:
+        return Path(TRASH_DIR)
     data = os.environ.get("XDG_DATA_HOME", "").strip()
     base = Path(data).expanduser() if data else Path.home() / ".local" / "share"
     return base / "Trash"
