@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .fs import AlbumFolder, file_sha256
 from .journal import Journal
-from .match import align_tracks
+from .match import TITLE_MATCH_MIN, align_tracks
 from .moves import PlannedFile, _mkdirs_logged, _prune_empty, _trash_logged, describe_moves, move_planned, prune_limit
 from .naming import (
     album_folder_name,
@@ -247,11 +247,13 @@ def layout_album(
     file_name: Callable[[DiscogsTrack, Path], str] | None = None,
     check: bool = True,
     log: Callable[[str], None] = print,
+    title_match_min: float = TITLE_MATCH_MIN,
 ) -> AlbumLayout:
     """Plan one album's apply: where it goes, every file's tags and destination. Read-only.
 
     target_dir and file_name override today's layout (default_target_dir /
     default_file_name). With check, validate_layout runs and raises.
+    title_match_min: the title-pass pairing threshold (see align_tracks).
     """
     info = release_info(release, dtracks, original_year)
     if target_dir is None:
@@ -262,7 +264,7 @@ def layout_album(
     if check:
         validate_layout(album, dest_root, target_dir)
 
-    pairs, legacy = align_tracks(album, dtracks)
+    pairs, legacy = align_tracks(album, dtracks, title_match_min)
     if legacy:
         log("  note  these files use the old vinyl numbering (B1 = 21); they are renumbered 1..N")
 

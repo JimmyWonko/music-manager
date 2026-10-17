@@ -216,17 +216,18 @@ def _title_from_stem(stem: str) -> str:
     return stem.strip(" .-_")
 
 
-def match_tracks(album: AlbumFolder, dtracks: list[DiscogsTrack]) -> tuple[list[tuple[Path, DiscogsTrack | None]], bool]:
+def match_tracks(album: AlbumFolder, dtracks: list[DiscogsTrack], title_match_min: float = TITLE_MATCH_MIN
+                 ) -> tuple[list[tuple[Path, DiscogsTrack | None]], bool]:
     """Pair local files with Discogs tracks (see align_tracks for the rules).
 
     Returns the pairs and whether the old vinyl numbering was detected.
     """
-    triples, use_legacy = align_tracks(album, dtracks)
+    triples, use_legacy = align_tracks(album, dtracks, title_match_min)
     return [(local, dt) for local, dt, _method in triples], use_legacy
 
 
 def align_tracks(
-    album: AlbumFolder, dtracks: list[DiscogsTrack]
+    album: AlbumFolder, dtracks: list[DiscogsTrack], title_match_min: float = TITLE_MATCH_MIN
 ) -> tuple[list[tuple[Path, DiscogsTrack | None, str]], bool]:
     """Pair local files with Discogs tracks, saying how each pair was made.
 
@@ -236,7 +237,8 @@ def align_tracks(
        against the track numbers; a CD1/CD2 folder limits it to that disc.
        Files renamed by older versions (B1 = 21) are recognised and matched
        by that old number when that fits the folder better.
-    3. Anything left is matched by title similarity (TITLE_MATCH_MIN).
+    3. Anything left is matched by title similarity: a pair needs at least
+       title_match_min (TITLE_MATCH_MIN, 0.80, unless the caller says otherwise).
     4. If the folder has exactly as many files as the release has tracks,
        whatever is still left takes the remaining tracks in order. Otherwise
        it stays unmatched (None): reported and not tagged or moved.
@@ -312,7 +314,7 @@ def align_tracks(
             if i in used or (disc_hint is not None and dt.disc != disc_hint):
                 continue
             score = similar(local_title, dt.title)
-            if score >= TITLE_MATCH_MIN:
+            if score >= title_match_min:
                 candidates.append((score, k, i))
     for _score, k, i in sorted(candidates, key=lambda c: (-c[0], c[1], c[2])):
         if chosen[k] is None and i not in used:
