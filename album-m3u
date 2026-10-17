@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Run album-m3u from a checkout. The implementation is album_m3u.py."""
+"""Run album-m3u from a checkout. The implementation is music_manager.cli.album_m3u (src/)."""
 
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Resolve the launcher (it is often run through a symlink) so src/ is found next to it.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from album_m3u import main
+from music_manager.cli.album_m3u import main  # noqa: E402
 
 if __name__ == "__main__":
     raise SystemExit(main())

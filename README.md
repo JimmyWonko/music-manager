@@ -2,7 +2,8 @@
 
 Utilities for a local music library. `discogs-tag` looks up a Discogs
 release, writes tags, and renames the album into the folder shape below.
-`album-m3u` writes one playlist per album folder. Both use `mm_common.py`.
+`album-m3u` writes one playlist per album folder. Both are thin command-line
+fronts for the `music_manager` package (`src/music_manager/`).
 
 The tool retags files and moves them. Start with `--dry-run` on a copy
 of an album.
@@ -28,9 +29,10 @@ python3 discogs-tag.py --help
 python3 album-m3u --help
 ```
 
-`discogs-tag.py` and `album-m3u` are launchers. The implementation is
-`discogs_tag.py`, `album_m3u.py`, and `mm_common.py`. A symlink to a
-launcher still finds `mm_common.py`.
+`discogs-tag.py` and `album-m3u` are launchers. The implementation is the
+`music_manager` package under `src/` (`music_manager.cli.discogs_tag` and
+`music_manager.cli.album_m3u` for the two commands). A symlink to a
+launcher still finds `src/`.
 
 ## Discogs token
 

@@ -2,56 +2,27 @@
 
 from __future__ import annotations
 
-import importlib.machinery
-import importlib.util
 import json
 import shutil
-import sys
 from pathlib import Path
 
 import pytest
+
+from music_manager import journal as journal_mod
+from music_manager.providers import discogs as discogs_mod
 
 REPO = Path(__file__).resolve().parent.parent
 SAMPLES = Path(__file__).resolve().parent / "samples"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
-def _load(name: str, path: Path):
-    loader = importlib.machinery.SourceFileLoader(name, str(path))
-    spec = importlib.util.spec_from_loader(name, loader)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    loader.exec_module(module)
-    return module
-
-
-@pytest.fixture(scope="session")
-def dt():
-    """discogs_tag.py as a module. discogs-tag.py is the checkout launcher."""
-    return _load("discogs_tag", REPO / "discogs_tag.py")
-
-
-@pytest.fixture(scope="session")
-def m3u():
-    """album_m3u.py as a module. album-m3u is the checkout launcher."""
-    return _load("album_m3u", REPO / "album_m3u.py")
-
-
-@pytest.fixture(scope="session")
-def common():
-    sys.path.insert(0, str(REPO))
-    import mm_common
-
-    return mm_common
-
-
 @pytest.fixture(autouse=True)
-def _isolated_state(tmp_path, monkeypatch, dt):
+def _isolated_state(tmp_path, monkeypatch):
     """Journals and the trash live in the test's temp folder, never in ~."""
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
-    monkeypatch.setattr(dt, "STATE_DIR", tmp_path / "xdg-state" / "discogs-tag")
-    monkeypatch.setattr(dt, "CACHE_DIR", tmp_path / "xdg-cache" / "discogs-tag")
+    monkeypatch.setattr(journal_mod, "STATE_DIR", tmp_path / "xdg-state" / "discogs-tag")
+    monkeypatch.setattr(discogs_mod, "CACHE_DIR", tmp_path / "xdg-cache" / "discogs-tag")
 
 
 def release(name: str) -> dict:

@@ -3,16 +3,23 @@
 import hashlib
 import json
 import os
-import shutil
 import time
 from pathlib import Path
 
 import pytest
-from conftest import SAMPLES, release
+from conftest import release
 from mutagen import File as MutagenFile
 from mutagen.id3 import ID3
-
 from test_apply import VINYL_DIR, make_album, run_apply
+
+from music_manager import journal as journal_mod
+from music_manager import moves
+from music_manager.apply import AlbumApplyError
+from music_manager.cli import album_m3u
+from music_manager.journal import undo_journal
+from music_manager.providers.discogs import CACHE_MAX_AGE, Discogs
+from music_manager.tags.snapshot import capture_tags, restore_tags
+from music_manager.tags.write import write_tags
 
 FORMATS = ["flac", "mp3", "m4a", "ogg", "opus", "wma", "wv", "aiff", "wav"]
 
@@ -42,30 +49,30 @@ def tag_manifest(root: Path) -> dict[str, str]:
     return {str(p): tag_dump(p) for p in sorted(root.rglob("*.flac"))}
 
 
-def latest_journal(dt) -> Path:
-    return max((dt.STATE_DIR / "journal").glob("apply-*.jsonl"))
+def latest_journal() -> Path:
+    return max((journal_mod.STATE_DIR / "journal").glob("apply-*.jsonl"))
 
 
 @pytest.mark.parametrize("ext", FORMATS)
-def test_tag_snapshot_restores_every_format(dt, sample, meta, ext):
+def test_tag_snapshot_restores_every_format(sample, meta, ext):
     path = sample(ext)
-    dt.write_tags(path, {**meta, "title": "Before", "album": "Old Album"})
+    write_tags(path, {**meta, "title": "Before", "album": "Old Album"})
     before = tag_dump(path)
-    snapshot = json.loads(json.dumps(dt.capture_tags(path)))  # survives the journal
-    dt.write_tags(path, meta, clear_other=True)
+    snapshot = json.loads(json.dumps(capture_tags(path)))  # survives the journal
+    write_tags(path, meta, clear_other=True)
     assert tag_dump(path) != before
-    dt.restore_tags(path, snapshot)
+    restore_tags(path, snapshot)
     assert tag_dump(path) == before
 
 
 @pytest.mark.parametrize("ext", ["flac", "mp3"])
-def test_untagged_file_restored_to_untagged(dt, sample, meta, ext):
+def test_untagged_file_restored_to_untagged(sample, meta, ext):
     path = sample(ext)
-    dt.restore_tags(path, {"kind": "none"})
-    snapshot = dt.capture_tags(path)
+    restore_tags(path, {"kind": "none"})
+    snapshot = capture_tags(path)
     assert snapshot == {"kind": "none"}
-    dt.write_tags(path, meta)
-    dt.restore_tags(path, snapshot)
+    write_tags(path, meta)
+    restore_tags(path, snapshot)
     assert tag_dump(path) in ("", "\n") or "Söng" not in tag_dump(path)
 
 
@@ -79,24 +86,24 @@ def setup_album(tmp_path):
     return src
 
 
-def test_apply_then_undo_puts_everything_back(dt, tmp_path, capsys):
+def test_apply_then_undo_puts_everything_back(tmp_path, capsys):
     src = setup_album(tmp_path)
     out = tmp_path / "lib"
     out.mkdir()
     tags_before = tag_manifest(src)
     files_before = manifest(tmp_path / "in", out)
-    run_apply(dt, src, out, release("vinyl_lp"))
+    run_apply(src, out, release("vinyl_lp"))
     assert (out / VINYL_DIR / "A1. Opening.flac").exists() and not src.exists()
-    journal = latest_journal(dt)
+    journal = latest_journal()
 
     # The undo plan changes nothing on disk.
     after_apply = manifest(tmp_path / "in", out)
-    assert dt.undo_journal(journal, apply=False) == 0
+    assert undo_journal(journal, apply=False) == 0
     assert manifest(tmp_path / "in", out) == after_apply
     plan = capsys.readouterr().out
     assert "0 skipped" in plan and "restore from trash" in plan and "restore the original tags" in plan
 
-    assert dt.undo_journal(journal, apply=True) == 0
+    assert undo_journal(journal, apply=True) == 0
     assert tag_manifest(src) == tags_before
     restored = manifest(tmp_path / "in", out)
     assert set(restored) == set(files_before)  # same names, nothing left in the library
@@ -107,27 +114,27 @@ def test_apply_then_undo_puts_everything_back(dt, tmp_path, capsys):
             assert restored[name] == digest, name
 
 
-def test_undo_skips_a_file_changed_since(dt, tmp_path, capsys):
+def test_undo_skips_a_file_changed_since(tmp_path, capsys):
     src = setup_album(tmp_path)
     out = tmp_path / "lib"
-    run_apply(dt, src, out, release("vinyl_lp"))
+    run_apply(src, out, release("vinyl_lp"))
     edited = out / VINYL_DIR / "B1. Flip.flac"
     with open(edited, "ab") as fh:
         fh.write(b"edited later")
-    assert dt.undo_journal(latest_journal(dt), apply=True) == 1
+    assert undo_journal(latest_journal(), apply=True) == 1
     text = capsys.readouterr().out
     assert "B1. Flip.flac" in text and "changed since" in text
     assert edited.exists()  # left alone, never overwritten
     assert len(list(src.glob("*.flac"))) == 9
 
 
-def test_journal_entry_is_written_before_each_rename(dt, tmp_path, monkeypatch):
+def test_journal_entry_is_written_before_each_rename(tmp_path, monkeypatch):
     src = setup_album(tmp_path)
     real_rename = os.rename
     checked = []
 
     def rename(a, b, *args, **kw):
-        journal = max((dt.STATE_DIR / "journal").glob("*.jsonl"))
+        journal = max((journal_mod.STATE_DIR / "journal").glob("*.jsonl"))
         last = json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])
         if last["action"] == "trash":  # the trash's own move: path recorded first
             assert last["path"] == str(a)
@@ -136,15 +143,15 @@ def test_journal_entry_is_written_before_each_rename(dt, tmp_path, monkeypatch):
         checked.append(a)
         return real_rename(a, b, *args, **kw)
 
-    monkeypatch.setattr(dt.os, "rename", rename)
-    run_apply(dt, src, tmp_path / "lib", release("vinyl_lp"))
+    monkeypatch.setattr(os, "rename", rename)
+    run_apply(src, tmp_path / "lib", release("vinyl_lp"))
     assert len(checked) >= 11
 
 
-def test_crash_mid_move_is_undoable(dt, tmp_path, monkeypatch):
+def test_crash_mid_move_is_undoable(tmp_path, monkeypatch):
     src = setup_album(tmp_path)
     before = tag_manifest(src)
-    real_move = dt._move
+    real_move = moves._move
     calls = {"n": 0}
 
     def flaky(a, b, journal=None):
@@ -153,39 +160,39 @@ def test_crash_mid_move_is_undoable(dt, tmp_path, monkeypatch):
             raise OSError(28, "No space left on device")
         return real_move(a, b, journal)
 
-    monkeypatch.setattr(dt, "_move", flaky)
-    with pytest.raises(dt.AlbumApplyError):
-        run_apply(dt, src, tmp_path / "lib", release("vinyl_lp"))
-    monkeypatch.setattr(dt, "_move", real_move)
-    assert dt.undo_journal(latest_journal(dt), apply=True) == 0
+    monkeypatch.setattr(moves, "_move", flaky)
+    with pytest.raises(AlbumApplyError):
+        run_apply(src, tmp_path / "lib", release("vinyl_lp"))
+    monkeypatch.setattr(moves, "_move", real_move)
+    assert undo_journal(latest_journal(), apply=True) == 0
     assert tag_manifest(src) == before
     assert not (tmp_path / "lib").exists() or not any((tmp_path / "lib").rglob("*"))
 
 
-def test_generated_playlist_goes_to_trash(dt, tmp_path):
+def test_generated_playlist_goes_to_trash(tmp_path):
     src = setup_album(tmp_path)
-    run_apply(dt, src, tmp_path / "lib", release("vinyl_lp"))
+    run_apply(src, tmp_path / "lib", release("vinyl_lp"))
     trash = Path(os.environ["XDG_DATA_HOME"]) / "Trash"
     assert (trash / "files" / "Testers - Side Story.m3u").exists()
     info = (trash / "info" / "Testers - Side Story.m3u.trashinfo").read_text(encoding="utf-8")
     assert "[Trash Info]" in info and "DeletionDate=" in info
 
 
-def test_album_m3u_trashes_instead_of_deleting(m3u, tmp_path):
+def test_album_m3u_trashes_instead_of_deleting(tmp_path):
     album = tmp_path / "Artist" / "Old Name"
     album.mkdir(parents=True)
     (album / "1. a.flac").write_bytes(b"x")
-    m3u.main(["update", "--root", str(tmp_path)])
+    album_m3u.main(["update", "--root", str(tmp_path)])
     album = album.rename(tmp_path / "Artist" / "New Name")
-    m3u.main(["update", "--root", str(tmp_path)])
+    album_m3u.main(["update", "--root", str(tmp_path)])
     trash = Path(os.environ["XDG_DATA_HOME"]) / "Trash"
     assert (trash / "files" / "Old Name.m3u").exists()
     assert (trash / "info" / "Old Name.m3u.trashinfo").exists()
 
 
-def test_discogs_cache_expires_after_six_hours(dt, tmp_path, monkeypatch):
-    assert dt.CACHE_MAX_AGE == 6 * 60 * 60
-    client = dt.Discogs("token", None, None)
+def test_discogs_cache_expires_after_six_hours(tmp_path, monkeypatch):
+    assert CACHE_MAX_AGE == 6 * 60 * 60
+    client = Discogs("token", None, None)
     client.min_interval = 0
     calls = []
 
