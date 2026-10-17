@@ -150,6 +150,13 @@ class UndoStep:
     check: object
     run: object
     simulate: object
+    # Structured description, for previews outside the CLI.
+    action: str = ""  # rename, mkdir, rmdir, trashed, create, tags
+    current: Path | None = None  # where the item is now
+    original: Path | None = None  # where it goes back to (rename, trashed)
+    index: int = -1  # entry index in the journal
+    snapshot: dict | None = None  # tags: the snapshot restored
+    legacy: bool = False  # tags: old pickled snapshot
 
 
 def _move_back(journal: Journal, current: Path, original: Path) -> None:
@@ -259,7 +266,8 @@ def undo_plan(entries: list[JournalEntry], trust_legacy: bool = False) -> list[U
                 elif view.exists(c):
                     view.removed(c)
 
-            steps.append(UndoStep(f"move back  {current}\n    -> {original}", check, run, simulate))
+            steps.append(UndoStep(f"move back  {current}\n    -> {original}", check, run, simulate,
+                                  action="rename", current=current, original=original, index=i))
 
         elif action == "mkdir":
             folder = Path(entry["path"])
@@ -268,6 +276,7 @@ def undo_plan(entries: list[JournalEntry], trust_legacy: bool = False) -> list[U
                 lambda view, f=folder: "" if view.is_empty_dir(f) else ("no longer exists" if not view.exists(f) else "is not empty"),
                 lambda j, f=folder: _rmdir_logged(j, f),
                 lambda view, f=folder: view.removed(f),
+                action="mkdir", current=folder, index=i,
             ))
 
         elif action == "rmdir":
@@ -277,6 +286,7 @@ def undo_plan(entries: list[JournalEntry], trust_legacy: bool = False) -> list[U
                 lambda view, f=folder: "" if not view.exists(f) else ("" if view.is_dir(f) else "a file now has that name"),
                 lambda j, f=folder: _mkdirs_logged(j, f),
                 lambda view, f=folder: view.made_dir(f),
+                action="rmdir", original=folder, index=i,
             ))
 
         elif action == "trashed":
@@ -300,6 +310,7 @@ def undo_plan(entries: list[JournalEntry], trust_legacy: bool = False) -> list[U
             steps.append(UndoStep(
                 f"restore from trash  {original}", check, run,
                 lambda view, o=original, t=trashed: view.moved(t, o),
+                action="trashed", current=trashed, original=original, index=i,
             ))
 
         elif action == "create":
@@ -311,6 +322,7 @@ def undo_plan(entries: list[JournalEntry], trust_legacy: bool = False) -> list[U
                     else "changed since (contents differ)" if view.sha256(f) != h else ""),
                 lambda j, f=created: _trash_logged(j, f),
                 lambda view, f=created: view.removed(f),
+                action="create", current=created, index=i,
             ))
 
         elif action == "tags" and entry.get("phase") == "before":
@@ -339,9 +351,24 @@ def undo_plan(entries: list[JournalEntry], trust_legacy: bool = False) -> list[U
             label = f"restore the original tags  {path}"
             if not finished:
                 label += "  (the tag write never finished)"
-            steps.append(UndoStep(label, check, run, lambda view: None))
+            steps.append(UndoStep(label, check, run, lambda view: None, action="tags", current=path, original=path,
+                                  index=i, snapshot=snap, legacy=legacy))
 
     return steps
+
+
+def read_journal(journal_path: Path, log=print) -> list[JournalEntry]:
+    """A journal file's entries; lines that are not valid JSON are reported and ignored."""
+    entries = []
+    with open(journal_path, encoding="utf-8") as fh:
+        for n, line in enumerate(fh, 1):
+            if not line.strip():
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                log(f"  warning: line {n} of the journal is not valid JSON; ignored")
+    return entries
 
 
 def undo_journal(journal_path: Path, apply: bool, journal_dir: Path | None = None,
@@ -351,15 +378,7 @@ def undo_journal(journal_path: Path, apply: bool, journal_dir: Path | None = Non
     Without apply this is the undo plan: every step that would run and every
     step that would be skipped, with nothing changed on disk.
     """
-    entries = []
-    with open(journal_path, encoding="utf-8") as fh:
-        for n, line in enumerate(fh, 1):
-            if not line.strip():
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                print(f"  warning: line {n} of the journal is not valid JSON; ignored")
+    entries = read_journal(journal_path)
     steps = undo_plan(entries, trust_legacy=trust_legacy)
     mode = "APPLY" if apply else "PREVIEW (nothing is changed; add --apply to undo)"
     print(f"undo {journal_path}\n{mode}\n")

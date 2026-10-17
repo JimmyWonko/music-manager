@@ -12,7 +12,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import Callable, TypedDict, cast
 
 import requests
 
@@ -43,6 +43,12 @@ class DiscogsFormat(TypedDict, total=False):
     descriptions: list[str]
 
 
+class DiscogsImage(TypedDict, total=False):
+    type: str  # "primary" or "secondary"
+    uri: str
+    uri150: str
+
+
 class DiscogsTrackJSON(TypedDict, total=False):
     position: str
     type_: str
@@ -66,6 +72,8 @@ class DiscogsRelease(TypedDict, total=False):
     genres: list[str]
     styles: list[str]
     tracklist: list[DiscogsTrackJSON]
+    country: str
+    images: list[DiscogsImage]
 
 
 class SearchResult(TypedDict, total=False):
@@ -138,11 +146,18 @@ class Discogs:
             self.session.headers["Authorization"] = f"Discogs key={key}, secret={secret}"
         self._last = 0.0
         self.min_interval = 1.1
+        # Called with the number of seconds before every rate-limit pause (the UI shows it).
+        self.on_wait: Callable[[float], None] | None = None
+
+    def _sleep(self, seconds: float) -> None:
+        if self.on_wait is not None:
+            self.on_wait(seconds)
+        time.sleep(seconds)
 
     def _wait(self) -> None:
         delay = self.min_interval - (time.monotonic() - self._last)
         if delay > 0:
-            time.sleep(delay)
+            self._sleep(delay)
 
     def _cache_path(self, kind: str, key: str) -> Path:
         digest = hashlib.sha1(key.encode()).hexdigest()
@@ -169,12 +184,12 @@ class Discogs:
             self._last = time.monotonic()
             remaining = response.headers.get("X-Discogs-Ratelimit-Remaining")
             if remaining is not None and remaining.isdigit() and int(remaining) <= 2:
-                time.sleep(8)
+                self._sleep(8)
             if response.status_code == 429:
-                time.sleep(int(response.headers.get("Retry-After", "10")))
+                self._sleep(int(response.headers.get("Retry-After", "10")))
                 continue
             if response.status_code >= 500:
-                time.sleep(2 * (attempt + 1))
+                self._sleep(2 * (attempt + 1))
                 continue
             if response.status_code >= 400:
                 raise DiscogsError(f"Discogs HTTP {response.status_code}: {response.text[:300]}")
@@ -206,6 +221,15 @@ class Discogs:
 
     def master(self, master_id: int) -> DiscogsRelease:
         return cast(DiscogsRelease, self._get(f"{API}/masters/{master_id}", None, "master", str(master_id)))
+
+    def image(self, url: str) -> bytes:
+        """Download one release image (cover art). Not cached."""
+        self._wait()
+        response = self.session.get(url, timeout=30)
+        self._last = time.monotonic()
+        if response.status_code >= 400:
+            raise DiscogsError(f"Discogs HTTP {response.status_code} for image {url}")
+        return response.content
 
 
 def rank_by_year(results: list[SearchResult], year: str) -> list[SearchResult]:
@@ -322,6 +346,18 @@ class DiscogsTrack:
     position: str = ""  # Discogs position as printed on the release (A1, B2, 1-03, ...)
     legacy_number: int | None = None  # number the old (side-1)*20+n scheme gave
     side: str | None = None  # normalised side position (A1) when its whole disc uses sides
+    duration_s: float | None = None  # Discogs duration ("3:45"), None when not listed
+
+
+def parse_duration(text: str | None) -> float | None:
+    """Discogs duration ("3:45", "1:02:03") in seconds, or None when empty or unreadable."""
+    parts = (text or "").strip().split(":")
+    if not parts or not all(p.strip().isdigit() for p in parts) or len(parts) > 3:
+        return None
+    seconds = 0
+    for part in parts:
+        seconds = seconds * 60 + int(part)
+    return float(seconds)
 
 
 def _track_artist(item: DiscogsTrackJSON, fallback: str) -> str:
@@ -334,14 +370,14 @@ def _track_artist(item: DiscogsTrackJSON, fallback: str) -> str:
     )
 
 
-def _tracklist_entries(release: DiscogsRelease, album_artist: str) -> list[tuple[str, str, str]]:
-    """(position, title, artist) for every playable track, in tracklist order.
+def _tracklist_entries(release: DiscogsRelease, album_artist: str) -> list[tuple[str, str, str, str]]:
+    """(position, title, artist, duration) for every playable track, in tracklist order.
 
     Headings are dropped. Index tracks (a work split into movements) are
     replaced by their sub-tracks, titled "Work: Movement" so the work name
     is not lost. A normal track that lists sub_tracks stays one track.
     """
-    entries: list[tuple[str, str, str]] = []
+    entries: list[tuple[str, str, str, str]] = []
     for item in release.get("tracklist") or []:
         kind = (item.get("type_") or "track").lower()
         if kind == "heading":
@@ -356,12 +392,14 @@ def _tracklist_entries(release: DiscogsRelease, album_artist: str) -> list[tuple
                 if not sub_title:
                     continue
                 title = f"{parent_title}: {sub_title}" if parent_title else sub_title
-                entries.append(((sub.get("position") or "").strip(), title, _track_artist(sub, parent_artist)))
+                entries.append(((sub.get("position") or "").strip(), title, _track_artist(sub, parent_artist),
+                                sub.get("duration") or ""))
             continue
         title = (item.get("title") or "").strip()
         if not title:
             continue
-        entries.append(((item.get("position") or "").strip(), title, _track_artist(item, album_artist)))
+        entries.append(((item.get("position") or "").strip(), title, _track_artist(item, album_artist),
+                        item.get("duration") or ""))
     return entries
 
 
@@ -377,9 +415,11 @@ def flatten_tracklist(release: DiscogsRelease, album_artist: str) -> list[Discog
     gets `side` (A1, A2, B1 ...), which file names use by default.
     """
     parsed = []
-    for position, title, artist in _tracklist_entries(release, album_artist):
+    durations = []
+    for position, title, artist, duration in _tracklist_entries(release, album_artist):
         disc, number = parse_position(position)
         parsed.append((max(disc, 1), number, position, title, artist))
+        durations.append(parse_duration(duration))
 
     by_disc: dict[int, list[int]] = {}
     for i, (disc, *_rest) in enumerate(parsed):
@@ -412,6 +452,7 @@ def flatten_tracklist(release: DiscogsRelease, album_artist: str) -> list[Discog
                 position=position,
                 legacy_number=legacy_vinyl_number(position),
                 side=sides_of.get(i),
+                duration_s=durations[i],
             )
         )
     return out

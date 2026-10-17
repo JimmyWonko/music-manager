@@ -217,7 +217,18 @@ def _title_from_stem(stem: str) -> str:
 
 
 def match_tracks(album: AlbumFolder, dtracks: list[DiscogsTrack]) -> tuple[list[tuple[Path, DiscogsTrack | None]], bool]:
-    """Pair local files with Discogs tracks.
+    """Pair local files with Discogs tracks (see align_tracks for the rules).
+
+    Returns the pairs and whether the old vinyl numbering was detected.
+    """
+    triples, use_legacy = align_tracks(album, dtracks)
+    return [(local, dt) for local, dt, _method in triples], use_legacy
+
+
+def align_tracks(
+    album: AlbumFolder, dtracks: list[DiscogsTrack]
+) -> tuple[list[tuple[Path, DiscogsTrack | None, str]], bool]:
+    """Pair local files with Discogs tracks, saying how each pair was made.
 
     1. A file named after a side position the release has ("B2. Title")
        gets that track.
@@ -230,7 +241,9 @@ def match_tracks(album: AlbumFolder, dtracks: list[DiscogsTrack]) -> tuple[list[
        whatever is still left takes the remaining tracks in order. Otherwise
        it stays unmatched (None): reported and not tagged or moved.
 
-    Returns the pairs and whether the old vinyl numbering was detected.
+    Returns (local file, track or None, method) for every local file, where
+    method is "side", "number", "title", "position" (steps 1-4) or
+    "unmatched", and whether the old vinyl numbering was detected.
     """
     discs = {dt.disc for dt in dtracks}
     max_disc = max(discs, default=1)
@@ -268,9 +281,11 @@ def match_tracks(album: AlbumFolder, dtracks: list[DiscogsTrack]) -> tuple[list[
 
     used: set[int] = set()
     chosen: list[int | None] = [None] * len(info)
+    method: list[str] = ["unmatched"] * len(info)
     for k, (_local, disc_hint, number, side_index) in enumerate(info):
         if side_index is not None and side_index not in used:
             chosen[k] = side_index
+            method[k] = "side"
             used.add(side_index)
             continue
         if number is None:
@@ -281,6 +296,7 @@ def match_tracks(album: AlbumFolder, dtracks: list[DiscogsTrack]) -> tuple[list[
             if disc_hint is not None and dt.disc != disc_hint:
                 continue
             chosen[k] = i
+            method[k] = "number"
             used.add(i)
             break
 
@@ -301,6 +317,7 @@ def match_tracks(album: AlbumFolder, dtracks: list[DiscogsTrack]) -> tuple[list[
     for _score, k, i in sorted(candidates, key=lambda c: (-c[0], c[1], c[2])):
         if chosen[k] is None and i not in used:
             chosen[k] = i
+            method[k] = "title"
             used.add(i)
 
     # 4. Position fallback, only when the folder has exactly as many files as
@@ -315,7 +332,8 @@ def match_tracks(album: AlbumFolder, dtracks: list[DiscogsTrack]) -> tuple[list[
                 free = [i for i in free if dtracks[i].disc == disc_hint] or free
             if free:
                 chosen[k] = free[0]
+                method[k] = "position"
                 used.add(free[0])
 
-    pairs = [(info[k][0], dtracks[i] if i is not None else None) for k, i in enumerate(chosen)]
-    return pairs, use_legacy
+    triples = [(info[k][0], dtracks[i] if i is not None else None, method[k]) for k, i in enumerate(chosen)]
+    return triples, use_legacy

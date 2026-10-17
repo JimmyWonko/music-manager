@@ -30,6 +30,7 @@ from .fields import ALWAYS_REPLACED, ORIGINAL_FIELDS, RELEASE_FIELDS, TrackMeta,
 from .id3 import _apply_id3
 from .mp4 import _write_mp4_tags
 from .read import already_tagged
+from .textmap import tag_text_map
 from .vorbis import _write_vorbis
 
 
@@ -98,14 +99,8 @@ def write_tags(path: Path, meta: TrackMeta, clear_other: bool = False, dry_run: 
     return _atomic_tag_update(path, lambda tmp: _write_tags_file(tmp, meta, clear_other, previous=previous))
 
 
-def _write_tags_file(path: Path, meta: TrackMeta, clear_other: bool = False, dry_run: bool = False,
-                     previous: str | None = None) -> list[str]:
-    """Write meta into path with the format's own tag names.
-
-    Returns the tag keys that were removed and not rewritten (stale aliases,
-    and with clear_other also unowned text fields). With dry_run the file is
-    read and the changes are computed, but nothing is saved.
-    """
+def _replace_set(path: Path, meta: TrackMeta, previous: str | None) -> set[str]:
+    """Owned fields to clear even without a new value (see tag_values)."""
     replace = set(ALWAYS_REPLACED)
     if previous is None:
         previous = already_tagged(path)
@@ -115,15 +110,16 @@ def _write_tags_file(path: Path, meta: TrackMeta, clear_other: bool = False, dry
         # Not a reissue: drop an original date an earlier run of this tool
         # wrote. Files never tagged by this tool keep theirs.
         replace |= ORIGINAL_FIELDS
+    return replace
 
+
+def _open_for_tagging(path: Path):
+    """Load path for tagging: (current tag container getter, apply(meta, clear_other, replace), save)."""
     suffix = path.suffix.lower()
     if suffix == ".mp3":
         # ID3 only: works for tag-only or damaged files the MP3 parser rejects.
-        tags = _load_id3_for_mp3(path)
-        removed = _apply_id3(tags, meta, clear_other, replace)
-        if not dry_run:
-            tags.save(path, v2_version=4)
-        return removed
+        id3 = _load_id3_for_mp3(path)
+        return (lambda: id3), (lambda m, c, r: _apply_id3(id3, m, c, r)), (lambda: id3.save(path, v2_version=4))
 
     audio = MutagenFile(path)
     if audio is None:
@@ -132,20 +128,52 @@ def _write_tags_file(path: Path, meta: TrackMeta, clear_other: bool = False, dry
     if isinstance(audio, (WAVE, AIFF, MP3)):
         if audio.tags is None:
             audio.add_tags()
-        removed = _apply_id3(audio.tags, meta, clear_other, replace)
-        if not dry_run:
-            audio.save(v2_version=4)
-        return removed
+        return (lambda: audio.tags), (lambda m, c, r: _apply_id3(audio.tags, m, c, r)), (
+            lambda: audio.save(v2_version=4))
     if isinstance(audio, MP4):
-        removed = _write_mp4_tags(audio, meta, clear_other, replace)
+        writer = _write_mp4_tags
     elif isinstance(audio, ASF):
-        removed = _write_asf(audio, meta, clear_other, replace)
+        writer = _write_asf
     elif isinstance(audio, (FLAC, OggVorbis, OggOpus, OggFLAC, OggSpeex)):
-        removed = _write_vorbis(audio, meta, clear_other, replace)
+        writer = _write_vorbis
     elif isinstance(audio, APEv2File):
-        removed = _write_ape(audio, meta, clear_other, replace)
+        writer = _write_ape
     else:
         raise RuntimeError(f"tag writing not supported for {type(audio).__name__}: {path}")
+    return (lambda: audio.tags), (lambda m, c, r: writer(audio, m, c, r)), audio.save
+
+
+def _write_tags_file(path: Path, meta: TrackMeta, clear_other: bool = False, dry_run: bool = False,
+                     previous: str | None = None) -> list[str]:
+    """Write meta into path with the format's own tag names.
+
+    Returns the tag keys that were removed and not rewritten (stale aliases,
+    and with clear_other also unowned text fields). With dry_run the file is
+    read and the changes are computed, but nothing is saved.
+    """
+    replace = _replace_set(path, meta, previous)
+    _tags, apply, save = _open_for_tagging(path)
+    removed = apply(meta, clear_other, replace)
     if not dry_run:
-        audio.save()
+        save()
     return removed
+
+
+def preview_tags(path: Path, meta: TrackMeta, clear_other: bool = False) -> list[tuple[str, str | None, str | None]]:
+    """What write_tags would change, without saving: (key, before, after) per changed tag.
+
+    The file is loaded and edited in memory only. Keys use the canonical field
+    name where the format's key maps to one (title, tracknumber, ...), else
+    the format's own key. None means absent / removed.
+    """
+    replace = _replace_set(path, meta, None)
+    get_tags, apply, _save = _open_for_tagging(path)
+    before = tag_text_map(get_tags())
+    apply(meta, clear_other, replace)
+    after = tag_text_map(get_tags())
+    changes = []
+    for key in list(before) + [k for k in after if k not in before]:
+        old, new = before.get(key), after.get(key)
+        if old != new:
+            changes.append((key, old, new))
+    return changes
