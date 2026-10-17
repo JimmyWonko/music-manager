@@ -315,6 +315,10 @@ and its index and journals under
 `$XDG_DATA_HOME/music-manager/`. It has no built-in library path: set
 `library_roots` with `settings.set` first. Journals written by
 `discogs-tag` show up in its history too.
+`service.configure(data_dir, config_dir)` moves everything else it would
+touch under `~` (discogs-tag journals, the Discogs cache, the trash and the
+Discogs token) into those two folders, so an embedding app never writes to
+the home folder.
 
 ## Tests
 
