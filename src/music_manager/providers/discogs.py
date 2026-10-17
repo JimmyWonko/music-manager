@@ -9,8 +9,10 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Callable, TypedDict, cast
 
@@ -122,7 +124,40 @@ def _write_cache_atomic(cache: Path, text: str) -> None:
 
 
 class DiscogsError(RuntimeError):
-    pass
+    """A Discogs request failed. retry_after: seconds Discogs asked us to wait (429), when known."""
+
+    def __init__(self, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+# Discogs allows 60 authenticated requests a minute (25 unauthenticated), counted over a
+# moving 60-second window. Requests are serial (one lock per client) and each starts at
+# least MIN_INTERVAL after the previous one *finished*, so any 60 s holds at most
+# ceil(60 / 1.1) = 55 requests.
+MIN_INTERVAL = 1.1
+RETRY_AFTER_DEFAULT = 10.0
+RETRY_AFTER_MAX = 300.0
+
+
+def retry_after_seconds(value: str | None, now: float | None = None) -> float:
+    """Seconds to wait for a Retry-After header: delta-seconds or an HTTP date; 10 s when absent or unreadable."""
+    if value is None or not str(value).strip():
+        return RETRY_AFTER_DEFAULT
+    text = str(value).strip()
+    try:
+        seconds = float(text)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError):
+            return RETRY_AFTER_DEFAULT
+        if when is None:
+            return RETRY_AFTER_DEFAULT
+        seconds = when.timestamp() - (time.time() if now is None else now)
+    if seconds != seconds:  # NaN
+        return RETRY_AFTER_DEFAULT
+    return min(max(seconds, 1.0), RETRY_AFTER_MAX)
 
 
 class Discogs:
@@ -144,20 +179,40 @@ class Discogs:
             self.session.headers["Authorization"] = f"Discogs token={token}"
         else:
             self.session.headers["Authorization"] = f"Discogs key={key}, secret={secret}"
-        self._last = 0.0
-        self.min_interval = 1.1
+        self._last: float | None = None
+        self.min_interval = MIN_INTERVAL
         # Called with the number of seconds before every rate-limit pause (the UI shows it).
         self.on_wait: Callable[[float], None] | None = None
+        # Stand-ins for tests (a fake clock); None means time.monotonic / time.sleep.
+        self.clock: Callable[[], float] | None = None
+        self.sleeper: Callable[[float], None] | None = None
+        self._lock = threading.RLock()
+
+    def _now(self) -> float:
+        clock = getattr(self, "clock", None)
+        return clock() if clock is not None else time.monotonic()
 
     def _sleep(self, seconds: float) -> None:
-        if self.on_wait is not None:
+        if getattr(self, "on_wait", None) is not None:
             self.on_wait(seconds)
-        time.sleep(seconds)
+        sleeper = getattr(self, "sleeper", None)
+        (sleeper or time.sleep)(seconds)
 
     def _wait(self) -> None:
-        delay = self.min_interval - (time.monotonic() - self._last)
+        last = getattr(self, "_last", None)
+        if last is None:
+            return
+        delay = self.min_interval - (self._now() - last)
         if delay > 0:
             self._sleep(delay)
+
+    def _request(self, url: str, params: dict | None = None):
+        """One paced GET (call with self._lock held)."""
+        self._wait()
+        try:
+            return self.session.get(url, params=params, timeout=30)
+        finally:
+            self._last = self._now()
 
     def _cache_path(self, kind: str, key: str) -> Path:
         digest = hashlib.sha1(key.encode()).hexdigest()
@@ -178,25 +233,30 @@ class Discogs:
                 except OSError:
                     pass
 
-        self._wait()
-        for attempt in range(5):
-            response = self.session.get(url, params=params, timeout=30)
-            self._last = time.monotonic()
-            remaining = response.headers.get("X-Discogs-Ratelimit-Remaining")
-            if remaining is not None and remaining.isdigit() and int(remaining) <= 2:
-                self._sleep(8)
-            if response.status_code == 429:
-                self._sleep(int(response.headers.get("Retry-After", "10")))
-                continue
-            if response.status_code >= 500:
-                self._sleep(2 * (attempt + 1))
-                continue
-            if response.status_code >= 400:
-                raise DiscogsError(f"Discogs HTTP {response.status_code}: {response.text[:300]}")
-            data = response.json()
-            _write_cache_atomic(cache, json.dumps(data))
-            return data
-        raise DiscogsError(f"Discogs request failed after retries: {url}")
+        with self._lock:
+            retry_after: float | None = None
+            for attempt in range(5):
+                response = self._request(url, params)
+                remaining = response.headers.get("X-Discogs-Ratelimit-Remaining")
+                if remaining is not None and remaining.isdigit() and int(remaining) <= 2:
+                    self._sleep(8)
+                if response.status_code == 429:
+                    retry_after = retry_after_seconds(response.headers.get("Retry-After"))
+                    if attempt < 4:
+                        self._sleep(retry_after)
+                    continue
+                if response.status_code >= 500:
+                    if attempt < 4:
+                        self._sleep(2 * (attempt + 1))
+                    continue
+                if response.status_code >= 400:
+                    raise DiscogsError(f"Discogs HTTP {response.status_code}: {response.text[:300]}")
+                data = response.json()
+                _write_cache_atomic(cache, json.dumps(data))
+                return data
+            if retry_after is not None:
+                raise DiscogsError(f"Discogs HTTP 429: rate limited after retries: {url}", retry_after=retry_after)
+            raise DiscogsError(f"Discogs request failed after retries: {url}")
 
     def search_releases(self, artist: str, album: str, catno: str = "", year: str = "") -> list[SearchResult]:
         """Search releases. year only re-orders results; it never filters them."""
@@ -224,9 +284,8 @@ class Discogs:
 
     def image(self, url: str) -> bytes:
         """Download one release image (cover art). Not cached."""
-        self._wait()
-        response = self.session.get(url, timeout=30)
-        self._last = time.monotonic()
+        with self._lock:
+            response = self._request(url)
         if response.status_code >= 400:
             raise DiscogsError(f"Discogs HTTP {response.status_code} for image {url}")
         return response.content

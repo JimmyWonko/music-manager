@@ -43,7 +43,9 @@ def provider_call(fn, *args):
         return fn(*args)
     except DiscogsError as exc:
         text = str(exc)
-        retry = 60.0 if "429" in text else None
+        retry = getattr(exc, "retry_after", None)
+        if retry is None and "429" in text:
+            retry = 60.0
         raise ProviderError(text, retry_after=retry) from exc
     except OSError as exc:  # requests' errors are OSErrors
         raise ProviderError(f"Discogs request failed: {exc}") from exc
