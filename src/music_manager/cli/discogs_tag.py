@@ -21,12 +21,14 @@ from mutagen import File as MutagenFile
 from mutagen.id3 import ID3, TIT2, TPE1, TXXX
 
 from .. import naming
-from ..apply import AlbumApplyError, apply_album
+from ..apply import AlbumApplyError, apply_album, disc_warning
 from ..fs import AlbumFolder, collect_albums, collect_extras
 from ..journal import undo_journal
 from ..match import (
     AUTO_MIN_MARGIN,
     AUTO_MIN_SCORE,
+    align_tracks,
+    ambiguous_disc_files,
     format_score_components,
     guess_from_album_dir,
     parse_album_dirname,
@@ -254,6 +256,12 @@ def process_album(
         if auto and not release_id and not allow_track_mismatch:
             print("  skipped: track count mismatch in --auto mode (use --allow-track-mismatch to apply anyway)")
             return "skipped"
+
+    unsure = ambiguous_disc_files(align_tracks(album, dtracks)[0])
+    if unsure:
+        print(f"  warning: {disc_warning(album, unsure)}")
+        print("  skipped: nothing written")
+        return "skipped"
 
     if not yes and sys.stdin.isatty() and not dry_run:
         ans = prompt("  apply tags + rename? [Y/n] ").lower()

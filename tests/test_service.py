@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import json
 import os
@@ -893,13 +894,24 @@ def test_undo_tag_count_is_only_the_values_that_change(lib):
 
 
 def test_undo_preview_of_a_swap_through_stage_names(lib):
-    """A re-apply that swaps two file names moves them via stage names: the preview shows A -> B and its tags."""
+    """A re-apply that swaps two file names moves them via stage names: the preview shows A -> B and its tags.
+
+    The swap is a real one: a corrected Discogs entry (1000005) lists "Four" as 1-2 and "Two" as 2-2.
+    (Before known gap 18 was fixed, re-applying 1000004 itself swapped them, which was the bug.)
+    """
     d = accepted_double(lib)
     assert wait(service.plan.apply(service.plan.build([d]).id)).state is JobState.DONE
-    service.match.choose(d, 1000004)
+    corrected = copy.deepcopy(lib.multi)
+    corrected["id"] = 1000005
+    titles = {t["position"]: t for t in corrected["tracklist"]}
+    titles["1-2"]["title"], titles["2-2"]["title"] = "Four", "Two"
+    lib.discogs.releases[1000005] = corrected
+    assert wait(service.match.manual(d, "1000005")).state is JobState.DONE
+    service.match.choose(d, 1000005)
     again = service.plan.build([d])
     swapped = [f for f in again.albums[0].files if f.path_before != f.path_after]
-    assert len(swapped) == 2 and again.tags_to_write == 6  # the flat 2CD layout re-pairs "2. Four" with "Two"
+    # two titles change, and the release id of all four tracks
+    assert len(swapped) == 2 and again.tags_to_write == 6
     assert wait(service.plan.apply(again.id)).state is JobState.DONE
     op = service.journal.list(0, 10).items[0]
     undo = service.journal.undo_plan(op.id)

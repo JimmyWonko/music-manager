@@ -171,7 +171,7 @@ def alignment(album: AlbumFolder, locals_: list[LocalTrack], dtracks: list[Disco
     pairs: list[TrackPair] = []
     for path, dt, method in triples:
         local = by_path.get(path) or LocalTrack(0, path, 1, None, path.stem, None)
-        if dt is None:
+        if dt is None:  # "unmatched" or "ambiguous_disc" (reported as a disc_ambiguous problem)
             pairs.append(TrackPair("unmatched", local, None, 0.0, None, False))
             continue
         used.add(id(dt))

@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..apply import AlbumLayout, check_layout, layout_album, release_info, template_paths
+from ..apply import AlbumLayout, check_layout, disc_warning, layout_album, release_info, template_paths
 from ..fs import AlbumFolder, is_audio
 from ..naming.templates import PRESETS, CompiledTemplate, TemplateError, TemplateStructureError, compile_template
 from ..providers.discogs import DiscogsRelease, DiscogsTrack
@@ -165,6 +165,9 @@ def _album_problems(t: AlbumTarget, track_count: int) -> list[Problem]:
     if len(t.dtracks) != track_count:
         problems.append(Problem(ProblemKind.TRACK_MISMATCH,
                                 f"Discogs lists {len(t.dtracks)} tracks, the folder has {track_count}", [t.album.path]))
+    if layout.ambiguous:
+        problems.append(Problem(ProblemKind.DISC_AMBIGUOUS, disc_warning(t.album, layout.ambiguous),
+                                list(layout.ambiguous)))
     seen: dict[str, list[Path]] = {}
     for item in [*layout.tracks, *layout.moves]:
         seen.setdefault(str(item.dest).casefold(), []).append(item.source)

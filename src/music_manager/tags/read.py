@@ -65,6 +65,26 @@ def already_tagged(path: Path) -> str | None:
     return None
 
 
+def read_disc_number(path: Path) -> int | None:
+    """The file's disc number tag (DISCNUMBER, ID3 TPOS, MP4 disk, ...), None when absent or unreadable.
+
+    Read-only and quiet: a file that cannot be read simply has no disc number.
+    """
+    from .textmap import tag_text_map
+
+    try:
+        if path.suffix.lower() == ".mp3":
+            tags = ID3(path)
+        else:
+            audio = MutagenFile(path)
+            tags = audio.tags if audio is not None else None
+    except Exception:  # noqa: BLE001 - unreadable or untagged: no disc number
+        return None
+    text = tag_text_map(tags).get("discnumber", "").strip()
+    digits = text.split("/")[0].strip()
+    return int(digits) if digits.isdigit() and int(digits) > 0 else None
+
+
 def album_release_ids(tracks: list[Path]) -> dict[Path, str | None]:
     """Discogs release id of every track (None when a track has none or can't be read)."""
     out: dict[Path, str | None] = {}

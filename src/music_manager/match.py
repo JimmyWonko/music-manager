@@ -6,13 +6,14 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
 
 from .fs import DISC_DIR, AlbumFolder
 from .naming import ARTIST_NUM_SUFFIX, YEAR_RE, year4
 from .providers.discogs import DiscogsTrack, SearchResult, is_side_position, split_result_title
-from .tags.read import read_easy_tags
+from .tags.read import read_disc_number, read_easy_tags
 
 JUNK_BITS = re.compile(
     r"""(?ix)
@@ -226,6 +227,51 @@ def match_tracks(album: AlbumFolder, dtracks: list[DiscogsTrack], title_match_mi
     return [(local, dt) for local, dt, _method in triples], use_legacy
 
 
+def _tag_disc_hints(info, dtracks: list[DiscogsTrack], number_of) -> dict[int, int] | None:
+    """Disc numbers from the files' tags, when they are usable for the whole album.
+
+    Usable means: every numbered file has a disc tag, no two numbered files claim the
+    same (disc, number), and the release has every (disc, number) they claim. Otherwise
+    the tags are ignored (None) and the folder / file name hints stand.
+    """
+    discs = {dt.disc for dt in dtracks}
+    release_keys = {(dt.disc, number_of(dt)) for dt in dtracks}
+    hints: dict[int, int] = {}
+    keys: list[tuple[int, int]] = []
+    for k, (local, _disc_hint, number, side_index) in enumerate(info):
+        if side_index is not None:
+            continue
+        disc = read_disc_number(local)
+        if number is not None:
+            if disc is None:
+                return None
+            keys.append((disc, number))
+        if disc is not None and disc in discs:
+            hints[k] = disc
+    if not keys or len(set(keys)) != len(keys) or not all(key in release_keys for key in keys):
+        return None
+    return hints
+
+
+def _place_by_title(group: list[tuple[int, Path]], candidates: list[int], dtracks: list[DiscogsTrack],
+                    title_match_min: float) -> dict[int, int] | None:
+    """Files sharing one track number, each placed on the one same-number track its title matches.
+
+    None unless every file's title matches exactly one candidate (at title_match_min)
+    and no two files pick the same track.
+    """
+    picks: dict[int, int] = {}
+    for k, local in group:
+        title = _title_from_stem(local.stem)
+        good = [i for i in candidates if title and similar(title, dtracks[i].title) >= title_match_min]
+        if len(good) != 1:
+            return None
+        picks[k] = good[0]
+    if len(set(picks.values())) != len(picks):
+        return None
+    return picks
+
+
 def align_tracks(
     album: AlbumFolder, dtracks: list[DiscogsTrack], title_match_min: float = TITLE_MATCH_MIN
 ) -> tuple[list[tuple[Path, DiscogsTrack | None, str]], bool]:
@@ -234,18 +280,30 @@ def align_tracks(
     1. A file named after a side position the release has ("B2. Title")
        gets that track.
     2. A leading number ("06 Title", "6. Title", "2-06 Title") is matched
-       against the track numbers; a CD1/CD2 folder limits it to that disc.
-       Files renamed by older versions (B1 = 21) are recognised and matched
-       by that old number when that fits the folder better.
+       against the track numbers. On a multi-disc release the number is
+       paired with its disc: the disc number tags come first (when they are
+       consistent for the whole album, see _tag_disc_hints), then a CD1/CD2
+       folder, then a "2-06" file name. Files renamed by older versions
+       (B1 = 21) are recognised and matched by that old number when that
+       fits the folder better.
+       Files with no disc that share a number ("1. One", "1. Four" in one
+       flat folder) are placed only when the folder's numbers are exactly
+       the release's per-disc numbering (numbers restart on each disc) and
+       each file's title picks one of the same-number tracks. Otherwise they
+       are refused: method "ambiguous_disc", no track, never paired by a
+       later step (the caller reports it; nothing is guessed).
     3. Anything left is matched by title similarity: a pair needs at least
        title_match_min (TITLE_MATCH_MIN, 0.80, unless the caller says otherwise).
     4. If the folder has exactly as many files as the release has tracks,
        whatever is still left takes the remaining tracks in order. Otherwise
        it stays unmatched (None): reported and not tagged or moved.
 
+    A single-disc release is paired by steps 1-4 as before; no tags are read.
+
     Returns (local file, track or None, method) for every local file, where
-    method is "side", "number", "title", "position" (steps 1-4) or
-    "unmatched", and whether the old vinyl numbering was detected.
+    method is "side", "number", "title", "position" (steps 1-4),
+    "ambiguous_disc" or "unmatched", and whether the old vinyl numbering was
+    detected.
     """
     discs = {dt.disc for dt in dtracks}
     max_disc = max(discs, default=1)
@@ -284,7 +342,38 @@ def align_tracks(
     used: set[int] = set()
     chosen: list[int | None] = [None] * len(info)
     method: list[str] = ["unmatched"] * len(info)
+    refused: set[int] = set()
+    if len(discs) > 1:
+        tag_hints = _tag_disc_hints(info, dtracks, number_of)
+        if tag_hints is not None:
+            info = [(local, tag_hints.get(k, disc_hint), number, side_index)
+                    for k, (local, disc_hint, number, side_index) in enumerate(info)]
+        loose = [k for k, (_l, disc_hint, number, side_index) in enumerate(info)
+                 if number is not None and disc_hint is None and side_index is None]
+        counts = Counter(info[k][2] for k in loose)
+        repeated = sorted(n for n, c in counts.items() if c > 1)
+        if repeated:
+            hinted = {d for _l, d, _n, _s in info if d is not None}
+            open_tracks = [i for i, dt in enumerate(dtracks) if dt.disc not in hinted]
+            restarts = Counter(number_of(dtracks[i]) for i in open_tracks) == counts
+            for n in repeated:
+                group = [(k, info[k][0]) for k in loose if info[k][2] == n]
+                picks = None
+                if restarts:
+                    same = [i for i in open_tracks if number_of(dtracks[i]) == n]
+                    picks = _place_by_title(group, same, dtracks, title_match_min)
+                if picks is None:
+                    for k, _local in group:
+                        refused.add(k)
+                        method[k] = "ambiguous_disc"
+                    continue
+                for k, i in picks.items():
+                    chosen[k] = i
+                    method[k] = "number"
+                    used.add(i)
     for k, (_local, disc_hint, number, side_index) in enumerate(info):
+        if chosen[k] is not None or k in refused:
+            continue
         if side_index is not None and side_index not in used:
             chosen[k] = side_index
             method[k] = "side"
@@ -305,7 +394,7 @@ def align_tracks(
     # 3. Leftovers: match by normalized title, best pairs first.
     candidates: list[tuple[float, int, int]] = []
     for k, (local, disc_hint, _number, _side) in enumerate(info):
-        if chosen[k] is not None:
+        if chosen[k] is not None or k in refused:
             continue
         local_title = _title_from_stem(local.stem)
         if not local_title:
@@ -327,7 +416,7 @@ def align_tracks(
     #    Otherwise unmatched files stay None: reported and left untagged.
     if len(info) == len(dtracks):
         for k, (_local, disc_hint, _number, _side) in enumerate(info):
-            if chosen[k] is not None:
+            if chosen[k] is not None or k in refused:
                 continue
             free = [i for i in range(len(dtracks)) if i not in used]
             if disc_hint is not None:
@@ -339,3 +428,8 @@ def align_tracks(
 
     triples = [(info[k][0], dtracks[i] if i is not None else None, method[k]) for k, i in enumerate(chosen)]
     return triples, use_legacy
+
+
+def ambiguous_disc_files(triples: list[tuple[Path, DiscogsTrack | None, str]]) -> list[Path]:
+    """The files align_tracks refused because their disc cannot be told (method "ambiguous_disc")."""
+    return [local for local, _dt, method in triples if method == "ambiguous_disc"]

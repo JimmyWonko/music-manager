@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .fs import AlbumFolder, file_sha256
 from .journal import Journal
-from .match import TITLE_MATCH_MIN, align_tracks
+from .match import TITLE_MATCH_MIN, align_tracks, ambiguous_disc_files
 from .moves import PlannedFile, _mkdirs_logged, _prune_empty, _trash_logged, describe_moves, move_planned, prune_limit
 from .naming import (
     album_folder_name,
@@ -237,6 +237,7 @@ class AlbumLayout:
     release_id: int = 0  # the release being applied (recorded in the journal's "start" entry)
     artist: str = ""
     title: str = ""
+    ambiguous: list[Path] = field(default_factory=list)  # refused: disc unknown (also in unmatched)
 
 
 def layout_album(
@@ -270,10 +271,16 @@ def layout_album(
     pairs, legacy = align_tracks(album, dtracks, title_match_min)
     if legacy:
         log("  note  these files use the old vinyl numbering (B1 = 21); they are renumbered 1..N")
+    ambiguous = ambiguous_disc_files(pairs)
+    if ambiguous:
+        log(f"  warning: {disc_warning(album, ambiguous)}")
 
     plan: list[PlannedFile] = []
     unmatched: list[Path] = []
-    for local, dt, _method in pairs:
+    for local, dt, method in pairs:
+        if dt is None and method == "ambiguous_disc":
+            unmatched.append(local)
+            continue
         if dt is None:
             log(f"  skip  extra file  {local.name}  (left in place)")
             unmatched.append(local)
@@ -307,7 +314,17 @@ def layout_album(
             if sidecar.suffix.lower() in PLAYLIST_EXTS:
                 log(f"  note  hand-made playlist {sidecar.name} is moved as-is; it may list old file names")
     return AlbumLayout(album, dest_root, target_dir, pairs, plan, unmatched, moves, old_playlists, legacy, clashes,
-                       release_id=int(release.get("id") or 0), artist=info.album_artist, title=info.title)
+                       release_id=int(release.get("id") or 0), artist=info.album_artist, title=info.title,
+                       ambiguous=ambiguous)
+
+
+def disc_warning(album: AlbumFolder, files: list[Path]) -> str:
+    """The message for files whose disc cannot be told (see match.align_tracks)."""
+    names = ", ".join(str(p.relative_to(album.path)) if album.path in p.parents else p.name for p in files)
+    return (f"cannot tell which disc {len(files)} file(s) belong to: {names}. Their track numbers repeat on "
+            "several discs and no disc tag, CD1/CD2 folder, 1-01 style name or title says which. "
+            "Nothing is paired by guesswork; put each disc in its own CD1/CD2 folder or name the files "
+            "1-01, 2-01, ...")
 
 
 def execute_layout(
@@ -431,6 +448,8 @@ def apply_album(
     list of moves made.
     """
     layout = layout_album(album, dest_root, release, dtracks, original_year)
+    if layout.ambiguous:
+        raise AlbumApplyError(f"{disc_warning(album, layout.ambiguous)}\n  nothing was written")
     return execute_layout(layout, dry_run, clear_other, scan_root, journal_dir)
 
 

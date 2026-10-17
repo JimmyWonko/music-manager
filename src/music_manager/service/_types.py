@@ -99,6 +99,7 @@ class ProblemKind(StrEnum):
     SYMLINK_OUTSIDE = "symlink_outside"  # paths lists every offending link
     COLLISION = "collision"
     TRACK_MISMATCH = "track_mismatch"  # release track count differs from local files
+    DISC_AMBIGUOUS = "disc_ambiguous"  # multi-disc: files whose disc can't be told (paths); never overridden
     FILE_CHANGED = "file_changed"  # edited/moved since plan or apply: rebuild / skipped on undo
     LEGACY_JOURNAL = "legacy_journal"  # undo of an old-format step needs trust_legacy=True
     RELEASE_NOT_FETCHED = "release_not_fetched"  # plan.build: release still downloading (Plan.fetch_job)
