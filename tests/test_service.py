@@ -729,3 +729,27 @@ def test_search_result_helper_round_trip():
     rel = {"id": 1, "title": "T", "year": 2000, "artists": [{"name": "A"}], "labels": [{"name": "L", "catno": "C 1"}],
            "formats": [{"name": "CD"}], "master_id": 0}
     assert search_result(rel)["title"] == "A - T"
+
+
+def test_jobs_wait_returns_only_after_job_finished_was_emitted():
+    import time
+
+    from music_manager.service._events import Events
+    from music_manager.service._jobs import JobRunner
+
+    events = Events()
+    seen = []
+
+    def slow_slot(job):
+        time.sleep(0.2)  # the worker is still emitting when the job is already DONE
+        seen.append(job.id)
+
+    direct(events.job_finished, slow_slot)
+    runner = JobRunner(events)
+    try:
+        job = runner.submit(service.JobKind.SCAN, lambda ctx: "ok")
+        done = runner.wait(job.id, timeout=5)
+        assert done.state is JobState.DONE and seen == [job.id]
+        runner.idle(timeout=5)
+    finally:
+        runner.shutdown()

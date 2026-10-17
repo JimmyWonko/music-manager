@@ -54,6 +54,7 @@ class JobRunner:
         self._thread: threading.Thread | None = None
         self._stopping = False
         self._outbox: deque[Job] = deque()
+        self._announced: set[int] = set()  # finished jobs whose job_finished has been emitted
 
     # --- public -------------------------------------------------------------
     def submit(self, kind: JobKind, work: Callable[[JobContext], str | None], total: int | None = None,
@@ -110,10 +111,10 @@ class JobRunner:
             self._cond.notify_all()
 
     def wait(self, job_id: int, timeout: float | None = 30.0) -> Job:
-        """Block until the job is DONE, FAILED or CANCELLED (CLI and tests; never on the UI thread)."""
+        """Block until the job is DONE, FAILED or CANCELLED and job_finished was emitted (CLI and tests only)."""
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._cond:
-            while self.get(job_id).state not in FINAL:
+            while self.get(job_id).state not in FINAL or job_id not in self._announced:
                 left = None if deadline is None else deadline - time.monotonic()
                 if left is not None and left <= 0:
                     raise TimeoutError(f"job {job_id} still {self.get(job_id).state.name}")
@@ -123,7 +124,7 @@ class JobRunner:
     def idle(self, timeout: float = 30.0) -> None:
         deadline = time.monotonic() + timeout
         with self._cond:
-            while any(j.state not in FINAL for j in self._jobs.values()):
+            while any(j.state not in FINAL or i not in self._announced for i, j in self._jobs.items()):
                 left = deadline - time.monotonic()
                 if left <= 0:
                     raise TimeoutError("jobs still running")
@@ -228,5 +229,10 @@ class JobRunner:
                 if not self._outbox:
                     return
                 job = self._outbox.popleft()
-            self.events.job_progress.emit(job)
-            self.events.job_finished.emit(job)
+            try:
+                self.events.job_progress.emit(job)
+                self.events.job_finished.emit(job)
+            finally:
+                with self._cond:
+                    self._announced.add(job.id)
+                    self._cond.notify_all()
