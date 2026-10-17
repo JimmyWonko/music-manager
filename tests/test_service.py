@@ -856,3 +856,50 @@ def test_undo_of_discogs_tag_journals_with_and_without_release(lib, tmp_path):
     _rewrite_start(_journal_of(op.id), ("release_id", "artist", "title"))
     (old,) = service.journal.undo_plan(op.id).albums
     assert (old.album_id, old.release_id, old.artist, old.title) == (0, 0, "", "")
+
+
+# --- undo previews count tag values that change, not snapshot fields --------------------------------
+
+def test_undo_tag_count_is_only_the_values_that_change(lib):
+    from mutagen.flac import FLAC
+
+    titles = {"1-01 One.flac": "One", "1-02 Two.flac": "Two", "2-01 Three.flac": "Three", "2-02 Four.flac": "Four"}
+    for name, title in titles.items():  # already tagged in part, the same as Discogs will write
+        f = FLAC(lib.double / name)
+        f["title"], f["album"], f["genre"] = title, "Double Feature", "Old Genre"
+        f.save()
+    wait(service.library.scan())
+    d, plan, op, _original = applied_double(lib)
+    forward = {f.path_after: sorted(t.key for t in f.tags) for f in plan.albums[0].files if f.kind == "track"}
+    assert all("title" not in keys and "album" not in keys and "genre" in keys for keys in forward.values())
+    undo = service.journal.undo_plan(op.id)
+    back = {f.path_before: sorted(t.key for t in f.tags) for f in undo.albums[0].files if f.kind == "track"}
+    assert back == forward  # undo restores exactly the fields the apply changed
+    assert undo.tags_to_write == plan.tags_to_write == sum(len(k) for k in forward.values())
+    assert undo.tags_to_write < 16 * 4  # not every field of every snapshot
+    genre = next(t for f in undo.albums[0].files for t in f.tags if t.key == "genre")
+    assert genre.after == "Old Genre"
+
+
+def test_undo_preview_of_a_swap_through_stage_names(lib):
+    """A re-apply that swaps two file names moves them via stage names: the preview shows A -> B and its tags."""
+    d = accepted_double(lib)
+    assert wait(service.plan.apply(service.plan.build([d]).id)).state is JobState.DONE
+    service.match.choose(d, 1000004)
+    again = service.plan.build([d])
+    swapped = [f for f in again.albums[0].files if f.path_before != f.path_after]
+    assert len(swapped) == 2 and again.tags_to_write == 6  # the flat 2CD layout re-pairs "2. Four" with "Two"
+    assert wait(service.plan.apply(again.id)).state is JobState.DONE
+    op = service.journal.list(0, 10).items[0]
+    undo = service.journal.undo_plan(op.id)
+    moves = [f for f in undo.albums[0].files if f.path_before != f.path_after]
+    assert sorted((f.path_before.name, f.path_after.name) for f in moves) == [
+        ("2. Four.flac", "2. Two.flac"), ("2. Two.flac", "2. Four.flac")]
+    assert all(".discogs-tag-stage" not in str(f.path_before) + str(f.path_after) for f in undo.albums[0].files)
+    assert all(f.kind == "track" for f in moves)
+    assert undo.files_to_move == 2 and undo.tags_to_write == 6
+    target = again.albums[0].folder_after
+    job = wait(service.journal.undo(op.id, undo.id))
+    assert job.state is JobState.DONE, job.message
+    assert read_easy_tags(target / "2. Four.flac").get("title") == "Four"
+    assert read_easy_tags(target / "2. Two.flac").get("title") == "Two"

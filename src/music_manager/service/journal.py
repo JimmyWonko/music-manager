@@ -81,11 +81,23 @@ def _kind_of(path: Path, is_dir: bool = False) -> str:
     return "track" if suffix in AUDIO_EXTS else "extra"
 
 
-def _steps(entries, trust_legacy: bool):
+def _steps(entries, trust_legacy: bool, where: list[Path | None] | None = None):
+    """The undo steps and each one's check result, simulated in order.
+
+    where, when given, gets for every step the real path that holds the
+    step's file at the moment the step would run (earlier steps may have
+    moved it, e.g. through a stage name in a swap).
+    """
     steps = journal_mod.undo_plan(entries, trust_legacy=trust_legacy)
     view = journal_mod._UndoView(simulate=True)
     reasons = []
     for step in steps:
+        if where is not None:
+            real = None
+            if step.current is not None:
+                key = str(step.current)
+                real = view.over.get(key, key) if key in view.over else key
+            where.append(Path(real) if real not in (None, journal_mod._UndoView._DIR) else None)
         reason = step.check(view)
         if not reason:
             step.simulate(view)
@@ -143,7 +155,8 @@ def _preview(st: State, op_id: int, trust_legacy: bool) -> tuple[Plan, _UndoReco
     path = Path(row["journal"])
     entries = journal_mod.read_journal(path, log=lambda _line: None)
     legacy_op = op.legacy
-    steps, reasons = _steps(entries, trust_legacy)
+    where: list[Path | None] = []
+    steps, reasons = _steps(entries, trust_legacy, where)
     starts, groups, origins = _groups(st, op_id, entries)
     if not groups:
         groups[-1] = (0, Path("/"), Path("/"))
@@ -156,7 +169,7 @@ def _preview(st: State, op_id: int, trust_legacy: bool) -> tuple[Plan, _UndoReco
     problems: dict[int, list[Problem]] = {g: [] for g in groups}
     fingerprint: dict[str, tuple] = {}
     legacy_paths: dict[int, list[Path]] = {}
-    for step, reason in zip(steps, reasons, strict=True):
+    for step, reason, real in zip(steps, reasons, where, strict=True):
         g = group_of(step.index)
         files = per_album[g]
         for p in (step.current, step.original):
@@ -165,9 +178,13 @@ def _preview(st: State, op_id: int, trust_legacy: bool) -> tuple[Plan, _UndoReco
         is_legacy_block = step.action == "tags" and step.legacy and not trust_legacy
         skip = reason if reason and not is_legacy_block else None
         if step.action == "rename":
-            is_dir = os.path.isdir(step.current) if step.current else False
+            is_dir = os.path.isdir(real) if real else False
             key = str(step.original)
-            files[key] = FileChange(_kind_of(step.original, is_dir), step.current, step.original,
+            before = step.current
+            earlier = files.pop(str(step.current), None) if str(step.current) != key else None
+            if earlier is not None and earlier.path_after == step.current:
+                before = earlier.path_before  # a chain (A -> stage -> B, as in a swap) shows as A -> B
+            files[key] = FileChange(_kind_of(step.original, is_dir), before, step.original,
                                     files[key].tags if key in files else [], skip or (files[key].skip_reason
                                                                                       if key in files else None))
         elif step.action == "trashed":
@@ -178,7 +195,7 @@ def _preview(st: State, op_id: int, trust_legacy: bool) -> tuple[Plan, _UndoReco
         elif step.action == "tags":
             key = str(step.current)
             existing = files.get(key)
-            where_now = existing.path_before if existing else step.current
+            where_now = real or step.current  # the real file that will be at step.current by then
             tags: list[TagChange] = []
             if is_legacy_block:
                 legacy_paths.setdefault(g, []).append(step.current)
