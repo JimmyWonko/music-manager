@@ -501,8 +501,8 @@ def test_apply_holds_refused_albums_and_choose_clears_hold(lib):
     wait(service.library.scan())
     plan = service.plan.build([d])
     before = tree(lib.root)
-    job = wait(service.plan.apply(plan.id))
-    assert job.state is JobState.FAILED and "refused 1" in job.message
+    with pytest.raises(service.MMError, match="Nothing to apply: 1 album"):
+        service.plan.apply(plan.id)  # nothing applicable: refused at once, no job
     assert tree(lib.root) == before
     row = service.library.album(d)
     assert row.status is MatchStatus.HELD
@@ -528,12 +528,47 @@ def test_apply_refuses_albums_whose_files_changed_since_the_plan(lib):
     with open(lib.double / "1-01 One.flac", "ab") as fh:
         fh.write(b"\0")
     os.utime(lib.double / "1-01 One.flac", ns=(1, 1))
-    job = wait(service.plan.apply(plan.id))
-    assert job.state is JobState.FAILED
+    job = wait(service.plan.apply(plan.id))  # looked fine at call time: refused during the job
+    assert job.state is JobState.FAILED and "refused 1" in job.message and job.message.startswith("Applied 0")
     row = service.library.album(d)
     assert row.status is MatchStatus.HELD
     assert row.held_for[0].kind is ProblemKind.FILE_CHANGED and lib.double / "1-01 One.flac" in row.held_for[0].paths
     assert (lib.double / "1-01 One.flac").exists() and not read_easy_tags(lib.double / "1-01 One.flac").get("title")
+
+
+def test_apply_with_nothing_applicable_raises_before_any_job(lib):
+    d = accepted_double(lib)
+    make_album(lib.double, ["bonus demo"])
+    wait(service.library.scan())
+    plan = service.plan.build([d])
+    assert plan.albums[0].problems
+    started = []
+    direct(service.events.job_progress, started.append)
+    from music_manager.service._state import state
+
+    jobs_before = len(state().runner._jobs)
+    with pytest.raises(service.MMError) as err:
+        service.plan.apply(plan.id)
+    assert "held; rebuild the plan" in str(err.value)
+    assert started == [] and len(state().runner._jobs) == jobs_before  # no job was created
+    assert service.library.album(d).status is MatchStatus.HELD
+    with pytest.raises(service.MMError):
+        service.plan.apply(plan.id)  # the same answer again, still no job
+    assert len(state().runner._jobs) == jobs_before
+
+
+def test_apply_of_only_unfetched_albums_raises_and_holds_nothing(lib):
+    from music_manager.service._state import state
+
+    d = accepted_double(lib)
+    with state().index.tx() as conn:
+        conn.execute("UPDATE candidates SET release = NULL WHERE album_id = ?", (d,))
+    plan = service.plan.build([d])
+    assert plan.fetch_job is not None
+    with pytest.raises(service.MMError, match="wait for their release"):
+        service.plan.apply(plan.id)
+    assert service.library.album(d).status is MatchStatus.ACCEPTED
+    wait(service.jobs.get(plan.fetch_job))
 
 
 def test_apply_with_a_user_template(lib):

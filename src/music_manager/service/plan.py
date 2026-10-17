@@ -348,6 +348,11 @@ def _reindex(st: State, album_id: int, root: Path, folder: Path, status: MatchSt
 def apply(plan_id: int) -> Job:
     """Run a plan. Albums with problems, or whose files changed since the build, are refused and HELD.
 
+    Raises MMError at once, before any job, when no album of the plan is
+    applicable now (every one has problems or waits for its release); the
+    albums with problems are held. If albums that looked fine are all
+    refused during the job (files changed on disk), the job ends FAILED.
+
     One journal and one Operation for the whole run. An album that fails
     while being applied keeps its status and is reported in the job message.
     """
@@ -358,7 +363,19 @@ def apply(plan_id: int) -> Job:
             raise NotFound(f"plan {plan_id}")
         if rec.consumed:
             raise PlanStale(f"plan {plan_id} was already applied: build a new plan")
-        rec.consumed = True
+        applicable = [r for r in rec.albums if not r.plan.problems]
+        if applicable:
+            rec.consumed = True
+    if not applicable:
+        # Nothing could run: say so now, before any job. Albums with problems are held as usual.
+        for r in rec.albums:
+            set_status(r.plan.album_id, MatchStatus.HELD, held_for=list(r.plan.problems))
+        parts = []
+        if rec.albums:
+            parts.append(f"{len(rec.albums)} album(s) have problems (held; rebuild the plan)")
+        if rec.not_fetched:
+            parts.append(f"{len(rec.not_fetched)} album(s) wait for their release from Discogs (rebuild the plan)")
+        raise MMError("Nothing to apply: " + ("; ".join(parts) or "the plan is empty"))
 
     def work(ctx) -> str:
         started = now_utc()

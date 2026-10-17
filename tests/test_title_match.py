@@ -114,8 +114,8 @@ def test_service_plan_and_apply_follow_the_pairing(lib):
     aid = accepted_loose(lib)
     held = service.plan.build([aid])
     assert ProblemKind.TRACK_MISMATCH in [p.kind for p in held.albums[0].problems]
-    job = service.jobs.wait(service.plan.apply(held.id).id)
-    assert job.state is JobState.FAILED  # nothing applicable: the album is held, not moved
+    with pytest.raises(service.MMError):
+        service.plan.apply(held.id)  # nothing applicable: the album is held, not moved
     row = service.library.album(aid)
     assert row.status is MatchStatus.HELD and row.held_for[0].kind is ProblemKind.TRACK_MISMATCH
 
