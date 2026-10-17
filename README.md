@@ -85,6 +85,41 @@ unplugged), the error lists every file that was moved and where, and
 every file that was not. One album failing never stops the run; failed
 albums are listed at the end.
 
+Multi-disc albums are paired on (disc, track). The disc comes from the
+files' disc number tags first (when they fit the release for the whole
+album), then from `CD1`/`CD2` folders, then from `1-01`-style names. In
+one flat folder whose numbers restart on each disc (`01 One` ... `01
+Four`), files are placed only when the numbering restarts exactly like
+the release's discs and each title picks one of the same-number tracks.
+Otherwise discogs-tag warns, names the files and skips the album without
+writing anything. Single-disc albums are paired as before.
+
+## Check for swapped discs (`--check-disc-swaps`)
+
+Before this fix, re-running discogs-tag on its own flat `2CD` folder
+swapped the disc-1 and disc-2 tracks that share a number. The tags still
+agree with Discogs, so only the audio shows it. This check compares each
+file's real length with the Discogs length at its tagged disc and track.
+It flags an album when giving the same-number files to the other disc
+fits clearly better (by at least 5 s per track, `SWAP_MARGIN_S`), and
+prints the evidence for each track. As secondary evidence it also reports
+title tags that don't match the release, and files whose last apply
+journal shows them moving to another disc.
+
+```sh
+discogs-tag --check-disc-swaps "/path/to/Music"
+discogs-tag --check-disc-swaps --report ~/disc-swaps.txt "/path/to/Music"
+```
+
+It is strictly read-only. Audio files are only opened for reading;
+nothing is tagged, moved, indexed or journaled. The Discogs cache is read
+but never written unless you pass `--allow-cache-write`. Requests are
+rate-limited like every other Discogs call. Without a token, only cached
+releases (under 6 hours old) are used. `--report FILE` also writes the
+report to FILE, which must not exist yet. Exit status: 0 = nothing
+flagged, 3 = album(s) flagged, 1 = could not run. Fix a flagged album
+with `--undo-journal` on the apply that swapped it, or by re-tagging it.
+
 ## Where files go
 
 ```text
@@ -225,6 +260,10 @@ fresh one is written in the new folder. Hand-made playlists are moved as they ar
 | `--normalize-folders` | Rename album folders under `path` to the current naming rule. Preview unless `--apply`. |
 | `--undo-journal FILE` | Reverse everything recorded in a journal (an apply or `--normalize-folders`). Preview unless `--apply`. |
 | `--apply` | Really make the change (only with `--normalize-folders` or `--undo-journal`). |
+| `--check-disc-swaps` | Read-only report of multi-disc albums under `path` whose same-number tracks look swapped between discs. |
+| `--report FILE` | With `--check-disc-swaps`: also write the report to FILE (must not exist). |
+| `--allow-cache-write` | With `--check-disc-swaps`: allow Discogs responses to be cached (default: cache is only read). |
+| `--journal-dir DIR` | With `--check-disc-swaps`: the apply journals to read (default: the discogs-tag journal folder). |
 | `-h`, `--help` | Show this help. |
 
 Without a TTY, pass `--release-id` or `--auto`. Otherwise the album is

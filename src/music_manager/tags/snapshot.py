@@ -283,3 +283,23 @@ def preview_restore(path: Path, snapshot: TagSnapshot, trust_legacy: bool = Fals
     after = tag_text_map(get_tags())
     return [(k, before.get(k), after.get(k)) for k in list(before) + [k for k in after if k not in before]
             if before.get(k) != after.get(k)]
+
+
+def snapshot_text_map(snapshot: TagSnapshot) -> dict[str, str]:
+    """A journal tag snapshot as {lowercase key: text}, like tag_text_map. Never touches a file.
+
+    Old pickle snapshots (v1) are never loaded here: they come back empty, as do snapshots
+    that cannot be decoded.
+    """
+    from .textmap import tag_text_map
+
+    try:
+        payload = _snapshot_payload(snapshot, trust_legacy=False)
+    except (LegacySnapshotError, ValueError, TypeError, KeyError):
+        return {}
+    if snapshot.get("kind") == "id3":
+        return tag_text_map(_id3_from_bytes(snapshot["id3"]))
+    plain: dict[str, list] = {}
+    for key, value in payload:
+        plain.setdefault(key, []).append(value)
+    return tag_text_map(plain)

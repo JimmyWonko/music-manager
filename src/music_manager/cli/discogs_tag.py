@@ -550,6 +550,8 @@ examples:
   discogs-tag --normalize-folders "/path/to/Music"           (preview)
   discogs-tag --normalize-folders --apply "/path/to/Music"
   discogs-tag --undo-journal ~/.local/state/discogs-tag/journal/FILE.jsonl --apply
+  discogs-tag --check-disc-swaps "/path/to/Music"             (read-only report)
+  discogs-tag --check-disc-swaps --report ~/disc-swaps.txt "/path/to/Music"
 
 credentials:
   Create a personal token at
@@ -642,6 +644,18 @@ Undo:
         help="also remove text tags this tool does not write (comments, MusicBrainz ids, ...); "
         "ReplayGain, AccurateRip, encoder info, art, lyrics and ISRC are always kept",
     )
+    parser.add_argument(
+        "--check-disc-swaps",
+        action="store_true",
+        help="read-only: report multi-disc albums under PATH whose disc-1/disc-2 tracks look swapped "
+        "(file lengths against Discogs). Writes nothing but the --report file",
+    )
+    parser.add_argument("--report", type=Path, metavar="FILE",
+                        help="with --check-disc-swaps: also write the report to FILE (must not exist yet)")
+    parser.add_argument("--allow-cache-write", action="store_true",
+                        help="with --check-disc-swaps: let Discogs responses go into the cache (default: read only)")
+    parser.add_argument("--journal-dir", type=Path, metavar="DIR",
+                        help="with --check-disc-swaps: apply journals to read (default: the discogs-tag journal folder)")
     parser.add_argument("--save-token", action="store_true", help="store a Discogs user token and exit")
     parser.add_argument("--self-test", action="store_true", help="run built-in naming tests and exit")
     parser.add_argument(
@@ -669,6 +683,37 @@ Undo:
     return parser.parse_args(argv)
 
 
+def check_disc_swaps_cli(root: Path, report: Path | None, allow_cache_write: bool,
+                         journal_dir: Path | None) -> int:
+    """--check-disc-swaps: 0 = nothing flagged, 3 = album(s) flagged, 1 = could not run. Read-only."""
+    from ..journal import state_dir
+    from ..swapcheck import CacheOnlySource, check_disc_swaps, format_report
+
+    if not root.is_dir():
+        print(f"error: not a folder: {root}", file=sys.stderr)
+        return 1
+    if report is not None and (report.expanduser().exists() or report.expanduser().is_symlink()):
+        print(f"error: {report} already exists; pick a new report file", file=sys.stderr)
+        return 1
+    token, key, secret = load_token()
+    if token or (key and secret):
+        source = Discogs(token, key, secret)
+        source.cache_write = allow_cache_write
+        source.on_wait = lambda s: print(f"  (Discogs rate limit: waiting {s:.0f} s)", file=sys.stderr)
+    else:
+        print("note: no Discogs token: using cached releases only", file=sys.stderr)
+        source = CacheOnlySource()
+    journals = journal_dir.expanduser() if journal_dir is not None else state_dir() / "journal"
+    checks = check_disc_swaps(root.resolve(), source, journals)
+    text = format_report(checks, cache_written=allow_cache_write and not isinstance(source, CacheOnlySource))
+    print(text, end="")
+    if report is not None:
+        with open(report.expanduser(), "x", encoding="utf-8") as fh:
+            fh.write(text)
+        print(f"report written to {report}")
+    return 3 if any(c.flagged for c in checks) else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.self_test:
@@ -691,6 +736,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.path is None:
         print("error: pass an album folder or tree", file=sys.stderr)
         return 2
+
+    if args.check_disc_swaps:
+        return check_disc_swaps_cli(args.path.expanduser(), args.report, args.allow_cache_write, args.journal_dir)
 
     if args.normalize_folders:
         apply = args.apply and not args.dry_run
