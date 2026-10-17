@@ -48,8 +48,8 @@ def _value_text(value) -> str:
 def tag_text_map(tags) -> dict[str, str]:
     """{key: text} for every text field in a mutagen tag container (protected/binary fields skipped).
 
-    Keys are canonical field names where known (title, tracknumber, ...),
-    else the container's own key.
+    Keys are always lowercase: the canonical field name where known (title,
+    tracknumber, ...), else the container's own key casefolded ("txxx:my tag").
     """
     out: dict[str, str] = {}
     if tags is None:
@@ -61,8 +61,12 @@ def tag_text_map(tags) -> dict[str, str]:
             text = _value_text(tags[key])
         except Exception:  # noqa: BLE001 - an odd frame must not break a preview
             continue
-        name = CANONICAL_NAMES.get(key.casefold(), key)
+        lower = key.casefold()
+        name = CANONICAL_NAMES.get(lower, lower)
         if name in out and out[name] != text:
-            name = key
+            name = lower
+            n = 2
+            while name in out and out[name] != text:
+                name, n = f"{lower}#{n}", n + 1
         out[name] = text
     return out
