@@ -79,7 +79,8 @@ def test_types_are_frozen_with_the_contract_fields_and_defaults():
                                        "confidence", "artwork", "artist_sort", "added_at", "held_for"]
     assert names(service.Album)[-2:] == ["tracks", "extras"]
     assert names(service.Plan) == ["id", "albums", "warnings", "files_to_move", "tags_to_write", "bytes_to_copy",
-                                   "skipped"]
+                                   "skipped", "fetch_job"]  # fetch_job: additive, defaults to None
+    assert dataclasses.fields(service.Plan)[-1].default is None
     assert names(service.FileChange) == ["kind", "path_before", "path_after", "tags", "skip_reason"]
     assert names(service.Candidate) == ["release_id", "master_id", "artist", "title", "year", "country", "label",
                                         "catno", "formats", "score", "margin", "breakdown", "alignment",

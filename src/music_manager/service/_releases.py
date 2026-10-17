@@ -126,6 +126,13 @@ def fetch_release(album_id: int, release_id: int, st: State | None = None, searc
     return release, master_year
 
 
+def release_is_fresh(album_id: int, release_id: int, st: State | None = None) -> bool:
+    """The full release is stored and younger than the 6-hour Discogs caching limit (no network)."""
+    st = st or state()
+    row = candidate_row(album_id, release_id, st)
+    return bool(row["release"]) and (time.time() - (row["fetched_at"] or 0)) < CACHE_MAX_AGE
+
+
 def release_for(album_id: int, release_id: int, st: State | None = None, fetch: bool = True
                 ) -> tuple[DiscogsRelease | None, str, SearchResult]:
     """(full release or None, master year, search result) for one candidate.

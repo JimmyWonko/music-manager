@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 import tempfile
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..apply import AlbumApplyError, execute_layout
@@ -14,14 +15,15 @@ from ..playlists import playlist_path
 from ..tags.write import preview_tags
 from ._common import now_utc, set_status
 from ._ops import journal_dir, record_operation
-from ._planning import AlbumTarget, album_target, cross_album_collisions, resolve_template
-from ._releases import _primary_image, provider_call
+from ._planning import AlbumTarget, album_target, chosen_release_id, cross_album_collisions, resolve_template
+from ._releases import _primary_image, fetch_release, provider_call, release_is_fresh
 from ._state import State, events, state
 from ._types import (
     AlbumPlan,
     FileChange,
     Job,
     JobKind,
+    JobState,
     MatchStatus,
     MMError,
     NotFound,
@@ -51,6 +53,7 @@ class _PlanRecord:
     clear_other: bool
     consumed: bool = False
     steps: int = 0
+    not_fetched: list[AlbumPlan] = field(default_factory=list)  # left out: release still missing
 
 
 # --- fingerprints: detect files that changed between build and apply ---------------
@@ -135,26 +138,114 @@ def _file_changes(t: AlbumTarget, clear_other: bool, warnings: list[str]) -> lis
     return changes
 
 
+FETCH_RETRY_AFTER_S = 120.0  # a release that failed to download is not retried by plan.build for this long
+
+
+def _fetch_job(st: State, wanted: list[tuple[int, int]]) -> int | None:
+    """Queue (or reuse) the background job that downloads these releases; None if none can start now.
+
+    Jobs run one at a time, so the newest job covering the wanted releases
+    finishes after all the others: that is the one returned.
+    """
+    now = time.time()
+    with st.lock:
+        covering: list[int] = []
+        todo: list[tuple[int, int]] = []
+        for pair in wanted:
+            job_id = st.fetching.get(pair)
+            if job_id is not None:
+                try:
+                    live = st.runner.get(job_id).state not in (JobState.DONE, JobState.FAILED, JobState.CANCELLED)
+                except NotFound:
+                    live = False
+                if live:
+                    covering.append(job_id)
+                    continue
+                st.fetching.pop(pair, None)
+            failed = st.fetch_failures.get(pair)
+            if failed is not None and now - failed[0] < FETCH_RETRY_AFTER_S:
+                continue
+            todo.append(pair)
+        if not todo:
+            return max(covering) if covering else None
+
+        def work(ctx) -> str:
+            fetched, errors = 0, []
+            try:
+                for i, (album_id, release_id) in enumerate(todo):
+                    ctx.progress(i, len(todo), f"fetching release {release_id} from Discogs")
+                    try:
+                        fetch_release(album_id, release_id, st)
+                    except MMError as exc:
+                        with st.lock:
+                            st.fetch_failures[(album_id, release_id)] = (time.time(), str(exc))
+                        errors.append(f"release {release_id}: {exc}")
+                    else:
+                        with st.lock:
+                            st.fetch_failures.pop((album_id, release_id), None)
+                        fetched += 1
+                    events.album_changed.emit(album_id)
+                ctx.progress(len(todo), len(todo), "fetched")
+            finally:
+                with st.lock:
+                    for pair in todo:
+                        if st.fetching.get(pair) == ctx.job_id:
+                            st.fetching.pop(pair, None)
+            msg = f"Fetched {fetched} release(s): rebuild the plan"
+            if errors:
+                msg += f"; {len(errors)} failed: " + " | ".join(errors)
+            if not fetched:
+                raise MMError(msg)
+            return msg
+
+        job = st.runner.submit(JobKind.FETCH_CANDIDATES, work, total=len(todo), message="queued")
+        for pair in todo:
+            st.fetching[pair] = job.id
+        return job.id
+
+
 def build(album_ids: list[int], template: str | None = None,
           allow_track_mismatch: set[int] = frozenset()) -> Plan:
     """Everything plan.apply would do, file by file, with every problem. Read-only (never writes a status).
 
-    Uses each album's chosen release, else its best candidate. A release that
-    is not fetched yet is fetched now (index-only write; the only network
-    call outside a job). allow_track_mismatch: album ids whose
-    track_mismatch problem is overridden.
+    Uses each album's chosen release, else its best candidate. Never calls
+    Discogs: an album whose full release is not stored (or is older than the
+    6-hour Discogs caching limit) gets a RELEASE_NOT_FETCHED problem and no
+    files, and the release is downloaded by a background job, Plan.fetch_job.
+    Build the plan again when that job finishes. allow_track_mismatch: album
+    ids whose track_mismatch problem is overridden.
     """
     st = state()
     compiled = resolve_template(template)
     cfg = st.config()
     ids = [int(a) for a in album_ids]
-    targets = [album_target(aid, None, compiled, st=st, fetch=True, need_release=True) for aid in ids]
-    cross = cross_album_collisions(targets)
+    wanted: list[tuple[int, int]] = []
+    pending: dict[int, AlbumTarget] = {}
+    targets: list[AlbumTarget] = []
+    for aid in ids:
+        rid = chosen_release_id(aid, st)
+        if rid is not None and not release_is_fresh(aid, rid, st):
+            wanted.append((aid, rid))
+            pending[aid] = album_target(aid, rid, compiled, st=st, fetch=False)
+            continue
+        targets.append(album_target(aid, rid, compiled, st=st, fetch=False, need_release=True))
+    fetch_job = _fetch_job(st, wanted) if wanted else None
+    cross = cross_album_collisions(targets + list(pending.values()))
     allowed = {int(a) for a in allow_track_mismatch}
     warnings: list[str] = []
     records: list[_AlbumRecord] = []
+    plans: dict[int, AlbumPlan] = {}
     files_to_move = tags_to_write = bytes_to_copy = skipped = steps = 0
     covers = 0
+    for t in pending.values():
+        failed = st.fetch_failures.get((t.album_id, t.release_id))
+        if failed is not None and fetch_job is None:
+            message = f"Release {t.release_id} could not be fetched from Discogs: {failed[1]}"
+        else:
+            message = f"Release {t.release_id} is being fetched from Discogs: build the plan again when it arrives"
+        problem = Problem(ProblemKind.RELEASE_NOT_FETCHED, message, [t.album.path])
+        plans[t.album_id] = AlbumPlan(t.album_id, t.release_id, t.album.path, t.target, [],
+                                      [problem, *cross.get(t.album_id, [])])
     for t in targets:
         problems = [p for p in t.problems if not (p.kind is ProblemKind.TRACK_MISMATCH and t.album_id in allowed)]
         problems += cross.get(t.album_id, [])
@@ -181,16 +272,24 @@ def build(album_ids: list[int], template: str | None = None,
                 cover_url = url
                 covers += 1
         ap = AlbumPlan(t.album_id, t.release_id, t.album.path, t.target, changes, problems)
+        plans[t.album_id] = ap
         records.append(_AlbumRecord(t, ap, _fingerprint(t), cover_url))
+    if pending:
+        if fetch_job is not None:
+            warnings.append(f"{len(pending)} release(s) are being fetched from Discogs (job {fetch_job}): "
+                            "build the plan again when it finishes")
+        else:
+            warnings.append(f"{len(pending)} release(s) could not be fetched from Discogs")
     refused = sum(1 for r in records if r.plan.problems)
     if refused:
         warnings.append(f"{refused} album(s) have problems and will be refused (held) by apply")
     if covers:
         warnings.append(f"{COVER_NAME} will be saved from Discogs for {covers} album(s)")
-    plan = Plan(st.next_id(), [r.plan for r in records], warnings, files_to_move, tags_to_write, bytes_to_copy,
-                skipped)
+    plan = Plan(st.next_id(), [plans[aid] for aid in ids if aid in plans], warnings, files_to_move, tags_to_write,
+                bytes_to_copy, skipped, fetch_job)
     with st.lock:
-        st.plans[plan.id] = _PlanRecord(plan, records, cfg.clear_other_tags, steps=steps)
+        st.plans[plan.id] = _PlanRecord(plan, records, cfg.clear_other_tags, steps=steps,
+                                        not_fetched=[plans[aid] for aid in pending])
     return plan
 
 
@@ -320,6 +419,8 @@ def apply(plan_id: int) -> Job:
         msg = f"Applied {len(applied)} album(s)"
         if refused:
             msg += f"; refused {len(refused)} with problems (held; rebuild the plan)"
+        if rec.not_fetched:
+            msg += f"; left out {len(rec.not_fetched)} whose release is not fetched yet (rebuild the plan)"
         if failed:
             msg += f"; {len(failed)} failed: " + " | ".join(f"{r.target.album.path}: {err}" for r, err in failed)
         if notes:

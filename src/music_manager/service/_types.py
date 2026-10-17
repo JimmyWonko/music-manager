@@ -101,6 +101,7 @@ class ProblemKind(StrEnum):
     TRACK_MISMATCH = "track_mismatch"  # release track count differs from local files
     FILE_CHANGED = "file_changed"  # edited/moved since plan or apply: rebuild / skipped on undo
     LEGACY_JOURNAL = "legacy_journal"  # undo of an old-format step needs trust_legacy=True
+    RELEASE_NOT_FETCHED = "release_not_fetched"  # plan.build: release still downloading (Plan.fetch_job)
 
 
 # --- jobs ---------------------------------------------------------------------
@@ -288,6 +289,7 @@ class Plan:
     tags_to_write: int
     bytes_to_copy: int  # copies only for cross-drive
     skipped: int = 0  # steps with FileChange.skip_reason set; counted nowhere else
+    fetch_job: int | None = None  # job fetching releases this plan lacks; rebuild when it finishes
 
 
 @dataclass(frozen=True)

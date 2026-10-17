@@ -28,6 +28,9 @@ class State:
     discogs: Any = None  # Discogs client (or a stand-in with the same methods); created on first use
     plans: dict[int, Any] = field(default_factory=dict)  # plan id -> _PlanRecord / _UndoRecord
     undo_previews: dict[int, int] = field(default_factory=dict)  # operation id -> latest preview plan id
+    # plan.build's background release fetches: (album id, release id) -> job id, and recent failures
+    fetching: dict[tuple[int, int], int] = field(default_factory=dict)
+    fetch_failures: dict[tuple[int, int], tuple[float, str]] = field(default_factory=dict)
     lock: threading.RLock = field(default_factory=threading.RLock)
     ids: Any = field(default_factory=lambda: itertools.count(1))
     _config: config_mod.Config | None = None
