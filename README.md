@@ -294,6 +294,22 @@ of date (renamed or added tracks), and removes generated playlists that a
 newer one replaces (sent to the trash, never deleted outright: old per-disc playlists, a playlist named after the
 album folder's previous name).
 
+## Python API (`music_manager.service`)
+
+A desktop app (or any other front end) drives the same engine through
+`music_manager.service`, described in `API-CONTRACT.md`: `library`
+(scan and browse), `match` (find, review and choose releases), `plan`
+(a read-only preview of every move and tag change, then apply),
+`journal` (history and undo), `templates`, `settings`, `jobs` and the
+`events` object (Qt signals when PySide6 is installed, plain callbacks
+otherwise). Slow calls return a job id and run on one worker thread.
+
+The service keeps its settings in `$XDG_CONFIG_HOME/music-manager/config.toml`
+and its index and journals under
+`$XDG_DATA_HOME/music-manager/`. It has no built-in library path: set
+`library_roots` with `settings.set` first. Journals written by
+`discogs-tag` show up in its history too.
+
 ## Tests
 
 ```sh

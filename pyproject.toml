@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+ui = ["PySide6"]
 
 [project.scripts]
 discogs-tag = "music_manager.cli.discogs_tag:main"

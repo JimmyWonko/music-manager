@@ -34,7 +34,7 @@ def test_align_tracks_reports_how_each_file_was_paired(tmp_path):
     assert methods["1-02 Second.flac"] == "number"
     pairs, _ = match_tracks(album, dtracks)
     assert [(local, dt) for local, dt, _ in triples] == pairs
-    for local, dt, method in triples:
+    for _local, dt, method in triples:
         assert (dt is None) == (method == "unmatched")
 
 
