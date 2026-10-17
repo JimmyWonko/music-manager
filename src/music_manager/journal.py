@@ -23,6 +23,9 @@ class JournalEntry(TypedDict, total=False):
     command: str
     album: str
     dest: str
+    release_id: int  # "start" of an apply: the release, its artist and title (older journals lack them)
+    artist: str
+    title: str
     root: str
     journal: str
     phase: str

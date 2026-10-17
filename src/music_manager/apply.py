@@ -234,6 +234,9 @@ class AlbumLayout:
     old_playlists: list[Path] = field(default_factory=list)  # generated playlists: dropped, regenerated
     legacy: bool = False
     clashes: list[list[Path]] = field(default_factory=list)  # sources that map to one destination
+    release_id: int = 0  # the release being applied (recorded in the journal's "start" entry)
+    artist: str = ""
+    title: str = ""
 
 
 def layout_album(
@@ -303,7 +306,8 @@ def layout_album(
             moves.append(PlannedFile(sidecar, target_dir / sidecar.relative_to(album.path)))
             if sidecar.suffix.lower() in PLAYLIST_EXTS:
                 log(f"  note  hand-made playlist {sidecar.name} is moved as-is; it may list old file names")
-    return AlbumLayout(album, dest_root, target_dir, pairs, plan, unmatched, moves, old_playlists, legacy, clashes)
+    return AlbumLayout(album, dest_root, target_dir, pairs, plan, unmatched, moves, old_playlists, legacy, clashes,
+                       release_id=int(release.get("id") or 0), artist=info.album_artist, title=info.title)
 
 
 def execute_layout(
@@ -334,7 +338,8 @@ def execute_layout(
     if not dry_run:
         if journal is None:
             journal = Journal("apply", journal_dir)
-        journal.write(action="start", command="apply", album=str(album.path), dest=str(target_dir))
+        journal.write(action="start", command="apply", album=str(album.path), dest=str(target_dir),
+                      release_id=layout.release_id, artist=layout.artist, title=layout.title)
     else:
         journal = None
     tagged: list[Path] = []

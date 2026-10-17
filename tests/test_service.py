@@ -81,6 +81,8 @@ def test_types_are_frozen_with_the_contract_fields_and_defaults():
     assert names(service.Plan) == ["id", "albums", "warnings", "files_to_move", "tags_to_write", "bytes_to_copy",
                                    "skipped", "fetch_job"]  # fetch_job: additive, defaults to None
     assert dataclasses.fields(service.Plan)[-1].default is None
+    assert names(service.AlbumPlan) == ["album_id", "release_id", "folder_before", "folder_after", "files", "problems",
+                                        "artist", "title"]  # artist, title: additive, default ""
     assert names(service.FileChange) == ["kind", "path_before", "path_after", "tags", "skip_reason"]
     assert names(service.Candidate) == ["release_id", "master_id", "artist", "title", "year", "country", "label",
                                         "catno", "formats", "score", "margin", "breakdown", "alignment",
@@ -766,3 +768,56 @@ def test_jobs_wait_returns_only_after_job_finished_was_emitted():
         runner.idle(timeout=5)
     finally:
         runner.shutdown()
+
+
+# --- undo previews name the album and release they reverse ------------------------------------------
+
+def _rewrite_start(journal: Path, drop: tuple[str, ...]) -> None:
+    lines = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    for line in lines:
+        if line.get("action") == "start":
+            for key in drop:
+                line.pop(key, None)
+    journal.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+
+
+def _journal_of(op_id: int) -> Path:
+    from music_manager.service._state import state
+
+    return Path(state().index.one("SELECT journal FROM operations WHERE id = ?", (op_id,))["journal"])
+
+
+def test_plan_and_undo_carry_release_id_artist_and_title(lib):
+    d, plan, op, _original = applied_double(lib)
+    assert (plan.albums[0].release_id, plan.albums[0].artist, plan.albums[0].title) == (
+        1000004, "Band A & Band B", "Double Feature")
+    start = next(json.loads(x) for x in _journal_of(op.id).read_text(encoding="utf-8").splitlines()
+                 if json.loads(x).get("action") == "start")
+    assert (start["release_id"], start["artist"], start["title"]) == (1000004, "Band A & Band B", "Double Feature")
+    (ap,) = service.journal.undo_plan(op.id).albums
+    assert (ap.album_id, ap.release_id, ap.artist, ap.title) == (d, 1000004, "Band A & Band B", "Double Feature")
+
+
+def test_undo_of_an_older_service_journal_falls_back_to_the_recorded_release(lib):
+    d, _plan, op, _original = applied_double(lib)
+    _rewrite_start(_journal_of(op.id), ("release_id", "artist", "title"))
+    (ap,) = service.journal.undo_plan(op.id).albums
+    assert (ap.album_id, ap.release_id, ap.artist, ap.title) == (d, 1000004, "", "")
+
+
+def test_undo_of_discogs_tag_journals_with_and_without_release(lib, tmp_path):
+    from music_manager import journal as journal_mod
+
+    rel = lib.multi
+    names = ["1-01 One", "1-02 Two", "2-01 Three", "2-02 Four"]
+    copy = make_album(tmp_path / "cli-src" / "Some Album", names)
+    album = next(a for a in collect_albums(copy) if a.path == copy)
+    apply_album(album, tmp_path / "cli-lib", rel, flatten_tracklist(rel, release_artists(rel)), "1998",
+                dry_run=False, journal_dir=journal_mod.STATE_DIR / "journal")
+    (op,) = service.journal.list(0, 10).items
+    (ap,) = service.journal.undo_plan(op.id).albums
+    assert (ap.album_id, ap.release_id, ap.artist, ap.title) == (0, 1000004, "Band A & Band B", "Double Feature")
+    # a journal from before the start entry named the release: 0 and "" (nothing else records it)
+    _rewrite_start(_journal_of(op.id), ("release_id", "artist", "title"))
+    (old,) = service.journal.undo_plan(op.id).albums
+    assert (old.album_id, old.release_id, old.artist, old.title) == (0, 0, "", "")

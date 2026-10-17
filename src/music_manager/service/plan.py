@@ -204,6 +204,12 @@ def _fetch_job(st: State, wanted: list[tuple[int, int]]) -> int | None:
         return job.id
 
 
+def _names(t: AlbumTarget) -> tuple[str, str]:
+    from ..providers.discogs import release_artists
+
+    return release_artists(t.release), str(t.release.get("title") or "")
+
+
 def build(album_ids: list[int], template: str | None = None,
           allow_track_mismatch: set[int] = frozenset()) -> Plan:
     """Everything plan.apply would do, file by file, with every problem. Read-only (never writes a status).
@@ -245,7 +251,7 @@ def build(album_ids: list[int], template: str | None = None,
             message = f"Release {t.release_id} is being fetched from Discogs: build the plan again when it arrives"
         problem = Problem(ProblemKind.RELEASE_NOT_FETCHED, message, [t.album.path])
         plans[t.album_id] = AlbumPlan(t.album_id, t.release_id, t.album.path, t.target, [],
-                                      [problem, *cross.get(t.album_id, [])])
+                                      [problem, *cross.get(t.album_id, [])], *_names(t))
     for t in targets:
         problems = [p for p in t.problems if not (p.kind is ProblemKind.TRACK_MISMATCH and t.album_id in allowed)]
         problems += cross.get(t.album_id, [])
@@ -271,7 +277,7 @@ def build(album_ids: list[int], template: str | None = None,
             if url and not has_cover:
                 cover_url = url
                 covers += 1
-        ap = AlbumPlan(t.album_id, t.release_id, t.album.path, t.target, changes, problems)
+        ap = AlbumPlan(t.album_id, t.release_id, t.album.path, t.target, changes, problems, *_names(t))
         plans[t.album_id] = ap
         records.append(_AlbumRecord(t, ap, _fingerprint(t), cover_url))
     if pending:

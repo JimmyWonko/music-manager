@@ -93,10 +93,26 @@ def _steps(entries, trust_legacy: bool):
     return steps, reasons
 
 
-def _groups(st: State, op_id: int, entries) -> tuple[list[int], dict[int, tuple[int, Path, Path]]]:
+@dataclass(frozen=True)
+class _Origin:
+    """What an undo preview knows about the album a journal block applied."""
+    release_id: int = 0
+    artist: str = ""
+    title: str = ""
+
+
+def _groups(st: State, op_id: int, entries
+            ) -> tuple[list[int], dict[int, tuple[int, Path, Path]], dict[int, _Origin]]:
+    """One group per "start" entry: (album id, folder now, folder it goes back to), and its release.
+
+    release_id, artist and title come from the start entry (journals since
+    2026-10-17); else the release_id the service recorded for the
+    operation; else 0 and "" (e.g. older discogs-tag journals).
+    """
     starts = [i for i, e in enumerate(entries) if e.get("action") == "start"]
     known = {r["folder_before"]: r for r in st.index.query("SELECT * FROM operation_albums WHERE op_id = ?", (op_id,))}
     groups: dict[int, tuple[int, Path, Path]] = {}
+    origins: dict[int, _Origin] = {}
     for g, i in enumerate(starts):
         e = entries[i]
         original = Path(e.get("album") or e.get("root") or "/")
@@ -107,7 +123,14 @@ def _groups(st: State, op_id: int, entries) -> tuple[list[int], dict[int, tuple[
             found = st.index.one("SELECT id FROM albums WHERE folder IN (?, ?)", (str(now), str(original)))
             album_id = found["id"] if found else 0
         groups[g] = (album_id, now, original)
-    return starts, groups
+        try:
+            release_id = int(e.get("release_id") or 0)
+        except (TypeError, ValueError):
+            release_id = 0
+        if not release_id and row is not None and row["release_id"]:
+            release_id = int(row["release_id"])
+        origins[g] = _Origin(release_id, str(e.get("artist") or ""), str(e.get("title") or ""))
+    return starts, groups, origins
 
 
 def _preview(st: State, op_id: int, trust_legacy: bool) -> tuple[Plan, _UndoRecord]:
@@ -121,7 +144,7 @@ def _preview(st: State, op_id: int, trust_legacy: bool) -> tuple[Plan, _UndoReco
     entries = journal_mod.read_journal(path, log=lambda _line: None)
     legacy_op = op.legacy
     steps, reasons = _steps(entries, trust_legacy)
-    starts, groups = _groups(st, op_id, entries)
+    starts, groups, origins = _groups(st, op_id, entries)
     if not groups:
         groups[-1] = (0, Path("/"), Path("/"))
 
@@ -196,7 +219,9 @@ def _preview(st: State, op_id: int, trust_legacy: bool) -> tuple[Plan, _UndoReco
                         bytes_to_copy += os.lstat(c.path_before).st_size
                 except OSError:
                     pass
-        albums.append(AlbumPlan(album_id, 0, now_folder, original, changes, problems[g]))
+        origin = origins.get(g, _Origin())
+        albums.append(AlbumPlan(album_id, origin.release_id, now_folder, original, changes, problems[g],
+                                origin.artist, origin.title))
     plan = Plan(st.next_id(), albums, [], files_to_move, tags_to_write, bytes_to_copy, skipped)
     record = _UndoRecord(op_id, plan, trust_legacy, tuple(reasons), fingerprint, groups)
     return plan, record

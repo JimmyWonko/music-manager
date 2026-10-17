@@ -278,6 +278,8 @@ class AlbumPlan:
     folder_after: Path
     files: list[FileChange]
     problems: list[Problem]  # any problem blocks apply for this album
+    artist: str = ""  # the release's artist and title ("" when unknown, e.g. an old journal)
+    title: str = ""
 
 
 @dataclass(frozen=True)
