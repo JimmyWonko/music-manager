@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import journal as journal_mod
-from ..fs import is_audio, trash_root
+from ..fs import AUDIO_EXTS, trash_root
 from ..playlists import PLAYLIST_EXTS
 from ..tags.snapshot import LegacySnapshotError, preview_restore
 from ._common import now_utc, set_status
@@ -72,11 +72,13 @@ def _stat(path: Path) -> tuple:
 
 
 def _kind_of(path: Path, is_dir: bool = False) -> str:
+    """By name only: during an undo the file is usually not at that path yet."""
     if is_dir:
         return "extra"
-    if path.suffix.lower() in PLAYLIST_EXTS:
+    suffix = path.suffix.lower()
+    if suffix in PLAYLIST_EXTS:
         return "playlist"
-    return "track" if is_audio(path) else "extra"
+    return "track" if suffix in AUDIO_EXTS else "extra"
 
 
 def _steps(entries, trust_legacy: bool):
@@ -164,7 +166,7 @@ def _preview(st: State, op_id: int, trust_legacy: bool) -> tuple[Plan, _UndoReco
                 except (LegacySnapshotError, ValueError, OSError) as exc:
                     skip = skip or f"cannot read the saved tags: {exc}"
             if existing:
-                files[key] = FileChange(existing.kind, existing.path_before, existing.path_after,
+                files[key] = FileChange("track", existing.path_before, existing.path_after,  # tag steps: audio only
                                         existing.tags + tags, existing.skip_reason or skip)
             else:
                 files[key] = FileChange("track", step.current, step.current, tags, skip)

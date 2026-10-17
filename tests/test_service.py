@@ -573,6 +573,19 @@ def test_undo_preview_runs_the_plan_backwards_and_is_read_only(lib):
     assert undo.tags_to_write == sum(len(f.tags) for f in ap.files)
 
 
+def test_undo_preview_file_kinds_match_the_apply(lib):
+    _d, plan, op, _original = applied_double(lib)
+    (ap,) = service.journal.undo_plan(op.id).albums
+    kinds = {f.path_after.name: f.kind for f in ap.files}
+    for name in ("1-01 One.flac", "1-02 Two.flac", "2-01 Three.flac", "2-02 Four.flac"):
+        assert kinds[name] == "track", (name, kinds)
+    assert kinds["rip.log"] == "extra" and kinds["cover.jpg"] == "extra"
+    forward = {f.path_after: f.kind for f in plan.albums[0].files}
+    for f in ap.files:
+        if f.path_before in forward:
+            assert f.kind == forward[f.path_before]  # the same kind as the plan that applied it
+
+
 def test_undo_restores_files_and_tags(lib):
     d, plan, op, original = applied_double(lib)
     undo = service.journal.undo_plan(op.id)
