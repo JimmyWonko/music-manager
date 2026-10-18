@@ -4,7 +4,6 @@ title = "", AlbumRow.loose_tracks = True. Not after the grandparent ("lib – Bl
 
 from __future__ import annotations
 
-import pytest
 from disc_fixtures import silent_flac
 from mutagen.flac import FLAC
 from test_review_walk import (
@@ -17,8 +16,6 @@ from test_review_walk import (
 from music_manager import service
 from music_manager.service._state import state
 
-PENDING = pytest.mark.xfail(strict=True, reason="loose tracks are named after the grandparent folder")
-
 
 def _tag(path, **tags):
     f = FLAC(path)
@@ -27,7 +24,6 @@ def _tag(path, **tags):
     f.save()
 
 
-@PENDING
 def test_loose_tracks_in_an_artist_folder_are_named_after_it(svc):  # noqa: F811
     artist = svc / "Black Flag"
     real = artist_with_stray(artist)
@@ -44,7 +40,6 @@ def test_loose_tracks_in_an_artist_folder_are_named_after_it(svc):  # noqa: F811
     assert (plan.albums[0].artist, plan.albums[0].title) == ("Black Flag", "")
 
 
-@PENDING
 def test_stray_tags_do_not_name_the_group(svc):  # noqa: F811
     artist = svc / "Black Flag"
     artist_with_stray(artist)
@@ -58,7 +53,6 @@ def test_stray_tags_do_not_name_the_group(svc):  # noqa: F811
     assert loose.track_count == 2 and loose.loose_tracks is True
 
 
-@PENDING
 def test_an_older_index_is_renamed_on_the_next_scan(svc):  # noqa: F811
     artist = svc / "Black Flag"
     artist_with_stray(artist)

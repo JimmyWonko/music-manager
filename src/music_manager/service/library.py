@@ -11,7 +11,7 @@ from ..fs import AlbumFolder, collect_albums
 from ..match import _disc_from_folder, _title_from_stem, guess_from_album_dir
 from ..naming import year4
 from ..tags.read import _read_tag_file, album_release_ids
-from ._common import iso, load_album, now_utc, row_to_album_row
+from ._common import is_loose_tracks, iso, load_album, now_utc, row_to_album_row
 from ._state import State, events, state
 from ._types import (
     STATUS_ORDER,
@@ -160,8 +160,10 @@ def index_album(st: State, root: Path, album: AlbumFolder, status: MatchStatus |
     artwork = _artwork(album)
     extras = [str(p) for p in album.extra_dirs] + [str(p) for p in album.sidecars]
     same_art = existing is not None and existing["artwork"] == (str(artwork) if artwork else None)
+    loose = is_loose_tracks(album)
     if (existing is not None and not changed and status is None and same_art
-            and json.loads(existing["extras"] or "[]") == extras):
+            and json.loads(existing["extras"] or "[]") == extras
+            and bool(json.loads(existing["guess"] or "{}").get("loose_tracks")) == loose):
         return existing["id"], False  # incremental rescan: nothing to re-read
 
     guess = guess_from_album_dir(album.path, album.tracks) if album.tracks else {}
@@ -175,11 +177,17 @@ def index_album(st: State, root: Path, album: AlbumFolder, status: MatchStatus |
     artist_sort = _first(first_tags, "albumartistsort") or artist
     years = [y for y in (guess.get("originalyear", ""), guess.get("year", "")) if y]
     year = min(years) if years else ""
+    title = guess.get("album", album.path.name)
+    catno = guess.get("catno", "")
+    if loose:  # loose files in an artist folder: named after that folder, not an album
+        artist = artist_sort = album.path.name
+        title = year = catno = ""
+        guess["loose_tracks"] = True
     ids = set(album_release_ids(album.tracks).values()) if album.tracks else {None}
     tagged_id = int(next(iter(ids))) if len(ids) == 1 and None not in ids and str(next(iter(ids))).isdigit() else None
     values = {
-        "folder": folder, "root": str(root), "artist": artist, "title": guess.get("album", album.path.name),
-        "year": year4(year), "catno": guess.get("catno", ""), "artist_sort": artist_sort,
+        "folder": folder, "root": str(root), "artist": artist, "title": title,
+        "year": year4(year), "catno": catno, "artist_sort": artist_sort,
         "track_count": len(album.tracks), "artwork": str(artwork) if artwork else None,
         "guess": json.dumps(guess, ensure_ascii=False), "extras": json.dumps(extras, ensure_ascii=False),
     }

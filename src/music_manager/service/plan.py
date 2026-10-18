@@ -13,9 +13,15 @@ from ..fs import collect_albums, file_sha256
 from ..journal import Journal
 from ..playlists import playlist_path
 from ..tags.write import preview_tags
-from ._common import now_utc, set_status
+from ._common import is_loose_tracks, now_utc, set_status
 from ._ops import journal_dir, record_operation
-from ._planning import AlbumTarget, album_target, chosen_release_id, cross_album_collisions, resolve_template
+from ._planning import (
+    AlbumTarget,
+    album_target,
+    chosen_release_id,
+    cross_album_collisions,
+    resolve_template,
+)
 from ._releases import _primary_image, fetch_release, provider_call, release_is_fresh
 from ._state import State, events, state
 from ._types import (
@@ -207,6 +213,8 @@ def _fetch_job(st: State, wanted: list[tuple[int, int]]) -> int | None:
 def _names(t: AlbumTarget) -> tuple[str, str]:
     from ..providers.discogs import release_artists
 
+    if is_loose_tracks(t.album):  # never tagged as that release: it is held, not overridable
+        return t.album.path.name, ""
     return release_artists(t.release), str(t.release.get("title") or "")
 
 

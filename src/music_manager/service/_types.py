@@ -188,6 +188,7 @@ class AlbumRow:
     artist_sort: str  # ALBUMARTISTSORT tag if present, else artist; what ARTIST sorts by
     added_at: datetime  # when a scan first saw this folder (timezone-aware UTC)
     held_for: list[Problem] = field(default_factory=list)  # empty unless status is HELD
+    loose_tracks: bool = False  # loose files in an artist folder, not an album: artist = folder name, title ""
 
 
 @dataclass(frozen=True)
@@ -293,7 +294,8 @@ class AlbumPlan:
     folder_after: Path
     files: list[FileChange]
     problems: list[Problem]  # any problem blocks apply for this album
-    artist: str = ""  # the release's artist and title ("" when unknown, e.g. an old journal)
+    artist: str = ""  # the release's artist and title ("" when unknown, e.g. an old journal);
+    # for loose tracks (AlbumRow.loose_tracks) the folder's name and ""
     title: str = ""
 
 

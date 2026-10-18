@@ -122,7 +122,14 @@ def row_to_album_row(row: sqlite3.Row) -> AlbumRow:
         artist_sort=row["artist_sort"],
         added_at=from_iso(row["added_at"]),
         held_for=problems_from_json(row["held_for"]),
+        loose_tracks=bool(json.loads(row["guess"] or "{}").get("loose_tracks")),
     )
+
+
+def is_loose_tracks(album) -> bool:
+    """Loose audio files in a folder that also holds album folders (layout_reason "album_folders")."""
+    lc = getattr(album, "layout_conflict", None)
+    return lc is not None and lc.reason == "album_folders"
 
 
 def album_record(album_id: int, st: State | None = None) -> sqlite3.Row:
