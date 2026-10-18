@@ -13,8 +13,6 @@ import pytest
 from music_manager import fs
 from music_manager import moves as moves_mod
 
-REVIEW3 = pytest.mark.xfail(strict=True, reason="review item 3: trash Path= not encoded / unverified cross-drive move")
-
 
 @pytest.fixture
 def trash(tmp_path, monkeypatch):
@@ -28,7 +26,6 @@ def info_path_line(trash_root, trashed):
     return next(line for line in text.splitlines() if line.startswith("Path="))[len("Path="):]
 
 
-@REVIEW3
 @pytest.mark.parametrize("name", ["My War.m3u", "100% Pure.m3u", "Who's Got the 10½?.m3u", "a#b&c;d.m3u"])
 def test_trashinfo_path_is_percent_encoded(tmp_path, trash, name):
     src = tmp_path / "lib" / "Album [SST 023]" / name
@@ -60,7 +57,6 @@ def _exdev_for(path, monkeypatch):
     monkeypatch.setattr(os, "rename", rename)
 
 
-@REVIEW3
 def test_trash_across_drives_uses_the_verified_copy(tmp_path, trash, monkeypatch):
     src = tmp_path / "lib" / "My War.m3u"
     src.parent.mkdir()
@@ -79,7 +75,6 @@ def test_trash_across_drives_uses_the_verified_copy(tmp_path, trash, monkeypatch
     assert not src.exists() and trashed.read_bytes() == b"1. My War.flac\n" * 100
 
 
-@REVIEW3
 def test_a_failed_verified_copy_keeps_the_original_and_no_trash_entry(tmp_path, trash, monkeypatch):
     src = tmp_path / "lib" / "My War.m3u"
     src.parent.mkdir()

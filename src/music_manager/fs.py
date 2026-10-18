@@ -5,13 +5,14 @@ duplicated between discogs_tag.py and mm_common.py).
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import re
-import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import quote
 
 AUDIO_EXTS = {
     ".flac",
@@ -303,9 +304,11 @@ def trash_root() -> Path:
 def send_to_trash(path: Path) -> Path:
     """Move a file into the freedesktop trash. Returns where it landed.
 
-    Writes the .trashinfo file first. On a different drive the move copies,
-    checks size, then removes the original, so a failure never loses the file.
-    Raises OSError and leaves the original in place when the trash can't be written.
+    Writes the .trashinfo file first; its Path= is the original location,
+    percent-encoded as the freedesktop spec asks. On a different drive a file
+    gets the mover's verified copy (size and SHA-256 read back) before the
+    original is removed, so a failure never loses it. Raises OSError and
+    leaves the original in place when the trash can't be written.
     """
     path = Path(path)
     if not path.exists() and not path.is_symlink():
@@ -321,9 +324,22 @@ def send_to_trash(path: Path) -> Path:
         dest = files / f"{path.name}.{n}"
     info_path = info / f"{dest.name}.trashinfo"
     when = time.strftime("%Y-%m-%dT%H:%M:%S")
-    info_path.write_text(f"[Trash Info]\nPath={path.resolve()}\nDeletionDate={when}\n", encoding="utf-8")
+    original = quote(str(path.parent.resolve() / path.name), safe="/")
+    info_path.write_text(f"[Trash Info]\nPath={original}\nDeletionDate={when}\n", encoding="utf-8")
     try:
-        shutil.move(str(path), dest)
+        try:
+            os.rename(path, dest)
+        except OSError as exc:
+            if exc.errno != errno.EXDEV or path.is_symlink() or not path.is_file():
+                raise
+            from .moves import _copy_verified  # moves imports fs
+
+            _copy_verified(path, dest)
+            try:
+                path.unlink()
+            except BaseException:
+                dest.unlink(missing_ok=True)  # the original stays; don't leave a second copy behind
+                raise
     except BaseException:
         info_path.unlink(missing_ok=True)
         raise
