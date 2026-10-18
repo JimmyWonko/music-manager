@@ -17,7 +17,6 @@ from music_manager import apply as apply_mod
 from music_manager import service
 from music_manager.service import JobState
 
-PENDING = pytest.mark.xfail(strict=True, reason="the planner does not check CD folders yet")
 WRONG = "%albumartist%/%album%/CD%disctotal%/%tracknumber% %title%"  # every track into CD2/
 RIGHT = "%albumartist%/%album%/%tracknumber% %title%"
 
@@ -27,7 +26,6 @@ def use_template(text):
     service.settings.set(active_template=t.id)
 
 
-@PENDING
 def test_plan_build_flags_and_holds_tracks_bound_for_another_discs_folder(svc):  # noqa: F811
     album = flat(svc.joinpath(*FOLDER))
     album_id = choose(svc)
@@ -62,7 +60,6 @@ def test_a_template_without_cd_folders_is_fine(svc):  # noqa: F811
     assert plan.albums[0].problems == []
 
 
-@PENDING
 def test_backstop_fires_when_the_planner_check_is_bypassed(svc, monkeypatch):  # noqa: F811
     from music_manager.service import _planning
 
@@ -75,7 +72,7 @@ def test_backstop_fires_when_the_planner_check_is_bypassed(svc, monkeypatch):  #
     before = contents(svc)
     job = service.jobs.wait(service.plan.apply(plan.id).id)
     assert job.state in (JobState.FAILED, JobState.DONE)
-    assert "another disc's folder" in (job.message or "") + str(job.result or "")
+    assert "refusing to put tracks into another disc's folder" in (job.message or ""), job.message
     assert contents(svc) == before  # nothing tagged, nothing moved
 
 
@@ -83,7 +80,6 @@ def _wrong_name(dt, local):
     return f"CD{3 - dt.disc}/{dt.number:02d} {dt.title}{local.suffix}"
 
 
-@PENDING
 @pytest.mark.parametrize("mode", ["--dry-run", "--yes"])
 def test_cli_preview_and_apply_refuse_before_writing(tmp_path, monkeypatch, mode):
     src = flat(tmp_path.joinpath("in", *FOLDER))

@@ -7,7 +7,7 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ..conflicts import DiscChoice, DiscConflict
+from ..conflicts import DiscChoice, DiscConflict, DiscFolderMismatch
 from ..fs import AlbumFolder
 from ._state import State, events, state
 from ._types import (
@@ -66,6 +66,10 @@ def problems_to_json(problems: list[Problem]) -> str:
             item["layout_reason"] = p.layout_reason
             item["blocking_subdirs"] = [str(x) for x in p.blocking_subdirs]
             item["loose_files"] = [str(x) for x in p.loose_files]
+        if p.folder_mismatches:
+            item["folder_mismatches"] = [{"path": str(m.path), "destination": str(m.destination),
+                                          "folder": str(m.folder), "folder_disc": m.folder_disc,
+                                          "tag_disc": m.tag_disc} for m in p.folder_mismatches]
         out.append(item)
     return json.dumps(out, ensure_ascii=False)
 
@@ -96,6 +100,9 @@ def problems_from_json(text: str | None) -> list[Problem]:
             layout_reason=item.get("layout_reason", ""),
             blocking_subdirs=[Path(x) for x in item.get("blocking_subdirs", [])],
             loose_files=[Path(x) for x in item.get("loose_files", [])],
+            folder_mismatches=[DiscFolderMismatch(Path(m["path"]), Path(m["destination"]), Path(m["folder"]),
+                                                  int(m["folder_disc"]), int(m["tag_disc"]))
+                               for m in item.get("folder_mismatches", [])],
         ))
     return out
 

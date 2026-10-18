@@ -48,6 +48,20 @@ class DiscConflict:
     sidecar: Path | None = None  # that .cue/.m3u
 
 
+@dataclass(frozen=True)
+class DiscFolderMismatch:
+    """A track the destination would put into a CD1 / Disc 2 folder of another disc."""
+    path: Path  # the file now
+    destination: Path  # where the layout would put it
+    folder: Path  # the CD/Disc folder in that destination
+    folder_disc: int  # the disc that folder's name says
+    tag_disc: int  # the disc tag the file gets (the release's disc for it)
+
+
+def describe_folder_mismatch(m: DiscFolderMismatch) -> str:
+    return f"{m.path.name} -> {m.folder.name}/ (disc tag {m.tag_disc})"
+
+
 LayoutReason = Literal["disc_folders", "album_folders"]
 
 

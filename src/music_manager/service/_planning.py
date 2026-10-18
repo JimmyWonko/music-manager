@@ -6,14 +6,43 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..apply import AlbumLayout, check_layout, disc_warning, layout_album, release_info, template_paths
+from ..apply import (
+    AlbumLayout,
+    check_layout,
+    disc_folder_message,
+    disc_folder_mismatches,
+    disc_warning,
+    layout_album,
+    release_info,
+    template_paths,
+)
 from ..fs import AlbumFolder, is_audio
-from ..naming.templates import PRESETS, CompiledTemplate, TemplateError, TemplateStructureError, compile_template
+from ..naming.templates import (
+    PRESETS,
+    CompiledTemplate,
+    TemplateError,
+    TemplateStructureError,
+    compile_template,
+)
 from ..providers.discogs import DiscogsRelease, DiscogsTrack
 from ._common import album_folder, album_record, root_for, title_match_min
-from ._releases import album_tracks, candidate_row, candidate_rows, release_for, release_from_search
+from ._releases import (
+    album_tracks,
+    candidate_row,
+    candidate_rows,
+    release_for,
+    release_from_search,
+)
 from ._state import State, state
-from ._types import ConfigError, MMError, NotFound, Problem, ProblemKind, Template, ValidationError
+from ._types import (
+    ConfigError,
+    MMError,
+    NotFound,
+    Problem,
+    ProblemKind,
+    Template,
+    ValidationError,
+)
 
 ARCHIVIST_TEXT = PRESETS[0][2]
 LAYOUT_KIND = {
@@ -174,6 +203,11 @@ def _album_problems(t: AlbumTarget, track_count: int) -> list[Problem]:
     if layout.ambiguous:
         problems.append(Problem(ProblemKind.DISC_AMBIGUOUS, disc_warning(t.album, layout.ambiguous, layout.disc_conflicts),
                                 list(layout.ambiguous), disc_conflicts=list(layout.disc_conflicts)))
+    wrong = disc_folder_mismatches(layout)
+    if wrong:
+        problems.append(Problem(ProblemKind.DISC_FOLDER_MISMATCH,
+                                disc_folder_message(t.album, wrong, "the destination puts tracks into"),
+                                [m.path for m in wrong], folder_mismatches=wrong))
     seen: dict[str, list[Path]] = {}
     for item in [*layout.tracks, *layout.moves]:
         seen.setdefault(str(item.dest).casefold(), []).append(item.source)

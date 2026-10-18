@@ -9,7 +9,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .conflicts import DiscConflict, describe_disc_conflict
+from .conflicts import (
+    DiscConflict,
+    DiscFolderMismatch,
+    describe_disc_conflict,
+    describe_folder_mismatch,
+)
 from .fs import DISC_DIR, AlbumFolder, file_sha256
 from .journal import Journal
 from .match import TITLE_MATCH_MIN, align_tracks_explained, ambiguous_disc_files
@@ -273,7 +278,8 @@ def layout_album(
     """Plan one album's apply: where it goes, every file's tags and destination. Read-only.
 
     target_dir and file_name override today's layout (default_target_dir /
-    default_file_name). With check, validate_layout runs and raises.
+    default_file_name). With check, validate_layout runs and raises, and so does a track
+    bound for another disc's CD folder (see disc_folder_mismatches).
     title_match_min: the title-pass pairing threshold (see align_tracks).
     """
     info = release_info(release, dtracks, original_year)
@@ -310,7 +316,8 @@ def layout_album(
         if dt.position and dt.position != str(dt.number):
             where += f", {dt.position}"
         log(f"  {local.name}")
-        log(f"      -> {dest_file.name}   [{where}]")
+        shown = dest_file.relative_to(target_dir) if target_dir in dest_file.parents else dest_file.name
+        log(f"      -> {shown}   [{where}]")
         plan.append(PlannedFile(local, dest_file, meta))
 
     clash: dict[str, list[Path]] = {}
@@ -332,9 +339,15 @@ def layout_album(
             moves.append(PlannedFile(sidecar, target_dir / sidecar.relative_to(album.path)))
             if sidecar.suffix.lower() in PLAYLIST_EXTS:
                 log(f"  note  hand-made playlist {sidecar.name} is moved as-is; it may list old file names")
-    return AlbumLayout(album, dest_root, target_dir, pairs, plan, unmatched, moves, old_playlists, legacy, clashes,
-                       release_id=int(release.get("id") or 0), artist=info.album_artist, title=info.title,
-                       ambiguous=ambiguous, disc_conflicts=conflicts)
+    layout = AlbumLayout(album, dest_root, target_dir, pairs, plan, unmatched, moves, old_playlists, legacy, clashes,
+                         release_id=int(release.get("id") or 0), artist=info.album_artist, title=info.title,
+                         ambiguous=ambiguous, disc_conflicts=conflicts)
+    if check:
+        wrong = disc_folder_mismatches(layout)
+        if wrong:
+            raise AlbumApplyError(disc_folder_message(album, wrong, "would put tracks into") +
+                                  "\n  nothing was written")
+    return layout
 
 
 def disc_warning(album: AlbumFolder, files: list[Path], conflicts: list[DiscConflict] | None = None) -> str:
@@ -358,11 +371,12 @@ def disc_warning(album: AlbumFolder, files: list[Path], conflicts: list[DiscConf
     return " Also: ".join(parts)
 
 
-def disc_folder_violations(layout: AlbumLayout) -> list[tuple[PlannedFile, str, int]]:
+def disc_folder_mismatches(layout: AlbumLayout) -> list[DiscFolderMismatch]:
     """Tracks the layout would put in a CD1/Disc 2 folder whose number is not their disc tag.
 
-    Returns (planned file, folder name, disc tag) for each. Every folder between the
-    destination library and the file counts. Checked before any apply writes anything.
+    Every folder between the destination library and the file counts. plan.build reports
+    these (DISC_FOLDER_MISMATCH), layout_album(check=True) refuses them, and execute_layout
+    refuses them again before writing anything (the backstop).
     """
     out = []
     for item in layout.tracks:
@@ -371,15 +385,22 @@ def disc_folder_violations(layout: AlbumLayout) -> list[tuple[PlannedFile, str, 
             continue
         try:
             parts = item.dest.parent.relative_to(layout.dest_root).parts
+            base = layout.dest_root
         except ValueError:
-            parts = (item.dest.parent.name,)
-        for part in parts:
-            if DISC_DIR.match(part):
-                m = re.search(r"\d+", part)
-                if m and int(m.group(0)) != disc:
-                    out.append((item, part, disc))
-                    break
+            parts, base = (item.dest.parent.name,), item.dest.parent.parent
+        for i, part in enumerate(parts):
+            m = re.search(r"\d+", part) if DISC_DIR.match(part) else None
+            if m and int(m.group(0)) != disc:
+                out.append(DiscFolderMismatch(item.source, item.dest, base.joinpath(*parts[:i + 1]),
+                                              int(m.group(0)), disc))
+                break
     return out
+
+
+def disc_folder_message(album: AlbumFolder, mismatches: list[DiscFolderMismatch], lead: str) -> str:
+    detail = "; ".join(describe_folder_mismatch(m) for m in mismatches)
+    return (f"{album.path}: {lead} another disc's folder ({len(mismatches)} file(s)): {detail}. "
+            "Change the naming template so each disc's tracks go into that disc's folder")
 
 
 def execute_layout(
@@ -403,11 +424,10 @@ def execute_layout(
     """
     album, dest_root, target_dir = layout.album, layout.dest_root, layout.target_dir
     plan = layout.tracks
-    wrong = disc_folder_violations(layout)
-    if wrong:  # never file a track into another disc's folder (whatever the template says)
-        detail = "; ".join(f"{item.source.name} -> {folder}/ but its disc tag is {disc}" for item, folder, disc in wrong)
-        raise AlbumApplyError(f"{album.path}: refusing to put tracks into another disc's folder: {detail}\n"
-                              "  nothing was written")
+    wrong = disc_folder_mismatches(layout)
+    if wrong:  # the backstop: never file a track into another disc's folder, whatever planned it
+        raise AlbumApplyError(disc_folder_message(album, wrong, "refusing to put tracks into") +
+                              "\n  nothing was written")
 
     # Phase 1: tags. Nothing moves unless every file was tagged.
     # A real run journals every change before doing it, so the whole apply can be undone.

@@ -8,7 +8,7 @@ from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Generic, Literal, TypeVar
 
-from ..conflicts import DiscChoice, DiscConflict, LayoutConflict  # noqa: F401  (re-exported)
+from ..conflicts import DiscChoice, DiscConflict, DiscFolderMismatch, LayoutConflict  # noqa: F401  (re-exported)
 
 T = TypeVar("T")
 
@@ -107,6 +107,7 @@ class ProblemKind(StrEnum):
     RELEASE_NOT_FETCHED = "release_not_fetched"  # plan.build: release still downloading (Plan.fetch_job)
     DISC_AMBIGUOUS = "disc_ambiguous"  # multi-disc: files whose disc can't be told (paths); never overridden
     LAYOUT_AMBIGUOUS = "layout_ambiguous"  # loose audio next to disc folders / other albums; never overridden
+    DISC_FOLDER_MISMATCH = "disc_folder_mismatch"  # destination puts tracks in another disc's CD folder
 
 
 # --- jobs ---------------------------------------------------------------------
@@ -151,6 +152,8 @@ class Problem:
     layout_reason: str = ""  # "disc_folders" (CD1/CD2 with audio) or "album_folders" (other folders with audio)
     blocking_subdirs: list[Path] = field(default_factory=list)  # the subfolders that caused the hold
     loose_files: list[Path] = field(default_factory=list)  # the audio files directly in the album folder
+    # DISC_FOLDER_MISMATCH: one per track the destination puts into another disc's CD folder (same files as paths).
+    folder_mismatches: list[DiscFolderMismatch] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

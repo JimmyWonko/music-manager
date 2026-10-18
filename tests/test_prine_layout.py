@@ -191,9 +191,9 @@ def test_once_the_folders_are_fixed_it_applies_and_undoes(svc):
 
 # --- 3. the invariant -------------------------------------------------------------------------------
 
-def _layout(album, dest, file_name):
+def _layout(album, dest, file_name, check=True):
     rel = release()
-    return layout_album(album, dest, rel, dtracks(), "1993", file_name=file_name, log=lambda _l: None)
+    return layout_album(album, dest, rel, dtracks(), "1993", file_name=file_name, log=lambda _l: None, check=check)
 
 
 def test_apply_never_files_a_track_into_a_cd_folder_of_another_disc(tmp_path):
@@ -204,8 +204,10 @@ def test_apply_never_files_a_track_into_a_cd_folder_of_another_disc(tmp_path):
     def wrong(dt, local):  # a template bug: disc 1 tracks into CD2/ and back
         return f"CD{3 - dt.disc}/{dt.number:02d} {dt.title}{local.suffix}"
 
-    layout = _layout(album, tmp_path / "lib", wrong)
-    with pytest.raises(AlbumApplyError, match="CD2"):
+    with pytest.raises(AlbumApplyError, match="would put tracks into another disc's folder"):
+        _layout(album, tmp_path / "lib", wrong)  # the planner (check=True) refuses first
+    layout = _layout(album, tmp_path / "lib", wrong, check=False)
+    with pytest.raises(AlbumApplyError, match="refusing to put tracks into another disc's folder.*CD2"):
         execute_layout(layout, dry_run=False, journal_dir=tmp_path / "j", log=lambda _l: None)
     assert tree(tmp_path / "in") == before and not (tmp_path / "lib").exists()
 
