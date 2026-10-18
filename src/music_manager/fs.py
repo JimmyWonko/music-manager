@@ -201,9 +201,10 @@ def _has_audio_below(folder: Path) -> bool:
 MIXED_DISCS = ("loose audio files sit next to disc folders with audio ({discs}); it is not clear which files "
                "belong to which disc, so nothing is applied. Move the loose files into a disc folder (or the "
                "disc folders' files up) and scan again")
-STRAY_AUDIO = ("loose audio files sit in a folder that also holds other album folders ({folders}); this folder "
-               "is not an album and nothing in it is applied or moved. Move the loose files into their album "
-               "folder and scan again")
+STRAY_AUDIO = ("loose audio files sit next to subfolders that also hold audio ({folders}); it is not clear "
+               "whether this is an artist folder with stray files or an album with extra folders, so nothing "
+               "in it is applied or moved. Move the loose files into a subfolder (or the subfolders' files "
+               "up) and scan again")
 
 
 def collect_albums(root: Path) -> list[AlbumFolder]:

@@ -179,7 +179,7 @@ def index_album(st: State, root: Path, album: AlbumFolder, status: MatchStatus |
     year = min(years) if years else ""
     title = guess.get("album", album.path.name)
     catno = guess.get("catno", "")
-    if loose:  # loose files in an artist folder: named after that folder, not an album
+    if loose:  # loose files next to subfolders with audio: named after their own folder
         artist = artist_sort = album.path.name
         title = year = catno = ""
         guess["loose_tracks"] = True

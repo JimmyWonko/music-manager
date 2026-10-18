@@ -188,7 +188,7 @@ class AlbumRow:
     artist_sort: str  # ALBUMARTISTSORT tag if present, else artist; what ARTIST sorts by
     added_at: datetime  # when a scan first saw this folder (timezone-aware UTC)
     held_for: list[Problem] = field(default_factory=list)  # empty unless status is HELD
-    loose_tracks: bool = False  # loose files in an artist folder, not an album: artist = folder name, title ""
+    loose_tracks: bool = False  # loose files next to subfolders with audio: artist = folder name, title ""
 
 
 @dataclass(frozen=True)
