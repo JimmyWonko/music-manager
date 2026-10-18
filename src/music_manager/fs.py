@@ -126,6 +126,8 @@ class AlbumFolder:
     tracks: list[Path]
     sidecars: list[Path] = field(default_factory=list)
     extra_dirs: list[Path] = field(default_factory=list)
+    # Non-empty: the folder's layout is ambiguous (see collect_albums) and it is never applied.
+    layout_problem: str = ""
 
 
 def _dir_holds_track(folder: Path, tracks: list[Path]) -> bool:
@@ -179,7 +181,36 @@ def collect_extras(folder: Path, tracks: list[Path]) -> tuple[list[Path], list[P
     return extra_files, extra_dirs
 
 
+def _has_audio_below(folder: Path) -> bool:
+    """True when folder, or any folder below it that is walked for albums, holds an audio file."""
+    for dirpath, dirnames, filenames in os.walk(folder, followlinks=False):
+        current = Path(dirpath)
+        dirnames[:] = [d for d in dirnames if not should_skip_dir(current / d)]
+        if any(Path(name).suffix.lower() in AUDIO_EXTS and (current / name).is_file() for name in filenames):
+            return True
+    return False
+
+
+MIXED_DISCS = ("loose audio files sit next to disc folders with audio ({discs}); it is not clear which files "
+               "belong to which disc, so nothing is applied. Move the loose files into a disc folder (or the "
+               "disc folders' files up) and scan again")
+STRAY_AUDIO = ("loose audio files sit in a folder that also holds other album folders ({folders}); this folder "
+               "is not an album and nothing in it is applied or moved. Move the loose files into their album "
+               "folder and scan again")
+
+
 def collect_albums(root: Path) -> list[AlbumFolder]:
+    """Every album folder under root.
+
+    A folder with audio files is an album; its other folders travel with it as extras. A
+    folder with CD1/Disc 2/... subfolders of audio (and no loose audio) is one album made of
+    those discs. Two layouts are ambiguous and come back with a layout_problem, so they are
+    reported and never applied:
+      - loose audio next to disc folders with audio: one album with all of that audio;
+      - loose audio next to other folders that hold audio (an artist folder with a stray
+        file): only the loose files, with no extras, and the folders below are walked as
+        albums of their own.
+    """
     albums: list[AlbumFolder] = []
     for dirpath, dirnames, _filenames in os.walk(root, followlinks=False):
         current = Path(dirpath)
@@ -189,6 +220,25 @@ def collect_albums(root: Path) -> list[AlbumFolder]:
 
         here = audio_in(current)
         disc_dirs = [d for d in list(dirnames) if DISC_DIR.match(d) and audio_in(current / d)]
+
+        if here:
+            disc_tracks: list[Path] = []
+            for name in sorted(disc_dirs, key=natural_key):
+                disc_tracks.extend(audio_in(current / name))
+            nested = sorted((d for d in dirnames if d not in disc_dirs and _has_audio_below(current / d)),
+                            key=natural_key)
+            if nested:
+                problem = STRAY_AUDIO.format(folders=", ".join(f"{d}/" for d in nested))
+                albums.append(AlbumFolder(current, here + disc_tracks, layout_problem=problem))
+                dirnames[:] = nested
+                continue
+            if disc_dirs:
+                tracks = here + disc_tracks
+                files, dirs = collect_extras(current, tracks)
+                problem = MIXED_DISCS.format(discs=", ".join(f"{d}/" for d in sorted(disc_dirs, key=natural_key)))
+                albums.append(AlbumFolder(current, tracks, files, dirs, layout_problem=problem))
+                dirnames[:] = []
+                continue
 
         if disc_dirs and not here:
             tracks: list[Path] = []

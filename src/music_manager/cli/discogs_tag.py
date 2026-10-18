@@ -199,6 +199,12 @@ def process_album(
     In --auto mode a release whose track count differs from the local files
     is not applied unless allow_track_mismatch is set.
     """
+    if album.layout_problem:
+        print()
+        print(f"warning: {album.path}: {album.layout_problem}")
+        print("  skipped: nothing written")
+        return "skipped"
+
     if skip_tagged:
         tagged = album_release_ids(album.tracks)
         ids = set(tagged.values())

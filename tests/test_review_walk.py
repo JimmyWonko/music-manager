@@ -22,8 +22,6 @@ from music_manager.fs import collect_albums
 from music_manager.providers.discogs import flatten_tracklist, release_artists
 from music_manager.service import JobState
 
-REVIEW2 = pytest.mark.xfail(strict=True, reason="review item 2: collect_albums stops at the first folder with audio")
-
 
 def mixed(folder):
     """Loose audio plus CD1/ and CD2/ audio in one album folder."""
@@ -45,7 +43,6 @@ def artist_with_stray(artist):
     return album
 
 
-@REVIEW2
 def test_loose_audio_next_to_disc_folders_is_held_with_all_its_audio(tmp_path):
     folder = mixed(tmp_path / "Band A & Band B" / "[1998]  Double Feature [LT-2CD]")
     [album] = collect_albums(tmp_path)
@@ -56,7 +53,6 @@ def test_loose_audio_next_to_disc_folders_is_held_with_all_its_audio(tmp_path):
     assert album.extra_dirs == []  # the disc folders are not cargo
 
 
-@REVIEW2
 def test_a_stray_file_never_makes_the_artist_folder_an_album(tmp_path):
     artist = tmp_path / "Black Flag"
     real = artist_with_stray(artist)
@@ -82,10 +78,9 @@ def test_plain_and_disc_only_albums_are_unchanged(tmp_path):
     assert set(got) == {plain, discs}
     assert [d.name for d in got[plain].extra_dirs] == ["Bonus", "Scans"]
     assert len(got[discs].tracks) == 2
-    assert not getattr(got[plain], "layout_problem", "") and not getattr(got[discs], "layout_problem", "")
+    assert not got[plain].layout_problem and not got[discs].layout_problem
 
 
-@REVIEW2
 def test_apply_album_refuses_a_layout_problem(tmp_path):
     folder = mixed(tmp_path / "in" / "Album")
     [album] = collect_albums(tmp_path / "in")
@@ -107,7 +102,6 @@ def run_cli(monkeypatch, *argv):
     return code, out.getvalue()
 
 
-@REVIEW2
 def test_cli_skips_loose_audio_next_to_disc_folders(tmp_path, monkeypatch):
     folder = mixed(tmp_path / "in" / "Band A & Band B" / "[1998]  Double Feature [LT-2CD]")
     lib = tmp_path / "lib"
@@ -119,8 +113,7 @@ def test_cli_skips_loose_audio_next_to_disc_folders(tmp_path, monkeypatch):
     assert code == 0
 
 
-@pytest.mark.parametrize("pick", [pytest.param(("--release-id", str(OVERLAP_ID)), marks=REVIEW2), ("--auto",)],
-                         ids=["release-id", "auto"])
+@pytest.mark.parametrize("pick", [("--release-id", str(OVERLAP_ID)), ("--auto",)], ids=["release-id", "auto"])
 def test_cli_never_moves_an_album_as_an_artist_folders_extra(tmp_path, monkeypatch, pick):
     artist = tmp_path / "in" / "Black Flag"
     real = artist_with_stray(artist)
@@ -161,7 +154,6 @@ def _held_problem(album_id):
     return plan, [p for p in plan.albums[0].problems if p.kind == "layout_ambiguous"]
 
 
-@REVIEW2
 def test_service_holds_loose_audio_next_to_disc_folders(svc):
     folder = mixed(svc / "Band A & Band B" / "[1998]  Double Feature [LT-2CD]")
     rows = _rows()
@@ -174,7 +166,6 @@ def test_service_holds_loose_audio_next_to_disc_folders(svc):
     assert tree(svc) == before
 
 
-@REVIEW2
 def test_service_lists_the_real_album_and_holds_the_stray(svc):
     artist = svc / "Black Flag"
     real = artist_with_stray(artist)
@@ -183,3 +174,12 @@ def test_service_lists_the_real_album_and_holds_the_stray(svc):
     plan, problems = _held_problem(rows[artist].id)
     assert len(problems) == 1
     assert all(f.path_before.parent == artist for f in plan.albums[0].files)  # never the album below
+
+
+def test_normalize_folders_leaves_ambiguous_layouts_alone(tmp_path):
+    from music_manager.normalize import plan_library_normalization
+
+    folder = mixed(tmp_path / "Black Flag" / "[1984]  My War [1984] [SST023]")
+    renames, skipped, _fine = plan_library_normalization(tmp_path)
+    assert renames == [] and [p for p, _reason in skipped] == [folder]
+    assert "loose audio" in skipped[0][1]

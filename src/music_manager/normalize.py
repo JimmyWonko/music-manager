@@ -102,6 +102,9 @@ def plan_library_normalization(root: Path) -> tuple[list[FolderRename], list[tup
     fine = 0
     for album in collect_albums(root):
         name = album.path.name
+        if album.layout_problem:
+            skipped.append((album.path, album.layout_problem))
+            continue
         plan = plan_folder_rename(name)
         if plan.action == "rename" and OLD_FOLDER.match(name).group("y1"):
             plan = plan_folder_rename(name, album_tag_years(album))

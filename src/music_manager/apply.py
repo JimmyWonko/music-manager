@@ -447,6 +447,8 @@ def apply_album(
     are removed (see prune_limit). Returns the (source, destination)
     list of moves made.
     """
+    if album.layout_problem:
+        raise AlbumApplyError(f"{album.path}: {album.layout_problem}\n  nothing was written")
     layout = layout_album(album, dest_root, release, dtracks, original_year)
     if layout.ambiguous:
         raise AlbumApplyError(f"{disc_warning(album, layout.ambiguous)}\n  nothing was written")
