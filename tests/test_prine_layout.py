@@ -36,7 +36,6 @@ from music_manager.providers.discogs import flatten_tracklist, release_artists
 from music_manager.service import JobState
 from music_manager.swapcheck import check_disc_swaps, format_report
 
-PENDING = pytest.mark.xfail(strict=True, reason="folder vs disc tag vs cue/m3u is not checked yet")
 MOVED = sorted(f"CD{3 - d}/{name_of(n, t)}" for d, n, t, _s in TRACKS if n in SWAPPED)
 
 
@@ -197,7 +196,6 @@ def _layout(album, dest, file_name):
     return layout_album(album, dest, rel, dtracks(), "1993", file_name=file_name, log=lambda _l: None)
 
 
-@PENDING
 def test_apply_never_files_a_track_into_a_cd_folder_of_another_disc(tmp_path):
     flat(tmp_path / "in" / "Anthology")
     [album] = collect_albums(tmp_path / "in")

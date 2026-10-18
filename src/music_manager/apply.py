@@ -4,15 +4,24 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .fs import AlbumFolder, file_sha256
-from .journal import Journal
 from .conflicts import DiscConflict, describe_disc_conflict
+from .fs import DISC_DIR, AlbumFolder, file_sha256
+from .journal import Journal
 from .match import TITLE_MATCH_MIN, align_tracks_explained, ambiguous_disc_files
-from .moves import PlannedFile, _mkdirs_logged, _prune_empty, _trash_logged, describe_moves, move_planned, prune_limit
+from .moves import (
+    PlannedFile,
+    _mkdirs_logged,
+    _prune_empty,
+    _trash_logged,
+    describe_moves,
+    move_planned,
+    prune_limit,
+)
 from .naming import (
     album_folder_name,
     folder_lead_year,
@@ -32,7 +41,13 @@ from .playlists import (
     render_playlist,
     write_playlist_file,
 )
-from .providers.discogs import DiscogsRelease, DiscogsTrack, release_artists, release_catno, release_discs
+from .providers.discogs import (
+    DiscogsRelease,
+    DiscogsTrack,
+    release_artists,
+    release_catno,
+    release_discs,
+)
 from .tags.fields import TrackMeta
 from .tags.snapshot import capture_tags
 from .tags.write import write_tags
@@ -343,6 +358,30 @@ def disc_warning(album: AlbumFolder, files: list[Path], conflicts: list[DiscConf
     return " Also: ".join(parts)
 
 
+def disc_folder_violations(layout: AlbumLayout) -> list[tuple[PlannedFile, str, int]]:
+    """Tracks the layout would put in a CD1/Disc 2 folder whose number is not their disc tag.
+
+    Returns (planned file, folder name, disc tag) for each. Every folder between the
+    destination library and the file counts. Checked before any apply writes anything.
+    """
+    out = []
+    for item in layout.tracks:
+        disc = int(item.meta.get("disc") or 0) if item.meta else 0
+        if not disc:
+            continue
+        try:
+            parts = item.dest.parent.relative_to(layout.dest_root).parts
+        except ValueError:
+            parts = (item.dest.parent.name,)
+        for part in parts:
+            if DISC_DIR.match(part):
+                m = re.search(r"\d+", part)
+                if m and int(m.group(0)) != disc:
+                    out.append((item, part, disc))
+                    break
+    return out
+
+
 def execute_layout(
     layout: AlbumLayout,
     dry_run: bool,
@@ -364,6 +403,11 @@ def execute_layout(
     """
     album, dest_root, target_dir = layout.album, layout.dest_root, layout.target_dir
     plan = layout.tracks
+    wrong = disc_folder_violations(layout)
+    if wrong:  # never file a track into another disc's folder (whatever the template says)
+        detail = "; ".join(f"{item.source.name} -> {folder}/ but its disc tag is {disc}" for item, folder, disc in wrong)
+        raise AlbumApplyError(f"{album.path}: refusing to put tracks into another disc's folder: {detail}\n"
+                              "  nothing was written")
 
     # Phase 1: tags. Nothing moves unless every file was tagged.
     # A real run journals every change before doing it, so the whole apply can be undone.
