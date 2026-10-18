@@ -12,8 +12,6 @@ from music_manager import journal as journal_mod
 from music_manager import normalize
 from music_manager.cli.discogs_tag import main
 
-REVIEW4 = pytest.mark.xfail(strict=True, reason="review item 4: the journal line is written after os.rename")
-
 
 class Crash(BaseException):
     """Stands in for a power cut or kill right after a rename."""
@@ -43,7 +41,6 @@ def crash_after_rename(monkeypatch, n):
     return calls
 
 
-@REVIEW4
 @pytest.mark.parametrize("n", [1, 2, 3], ids=["first-folder", "its-playlist", "second-folder"])
 def test_a_crash_right_after_a_rename_can_still_be_undone(library, tmp_path, monkeypatch, n):
     before = snapshot(library)
@@ -62,7 +59,6 @@ def test_a_crash_right_after_a_rename_can_still_be_undone(library, tmp_path, mon
     assert snapshot(library) == before
 
 
-@REVIEW4
 def test_rename_entries_are_written_before_the_rename(library, tmp_path, monkeypatch):
     seen = []
     real = os.rename
@@ -77,3 +73,21 @@ def test_rename_entries_are_written_before_the_rename(library, tmp_path, monkeyp
     assert main(["--normalize-folders", "--apply", str(library)]) == 0
     assert seen == [True, True, True]
 
+
+
+def test_a_crash_before_the_rename_leaves_an_undo_that_changes_nothing(library, tmp_path, monkeypatch, capsys):
+    before = snapshot(library)
+
+    def rename(a, b, *args, **kwargs):
+        raise Crash
+
+    monkeypatch.setattr(normalize.os, "rename", rename)
+    with pytest.raises(Crash):
+        main(["--normalize-folders", "--apply", str(library)])
+    monkeypatch.setattr(normalize.os, "rename", os.rename)
+    assert snapshot(library) == before
+    journal = next((tmp_path / "state" / "journal").glob("normalize-folders-*.jsonl"))
+    capsys.readouterr()
+    main(["--undo-journal", str(journal), "--apply"])
+    assert "no longer exists" in capsys.readouterr().out
+    assert snapshot(library) == before

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .fs import AlbumFolder, collect_albums
 from .journal import Journal
+from .moves import _journal_rename
 from .naming import YEAR_RE, sanitize_filename, year4
 from .playlists import is_generated_playlist, playlists_in
 from .tags.read import read_tag_years
@@ -139,11 +140,16 @@ def plan_library_normalization(root: Path) -> tuple[list[FolderRename], list[tup
 
 
 def _rename_logged(journal: Journal, kind: str, old: Path, new: Path) -> None:
+    """Rename, journaling it first (with the item's dev/inode, and a file's SHA-256).
+
+    Written before the rename so a crash between the two still leaves a line
+    that --undo-journal acts on; if the rename never happened, undo reports
+    the new name as missing and leaves everything as it is.
+    """
     if os.path.lexists(new):
         raise FileExistsError(f"{new} already exists")
+    _journal_rename(journal, kind, old, new)
     os.rename(old, new)
-    st = os.lstat(new)
-    journal.write(action="rename", kind=kind, old=str(old), new=str(new), dev=st.st_dev, ino=st.st_ino)
 
 
 def normalize_folders(root: Path, apply: bool, journal_dir: Path | None = None) -> int:
