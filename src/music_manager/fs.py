@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import logging
 import os
 import re
+import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote
 
 from .conflicts import LayoutConflict
@@ -309,33 +312,171 @@ def trash_root() -> Path:
     return base / "Trash"
 
 
+log = logging.getLogger(__name__)
+
+TrashKind = Literal["home", "topdir", "topdir_user"]
+
+
+@dataclass(frozen=True)
+class TrashTarget:
+    """Which trash a file goes to (freedesktop Trash spec, "Trash directories")."""
+    root: Path  # the trash folder: holds files/ and info/
+    kind: TrashKind  # home; topdir = $topdir/.Trash/$uid; topdir_user = $topdir/.Trash-$uid
+    topdir: Path | None = None  # the mount point, for the topdir kinds (Path= is relative to it)
+    notes: tuple[str, ...] = ()  # checks that failed on the way (the spec asks to report them)
+
+
+def _uid() -> int:
+    return os.getuid()
+
+
+def _device(path: Path) -> int:
+    """st_dev of path, or of its nearest existing parent (the home trash may not exist yet)."""
+    current = Path(os.path.abspath(path))
+    while True:
+        try:
+            return os.lstat(current).st_dev
+        except OSError:
+            if current.parent == current:
+                raise
+            current = current.parent
+
+
+def _mount_point(path: Path) -> Path:
+    """The top directory of the filesystem path is on ($topdir in the spec)."""
+    current = Path(os.path.abspath(path))
+    dev = _device(current)
+    while current.parent != current:
+        try:
+            if os.lstat(current.parent).st_dev != dev:
+                return current
+        except OSError:
+            return current
+        current = current.parent
+    return current
+
+
+def _own_dir_problem(path: Path, uid: int) -> str:
+    """Why an existing per-user trash folder can't be used ("" when it can)."""
+    st = os.lstat(path)
+    if stat.S_ISLNK(st.st_mode):
+        return f"{path} is a symbolic link"
+    if not stat.S_ISDIR(st.st_mode):
+        return f"{path} is not a directory"
+    if st.st_uid != uid:
+        return f"{path} is owned by uid {st.st_uid}, not {uid}"
+    if stat.S_IMODE(st.st_mode) & 0o077:
+        return f"{path} has mode {stat.S_IMODE(st.st_mode):04o}; others can get in (needs 0700)"
+    return ""
+
+
+def _make_own_dir(path: Path, notes: list[str], create: bool) -> bool:
+    """Use an existing safe per-user trash folder, or create it 0700. False (with a note) if not."""
+    if os.path.lexists(path):
+        problem = _own_dir_problem(path, _uid())
+        if problem:
+            notes.append(f"not using {path}: {problem}")
+            return False
+        return True
+    if not create:
+        return True
+    try:
+        os.mkdir(path, 0o700)
+        os.chmod(path, 0o700)  # whatever the umask
+    except OSError as exc:
+        notes.append(f"cannot create {path}: {exc.strerror or exc}")
+        return False
+    return True
+
+
+def trash_for(path: Path, create: bool = True) -> TrashTarget:
+    """The trash a file at path goes to, following the freedesktop Trash spec.
+
+    On the home trash's drive: the home trash (trash_root()). Elsewhere, on the
+    file's filesystem top directory: 1. $topdir/.Trash/$uid, if $topdir/.Trash is a
+    real directory (not a symlink) with the sticky bit; 2. $topdir/.Trash-$uid,
+    created 0700 when missing, used only if it is ours, a real folder and 0700;
+    3. otherwise the home trash (send_to_trash then copies, verified). Failed checks
+    are listed in notes. create=False only looks: nothing is made.
+    """
+    home = trash_root()
+    path = Path(path)
+    if _device(path) == _device(home):
+        return TrashTarget(home, "home")
+    topdir = _mount_point(Path(os.path.abspath(path)).parent)
+    notes: list[str] = []
+    uid = _uid()
+    shared = topdir / ".Trash"
+    if os.path.lexists(shared):
+        st = os.lstat(shared)
+        if stat.S_ISLNK(st.st_mode):
+            notes.append(f"not using {shared}: it is a symbolic link")
+        elif not stat.S_ISDIR(st.st_mode):
+            notes.append(f"not using {shared}: it is not a directory")
+        elif not st.st_mode & stat.S_ISVTX:
+            notes.append(f"not using {shared}: it has no sticky bit")
+        elif _make_own_dir(shared / str(uid), notes, create):
+            return TrashTarget(shared / str(uid), "topdir", topdir, tuple(notes))
+    user = topdir / f".Trash-{uid}"
+    if _make_own_dir(user, notes, create):
+        return TrashTarget(user, "topdir_user", topdir, tuple(notes))
+    notes.append(f"using the home trash {home} (a verified copy) for {path}")
+    return TrashTarget(home, "home", None, tuple(notes))
+
+
+@dataclass(frozen=True)
+class Trashed:
+    dest: Path  # where the item now is
+    target: TrashTarget
+
+
 def send_to_trash(path: Path) -> Path:
-    """Move a file into the freedesktop trash. Returns where it landed.
+    """Move a file into the trash (see trash_for and trash_file). Returns where it landed."""
+    return trash_file(path).dest
+
+
+def trash_file(path: Path) -> Trashed:
+    """Move a file into the freedesktop trash for its drive (see trash_for).
 
     Writes the .trashinfo file first; its Path= is the original location,
-    percent-encoded as the freedesktop spec asks. On a different drive a file
-    gets the mover's verified copy (size and SHA-256 read back) before the
-    original is removed, so a failure never loses it. Raises OSError and
-    leaves the original in place when the trash can't be written.
+    percent-encoded as the spec asks: absolute in the home trash, relative to
+    the top directory in a drive's trash. In a drive's own trash, or on the home
+    trash's drive, it is a plain rename. Into the home trash from another drive
+    a file gets the mover's verified copy (size and SHA-256 read back) before
+    the original is removed, so a failure never loses it. Failed spec checks are
+    logged as warnings. Raises OSError and leaves the original in place when the
+    trash can't be written.
     """
     path = Path(path)
     if not path.exists() and not path.is_symlink():
         raise FileNotFoundError(path)
-    root = trash_root()
+    target = trash_for(path)
+    for note in target.notes:
+        log.warning("trash: %s", note)
+    root = target.root
     files, info = root / "files", root / "info"
     files.mkdir(parents=True, exist_ok=True)
     info.mkdir(parents=True, exist_ok=True)
     dest = files / path.name
     n = 1
-    while dest.exists() or (info / f"{dest.name}.trashinfo").exists():
+    while os.path.lexists(dest) or (info / f"{dest.name}.trashinfo").exists():
         n += 1
         dest = files / f"{path.name}.{n}"
     info_path = info / f"{dest.name}.trashinfo"
     when = time.strftime("%Y-%m-%dT%H:%M:%S")
-    original = quote(str(path.parent.resolve() / path.name), safe="/")
-    info_path.write_text(f"[Trash Info]\nPath={original}\nDeletionDate={when}\n", encoding="utf-8")
+    original = Path(os.path.abspath(path.parent)).resolve() / path.name
+    if target.topdir is not None:
+        top = target.topdir.resolve()
+        recorded = original.relative_to(top) if top in original.parents else original
+    else:
+        recorded = original
+    info_path.write_text(f"[Trash Info]\nPath={quote(str(recorded), safe='/')}\nDeletionDate={when}\n",
+                         encoding="utf-8")
     try:
+        cross = target.kind == "home" and _device(path) != _device(root)
         try:
+            if cross:
+                raise OSError(errno.EXDEV, "the home trash is on another drive")
             os.rename(path, dest)
         except OSError as exc:
             if exc.errno != errno.EXDEV or path.is_symlink() or not path.is_file():
@@ -351,4 +492,4 @@ def send_to_trash(path: Path) -> Path:
     except BaseException:
         info_path.unlink(missing_ok=True)
         raise
-    return dest
+    return Trashed(dest, target)

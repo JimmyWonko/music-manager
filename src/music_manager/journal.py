@@ -39,6 +39,9 @@ class JournalEntry(TypedDict, total=False):
     ino: int
     link: str
     trashed: str
+    trash_dir: str  # "trashed": the trash used (home, $topdir/.Trash/$uid or $topdir/.Trash-$uid)
+    trash_kind: str  # "home", "topdir" or "topdir_user" (see fs.trash_for)
+    trash_notes: list[str]  # spec checks that failed on the way, if any
 
 
 # None: $XDG_STATE_HOME/discogs-tag (else ~/.local/state/discogs-tag), read when needed, never at

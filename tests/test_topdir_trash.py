@@ -25,7 +25,6 @@ from music_manager import journal as journal_mod
 from music_manager import moves as moves_mod
 from music_manager.journal import Journal, undo_journal
 
-PENDING = pytest.mark.xfail(strict=True, reason="no per-drive trash yet")
 UID = os.getuid()
 
 
@@ -63,7 +62,6 @@ def mode(path):
     return stat.S_IMODE(os.lstat(path).st_mode)
 
 
-@PENDING
 def test_uses_dot_trash_dash_uid_created_0700(drive):
     top, home = drive
     src = playlist(top)
@@ -76,7 +74,6 @@ def test_uses_dot_trash_dash_uid_created_0700(drive):
     assert not home.exists()  # the home trash was not involved
 
 
-@PENDING
 def test_uses_the_shared_dot_trash_when_it_is_sticky(drive):
     top, _home = drive
     (top / ".Trash").mkdir()
@@ -88,7 +85,6 @@ def test_uses_the_shared_dot_trash_when_it_is_sticky(drive):
     assert not (top / f".Trash-{UID}").exists()
 
 
-@PENDING
 @pytest.mark.parametrize("bad", ["no-sticky", "symlink", "file"])
 def test_a_bad_shared_dot_trash_is_skipped_and_reported(drive, caplog, bad):
     top, _home = drive
@@ -109,7 +105,6 @@ def test_a_bad_shared_dot_trash_is_skipped_and_reported(drive, caplog, bad):
     assert not any((top / "elsewhere").iterdir()) if bad == "symlink" else True
 
 
-@PENDING
 def test_shared_user_dir_that_is_a_symlink_is_not_used(drive, caplog):
     top, _home = drive
     (top / ".Trash").mkdir()
@@ -122,7 +117,6 @@ def test_shared_user_dir_that_is_a_symlink_is_not_used(drive, caplog):
     assert any("symbolic link" in r.getMessage() for r in caplog.records)
 
 
-@PENDING
 @pytest.mark.parametrize("bad", ["mode", "owner", "symlink"])
 def test_an_unsafe_dot_trash_dash_uid_falls_back_to_the_verified_copy(drive, monkeypatch, caplog, bad):
     top, home = drive
@@ -150,7 +144,6 @@ def test_an_unsafe_dot_trash_dash_uid_falls_back_to_the_verified_copy(drive, mon
     assert mode(top / f".Trash-{uid}") == (0o755 if bad == "mode" else mode(top / f".Trash-{uid}"))
 
 
-@PENDING
 @pytest.mark.skipif(os.getuid() == 0, reason="root can write a read-only folder")
 def test_an_unwritable_topdir_falls_back_to_the_home_trash(drive, caplog):
     top, home = drive
@@ -165,7 +158,6 @@ def test_an_unwritable_topdir_falls_back_to_the_home_trash(drive, caplog):
     assert any(f".Trash-{UID}" in r.getMessage() for r in caplog.records)
 
 
-@PENDING
 def test_same_device_is_a_plain_rename_into_the_home_trash(tmp_path, monkeypatch):
     monkeypatch.setattr(fs, "TRASH_DIR", tmp_path / "home" / "Trash")
     src = tmp_path / "lib" / "a b.m3u"
@@ -180,7 +172,6 @@ def test_same_device_is_a_plain_rename_into_the_home_trash(tmp_path, monkeypatch
     assert (target.kind, target.root, target.topdir) == ("home", tmp_path / "home" / "Trash", None)
 
 
-@PENDING
 @pytest.mark.parametrize("where", ["topdir_user", "topdir", "home"])
 def test_the_journal_records_the_trash_and_undo_restores_from_it(drive, monkeypatch, where):
     top, home = drive
@@ -205,7 +196,6 @@ def test_the_journal_records_the_trash_and_undo_restores_from_it(drive, monkeypa
     assert not any((expected_root / "files").iterdir()) and not any((expected_root / "info").iterdir())
 
 
-@PENDING
 def test_service_undo_preview_points_at_the_drives_trash(drive):
     top, _home = drive
     target = fs.trash_for(top / "Music" / "x.m3u", create=False)
@@ -248,7 +238,6 @@ def _unshare_ok() -> bool:
     return probe.returncode == 0
 
 
-@PENDING
 @pytest.mark.skipif(not _unshare_ok(), reason="no unprivileged mount namespace (unshare -rm) here")
 def test_real_tmpfs_in_a_private_mount_namespace(tmp_path):
     (tmp_path / "mnt").mkdir()

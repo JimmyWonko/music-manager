@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import journal as journal_mod
-from ..fs import AUDIO_EXTS, trash_root
+from ..fs import AUDIO_EXTS, trash_for
 from ..playlists import PLAYLIST_EXTS
 from ..tags.snapshot import LegacySnapshotError, preview_restore
 from ._common import now_utc, set_status
@@ -191,7 +191,8 @@ def _preview(st: State, op_id: int, trust_legacy: bool) -> tuple[Plan, _UndoReco
             files[str(step.original)] = FileChange(_kind_of(step.original), step.current, step.original, [], skip)
         elif step.action == "create":
             files[str(step.current)] = FileChange(_kind_of(step.current), step.current,
-                                                  trash_root() / "files" / step.current.name, [], skip)
+                                                  trash_for(step.current, create=False).root / "files"
+                                                  / step.current.name, [], skip)
         elif step.action == "tags":
             key = str(step.current)
             existing = files.get(key)

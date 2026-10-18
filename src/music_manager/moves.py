@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .fs import COPY_CHUNK, file_sha256, send_to_trash
+from .fs import COPY_CHUNK, file_sha256, trash_file
 from .tags.fields import TrackMeta
 
 if TYPE_CHECKING:
@@ -172,10 +172,13 @@ def _trash_logged(journal: "Journal | None", path: Path) -> Path:
     sha = file_sha256(path) if path.is_file() else None
     if journal is not None:
         journal.write(action="trash", path=str(path.resolve()), sha256=sha)
-    trashed = send_to_trash(path)
+    done = trash_file(path)
     if journal is not None:
-        journal.write(action="trashed", path=str(path.resolve()), trashed=str(trashed), sha256=sha)
-    return trashed
+        target = done.target
+        extra = {"trash_notes": list(target.notes)} if target.notes else {}
+        journal.write(action="trashed", path=str(path.resolve()), trashed=str(done.dest), sha256=sha,
+                      trash_dir=str(target.root), trash_kind=target.kind, **extra)
+    return done.dest
 
 
 def move_planned(items: list[PlannedFile], done: list[tuple[Path, Path]], journal: Journal | None = None) -> None:
