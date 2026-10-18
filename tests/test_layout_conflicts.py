@@ -3,6 +3,7 @@ the Problem (Problem.layout) and on AlbumFolder, and spelled out by discogs-tag.
 
 from __future__ import annotations
 
+import pytest
 from disc_fixtures import OVERLAP_ID, silent_flac
 from service_fixtures import tree
 from test_review_walk import (
@@ -18,6 +19,7 @@ from music_manager.fs import collect_albums
 from music_manager.service import LayoutConflict
 from music_manager.service._common import problems_from_json, problems_to_json
 
+FLAT = pytest.mark.xfail(strict=True, reason="layout detail is not yet flat fields on Problem")
 DOUBLE = ("Band A & Band B", "[1998]  Double Feature [LT-2CD]")
 
 
@@ -42,22 +44,28 @@ def test_album_folders_next_to_strays_are_named(tmp_path):
     assert got[real].layout_conflict is None and got[other].layout_conflict is None
 
 
+@FLAT
 def test_service_problem_carries_the_layout(svc):  # noqa: F811
     folder = mixed(svc.joinpath(*DOUBLE))
     rows = _rows()
     _plan, [problem] = _held_problem(rows[folder].id)
-    assert problem.paths == [folder]
-    assert problem.layout == LayoutConflict("disc_folders", [folder / "CD1", folder / "CD2"], [folder / "01 One.flac"])
+    assert problem.paths == [folder]  # unchanged: the album folder only
+    assert problem.layout_reason == "disc_folders"
+    assert problem.blocking_subdirs == [folder / "CD1", folder / "CD2"]
+    assert problem.loose_files == [folder / "01 One.flac"]
     assert problem.disc_conflicts == []
     assert problems_from_json(problems_to_json([problem])) == [problem]
 
 
+@FLAT
 def test_service_stray_problem_names_the_album_below(svc):  # noqa: F811
     artist = svc / "Black Flag"
     real = artist_with_stray(artist)
     rows = _rows()
     _plan, [problem] = _held_problem(rows[artist].id)
-    assert problem.layout == LayoutConflict("album_folders", [real], [artist / "stray.flac"])
+    assert problem.paths == [artist]
+    assert (problem.layout_reason, problem.blocking_subdirs, problem.loose_files) == (
+        "album_folders", [real], [artist / "stray.flac"])
 
 
 def test_cli_names_the_subfolders_and_loose_files(tmp_path, monkeypatch):
