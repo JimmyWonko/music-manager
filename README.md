@@ -106,6 +106,20 @@ prints the evidence for each track. As secondary evidence it also reports
 title tags that don't match the release, and files whose last apply
 journal shows them moving to another disc.
 
+It also checks every file's disc folder (`CD1/`, `Disc 2/`) against its
+disc tag (DISCNUMBER), and uses the album's `.cue` and `.m3u` files as the
+tiebreaker: the one that lists the file (by its FILE entry or file name,
+else by track number and title) gives its disc from a `REM DISCNUMBER`
+line, its own `CDn` folder, or a "CD2" in its name. Files whose sources
+disagree make the album **DISAGREE**, with a line per file such as
+
+```text
+CD2/13 Mason Jar.flac: folder CD2 (disc 2), DISCNUMBER 1, cue/m3u disc 1 (Anthology CD1.cue, Anthology CD1.m3u) -> the folder is wrong
+```
+
+The length check can't see this (each file's audio and tags still agree).
+Move the files into the folder of their disc, or apply from a flat copy.
+
 ```sh
 discogs-tag --check-disc-swaps "/path/to/Music"
 discogs-tag --check-disc-swaps --report ~/disc-swaps.txt "/path/to/Music"
@@ -117,7 +131,7 @@ but never written unless you pass `--allow-cache-write`. Requests are
 rate-limited like every other Discogs call. Without a token, only cached
 releases (under 6 hours old) are used. `--report FILE` also writes the
 report to FILE, which must not exist yet. Exit status: 0 = nothing
-flagged, 3 = album(s) flagged, 1 = could not run. Fix a flagged album
+flagged, 3 = album(s) flagged (likely swapped, mixed or disagree), 1 = could not run. Fix a flagged album
 with `--undo-journal` on the apply that swapped it, or by re-tagging it.
 
 ## Where files go
@@ -260,7 +274,7 @@ fresh one is written in the new folder. Hand-made playlists are moved as they ar
 | `--normalize-folders` | Rename album folders under `path` to the current naming rule. Preview unless `--apply`. |
 | `--undo-journal FILE` | Reverse everything recorded in a journal (an apply or `--normalize-folders`). Preview unless `--apply`. |
 | `--apply` | Really make the change (only with `--normalize-folders` or `--undo-journal`). |
-| `--check-disc-swaps` | Read-only report of multi-disc albums under `path` whose same-number tracks look swapped between discs. |
+| `--check-disc-swaps` | Read-only report of multi-disc albums under `path` whose same-number tracks look swapped between discs, or whose disc folders disagree with the files' disc tags or cue/m3u. |
 | `--report FILE` | With `--check-disc-swaps`: also write the report to FILE (must not exist). |
 | `--allow-cache-write` | With `--check-disc-swaps`: allow Discogs responses to be cached (default: cache is only read). |
 | `--journal-dir DIR` | With `--check-disc-swaps`: the apply journals to read (default: the discogs-tag journal folder). |

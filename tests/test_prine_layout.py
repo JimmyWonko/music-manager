@@ -65,7 +65,6 @@ def test_the_synthetic_copy_mirrors_the_report(tmp_path):
 
 # --- 1. the read-only check -------------------------------------------------------------------------
 
-@PENDING
 @pytest.mark.parametrize("cue", ["tags", "folders"])
 def test_check_flags_each_file_with_folder_tag_and_cue_evidence(tmp_path, cue):
     album = hand_sorted(tmp_path.joinpath(*FOLDER), cue_follows=cue)
@@ -91,14 +90,12 @@ def test_check_flags_each_file_with_folder_tag_and_cue_evidence(tmp_path, cue):
         ("cue/m3u disc 2" in line and "the disc tag is wrong" in line)
 
 
-@PENDING
 def test_check_reports_ok_files_as_ok(tmp_path):
     hand_sorted(tmp_path.joinpath(*FOLDER), swapped=())
     [check] = check_disc_swaps(tmp_path, Source())
     assert check.disagreements == [] and check.status == "ok"
 
 
-@PENDING
 def test_check_cli_says_disagree_and_exits_3(tmp_path, monkeypatch):
     hand_sorted(tmp_path.joinpath("lib", *FOLDER))
     before = tree(tmp_path)

@@ -663,7 +663,8 @@ Undo:
         "--check-disc-swaps",
         action="store_true",
         help="read-only: report multi-disc albums under PATH whose disc-1/disc-2 tracks look swapped "
-        "(file lengths against Discogs). Writes nothing but the --report file",
+        "(file lengths against Discogs) or whose CDn folders disagree with the disc tags (cue/m3u break "
+        "the tie). Writes nothing but the --report file",
     )
     parser.add_argument("--report", type=Path, metavar="FILE",
                         help="with --check-disc-swaps: also write the report to FILE (must not exist yet)")
@@ -700,7 +701,8 @@ Undo:
 
 def check_disc_swaps_cli(root: Path, report: Path | None, allow_cache_write: bool,
                          journal_dir: Path | None) -> int:
-    """--check-disc-swaps: 0 = nothing flagged, 3 = album(s) flagged, 1 = could not run. Read-only."""
+    """--check-disc-swaps: 0 = nothing flagged, 3 = album(s) flagged (likely swapped, mixed or
+    disagree: a disc folder contradicted by the disc tag or cue/m3u), 1 = could not run. Read-only."""
     from ..journal import state_dir
     from ..swapcheck import CacheOnlySource, check_disc_swaps, format_report
 

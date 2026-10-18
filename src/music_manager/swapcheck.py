@@ -12,6 +12,10 @@ last apply journal recorded, are secondary evidence.
 Strictly read-only: audio files are opened for reading only, nothing is tagged, moved or
 indexed, no journal is written and the Discogs cache is only read unless cache writes are
 explicitly allowed. The only file written is the report the caller asks for.
+
+Independently of the lengths, every file's CD1/Disc 2 folder is compared with its disc tag,
+and the album's .cue/.m3u files that list it break the tie (see discsources). A file whose
+sources disagree makes the album "disagree" (flagged, like a swap), with the evidence per file.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from typing import Protocol
 
 from mutagen import File as MutagenFile
 
+from .discsources import DiscSources, disagreements
 from .fs import AlbumFolder, collect_albums
 from .match import TITLE_MATCH_MIN, similar
 from .providers.discogs import (
@@ -83,14 +88,16 @@ class NumberEvidence:
 class AlbumCheck:
     path: Path
     release_id: int | None
-    status: str  # "likely swapped", "mixed", "ok", "inconclusive", "single disc", "skipped", "error"
+    # "likely swapped", "mixed", "disagree", "ok", "inconclusive", "single disc", "skipped", "error"
+    status: str
     reason: str = ""
     numbers: list[NumberEvidence] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)  # secondary: tags, titles, journal
+    disagreements: list[DiscSources] = field(default_factory=list)  # folder vs disc tag vs cue/m3u
 
     @property
     def flagged(self) -> bool:
-        return self.status in ("likely swapped", "mixed")
+        return self.status in ("likely swapped", "mixed", "disagree")
 
 
 def _leading_int(text: str) -> int | None:
@@ -255,6 +262,23 @@ def _judge(number: int, by_disc: dict[int, FileFacts], lengths: dict[tuple[int, 
 
 def check_album(album: AlbumFolder, source: ReleaseSource, journals: JournalFacts,
                 releases: dict[int, DiscogsRelease | Exception] | None = None) -> AlbumCheck:
+    """The length check (see _check_lengths), plus folder vs disc tag vs cue/m3u for every file.
+
+    A disagreement makes the status "disagree" unless the lengths already flagged the album.
+    """
+    result = _check_lengths(album, source, journals, releases)
+    result.disagreements = disagreements(album)
+    if result.disagreements and not result.flagged:
+        if result.status not in ("ok", "inconclusive", "single disc") and result.reason:
+            result.notes.append(f"length check {result.status}: {result.reason}")
+        result.status = "disagree"
+        result.reason = (f"{len(result.disagreements)} file(s) sit in a disc folder that their disc tag or "
+                         "the album's cue/m3u files contradict")
+    return result
+
+
+def _check_lengths(album: AlbumFolder, source: ReleaseSource, journals: JournalFacts,
+                   releases: dict[int, DiscogsRelease | Exception] | None = None) -> AlbumCheck:
     files = [read_facts(p) for p in album.tracks]
     rid, how = _album_release_id(files, album, journals)
     if rid is None:
@@ -363,6 +387,23 @@ class CacheOnlySource:
             raise DiscogsError("not in the Discogs cache and there is no Discogs token") from None
 
 
+def _disc(value: int | None) -> str:
+    return "-" if value is None else str(value)
+
+
+def _disagreement_line(album_path: Path, e: DiscSources) -> str:
+    name = e.path.relative_to(album_path) if album_path in e.path.parents else e.path.name
+    folder = f"folder {e.path.parent.name} (disc {e.folder_disc})" if e.folder_disc is not None else "no disc folder"
+    if e.sidecar_discs:
+        listed = ", ".join(p.name for p in e.sidecars)
+        cue = f"cue/m3u disc {'/'.join(map(str, e.sidecar_discs))} ({listed})"
+    else:
+        cue = "no cue/m3u lists it"
+    verdict = {"folder": "the folder is wrong", "tag": "the disc tag is wrong",
+               "sidecar": "the cue/m3u is wrong"}.get(e.odd_one_out, "cannot tell which is wrong")
+    return f"{name}: {folder}, DISCNUMBER {_disc(e.tag_disc)}, {cue} -> {verdict}"
+
+
 def format_report(checks: list[AlbumCheck], verbose: bool = False, cache_written: bool = False) -> str:
     lines: list[str] = []
     flagged = [c for c in checks if c.flagged]
@@ -382,10 +423,15 @@ def format_report(checks: list[AlbumCheck], verbose: bool = False, cache_written
                 if t.better:
                     line += f"  Discogs {t.better} {_fmt(t.better_s)}  -> the audio is {t.better}"
                 lines.append(line)
+        for e in c.disagreements:
+            lines.append(f"    {_disagreement_line(c.path, e)}")
         for note in c.notes:
             lines.append(f"    note: {note}")
-    lines.append(f"checked {len(checks)} album(s): {len(flagged)} flagged"
-                 + (f" ({sum(1 for c in flagged if c.status == 'likely swapped')} likely swapped)" if flagged else ""))
+    swapped = sum(1 for c in flagged if c.status == "likely swapped")
+    disagree = sum(1 for c in flagged if c.status == "disagree" or c.disagreements)
+    detail = ", ".join(x for x in (f"{swapped} likely swapped" if swapped else "",
+                                     f"{disagree} with disc folders that disagree" if disagree else "") if x)
+    lines.append(f"checked {len(checks)} album(s): {len(flagged)} flagged" + (f" ({detail})" if detail else ""))
     lines.append("read-only: nothing was tagged, moved or journaled"
                  + ("; Discogs responses may have been cached (cache writes allowed)" if cache_written
                     else ", and the Discogs cache was not written"))
