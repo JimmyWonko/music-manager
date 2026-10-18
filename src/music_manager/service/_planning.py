@@ -172,7 +172,7 @@ def _album_problems(t: AlbumTarget, track_count: int) -> list[Problem]:
         problems.append(Problem(ProblemKind.TRACK_MISMATCH,
                                 f"Discogs lists {len(t.dtracks)} tracks, the folder has {track_count}", [t.album.path]))
     if layout.ambiguous:
-        problems.append(Problem(ProblemKind.DISC_AMBIGUOUS, disc_warning(t.album, layout.ambiguous),
+        problems.append(Problem(ProblemKind.DISC_AMBIGUOUS, disc_warning(t.album, layout.ambiguous, layout.disc_conflicts),
                                 list(layout.ambiguous), disc_conflicts=list(layout.disc_conflicts)))
     seen: dict[str, list[Path]] = {}
     for item in [*layout.tracks, *layout.moves]:

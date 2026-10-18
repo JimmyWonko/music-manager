@@ -272,7 +272,7 @@ def process_album(
     triples, _legacy, conflicts = align_tracks_explained(album, dtracks)
     unsure = ambiguous_disc_files(triples)
     if unsure:
-        print(f"  warning: {disc_warning(album, unsure)}")
+        print(f"  warning: {disc_warning(album, unsure, conflicts)}")
         for conflict in conflicts:
             print(f"    {describe_disc_conflict(conflict, album.path)}")
         print("  skipped: nothing written")

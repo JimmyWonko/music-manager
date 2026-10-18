@@ -107,7 +107,6 @@ def test_check_cli_says_disagree_and_exits_3(tmp_path, monkeypatch):
 
 # --- 2. plan / apply hold -------------------------------------------------------------------------
 
-@PENDING
 @pytest.mark.parametrize("cue", ["tags", "folders"])
 def test_engine_refuses_every_file_whose_sources_disagree(tmp_path, cue):
     album_dir = hand_sorted(tmp_path.joinpath(*FOLDER), cue_follows=cue)
@@ -139,7 +138,6 @@ def choose(root):
     return row.id
 
 
-@PENDING
 @pytest.mark.parametrize("cue", ["tags", "folders"])
 def test_service_holds_with_the_three_sources_per_file(svc, cue):
     album = hand_sorted(svc.joinpath(*FOLDER), cue_follows=cue)
@@ -159,7 +157,6 @@ def test_service_holds_with_the_three_sources_per_file(svc, cue):
     assert tree(svc) == before
 
 
-@PENDING
 @pytest.mark.parametrize("cue", ["tags", "folders"])
 def test_cli_holds_and_names_the_three_sources(tmp_path, monkeypatch, cue):
     album = hand_sorted(tmp_path.joinpath("in", *FOLDER), cue_follows=cue)

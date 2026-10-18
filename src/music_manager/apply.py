@@ -275,7 +275,7 @@ def layout_album(
         log("  note  these files use the old vinyl numbering (B1 = 21); they are renumbered 1..N")
     ambiguous = ambiguous_disc_files(pairs)
     if ambiguous:
-        log(f"  warning: {disc_warning(album, ambiguous)}")
+        log(f"  warning: {disc_warning(album, ambiguous, conflicts)}")
         for conflict in conflicts:
             log(f"    {describe_disc_conflict(conflict, album.path)}")
 
@@ -322,13 +322,25 @@ def layout_album(
                        ambiguous=ambiguous, disc_conflicts=conflicts)
 
 
-def disc_warning(album: AlbumFolder, files: list[Path]) -> str:
-    """The message for files whose disc cannot be told (see match.align_tracks)."""
-    names = ", ".join(str(p.relative_to(album.path)) if album.path in p.parents else p.name for p in files)
-    return (f"cannot tell which disc {len(files)} file(s) belong to: {names}. Their track numbers repeat on "
-            "several discs and no disc tag, CD1/CD2 folder, 1-01 style name or title says which. "
-            "Nothing is paired by guesswork; put each disc in its own CD1/CD2 folder or name the files "
-            "1-01, 2-01, ...")
+def disc_warning(album: AlbumFolder, files: list[Path], conflicts: list[DiscConflict] | None = None) -> str:
+    """The message for files whose disc cannot be told (see match.align_tracks_explained)."""
+    def names(paths):
+        return ", ".join(str(p.relative_to(album.path)) if album.path in p.parents else p.name for p in paths)
+
+    mixed = {c.path for c in conflicts or [] if c.reason == "sources_disagree"}
+    parts = []
+    rest = [p for p in files if p not in mixed]
+    if rest:
+        parts.append(f"cannot tell which disc {len(rest)} file(s) belong to: {names(rest)}. Their track numbers "
+                     "repeat on several discs and no disc tag, CD1/CD2 folder, 1-01 style name or title says which. "
+                     "Nothing is paired by guesswork; put each disc in its own CD1/CD2 folder or name the files "
+                     "1-01, 2-01, ...")
+    if mixed:
+        sources = [p for p in files if p in mixed]
+        parts.append(f"the disc folder, disc tag and cue/m3u of {len(sources)} file(s) don't agree: "
+                     f"{names(sources)}. Nothing is paired; move each file into its disc's folder (or fix its "
+                     "disc tag) so all three agree, then try again")
+    return " Also: ".join(parts)
 
 
 def execute_layout(
@@ -455,7 +467,7 @@ def apply_album(
         raise AlbumApplyError(f"{album.path}: {album.layout_problem}\n  nothing was written")
     layout = layout_album(album, dest_root, release, dtracks, original_year)
     if layout.ambiguous:
-        raise AlbumApplyError(f"{disc_warning(album, layout.ambiguous)}\n  nothing was written")
+        raise AlbumApplyError(f"{disc_warning(album, layout.ambiguous, layout.disc_conflicts)}\n  nothing was written")
     return execute_layout(layout, dry_run, clear_other, scan_root, journal_dir)
 
 

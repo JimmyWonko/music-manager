@@ -11,6 +11,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 from .conflicts import DiscChoice, DiscConflict, DiscReason
+from .discsources import disc_sources
 from .fs import DISC_DIR, AlbumFolder
 from .naming import ARTIST_NUM_SUFFIX, YEAR_RE, year4
 from .providers.discogs import (
@@ -312,6 +313,9 @@ def align_tracks_explained(
        folder, then a "2-06" file name. Files renamed by older versions
        (B1 = 21) are recognised and matched by that old number when that
        fits the folder better.
+       A file whose CD folder, disc tag and the album's .cue/.m3u don't all
+       agree (see discsources) is refused the same way (reason
+       "sources_disagree"), whichever two of them agree.
        Files with no disc that share a number ("1. One", "1. Four" in one
        flat folder) are placed only when the folder's numbers are exactly
        the release's per-disc numbering (numbers restart on each disc) and
@@ -371,12 +375,26 @@ def align_tracks_explained(
     refused: set[int] = set()
     conflicts: dict[int, DiscConflict] = {}
     if len(discs) > 1:
+        # A file whose CD folder, disc tag and cue/m3u don't all agree is never paired.
+        index = {local: k for k, (local, *_rest) in enumerate(info)}
+        for src in disc_sources(album):
+            if src.agree or src.path not in index:
+                continue
+            k = index[src.path]
+            local, _disc_hint, number, _side_index = info[k]
+            title = _title_from_stem(local.stem)
+            refused.add(k)
+            method[k] = "ambiguous_disc"
+            same = [_choice(dt, number_of(dt), title) for dt in dtracks if number is not None and number_of(dt) == number]
+            conflicts[k] = DiscConflict(local, number, title, "sources_disagree", same, [],
+                                        src.folder_disc, src.tag_disc, src.sidecar_disc,
+                                        src.sidecars[0] if src.sidecars else None)
         tag_hints = _tag_disc_hints(info, dtracks, number_of)
         if tag_hints is not None:
             info = [(local, tag_hints.get(k, disc_hint), number, side_index)
                     for k, (local, disc_hint, number, side_index) in enumerate(info)]
         loose = [k for k, (_l, disc_hint, number, side_index) in enumerate(info)
-                 if number is not None and disc_hint is None and side_index is None]
+                 if number is not None and disc_hint is None and side_index is None and k not in refused]
         counts = Counter(info[k][2] for k in loose)
         repeated = sorted(n for n, c in counts.items() if c > 1)
         if repeated:

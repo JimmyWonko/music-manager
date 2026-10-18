@@ -28,7 +28,7 @@ from service_fixtures import FakeDiscogs, search_result, tree
 from music_manager import service
 from music_manager.cli import discogs_tag as cli
 from music_manager.fs import collect_albums
-from music_manager.match import align_tracks
+from music_manager.match import align_tracks, align_tracks_explained
 from music_manager.providers.discogs import flatten_tracklist, release_artists
 from music_manager.service import JobState
 
@@ -193,14 +193,21 @@ def test_engine_reads_the_disc_from_tags_first(tmp_path):
         assert (dt.disc, dt.number) == identity(local)[:2], local.name
 
 
-def test_engine_tags_win_over_the_folder(tmp_path):
-    """A CD2 folder whose files are tagged disc 1 (and the other way round): the tags decide."""
+def test_engine_holds_when_the_tags_and_the_folder_disagree(tmp_path):
+    """A CD2 folder whose files are tagged disc 1 (and the other way round): nothing is paired.
+
+    Until Maestro's 2026-10-18 decision the tags won here; now folder, tag and cue/m3u must all
+    agree (see discsources), so every file is refused with reason sources_disagree.
+    """
     folder = make_overlap_album(tmp_path / "in", ["CD2/01 a", "CD2/02 b", "CD2/03 c", "CD1/01 d", "CD1/02 e"])
     _tag_discs(folder, {"CD2/01 a.flac": "1", "CD2/02 b.flac": "1", "CD2/03 c.flac": "1", "CD1/01 d.flac": "2",
                         "CD1/02 e.flac": "2"})
-    triples, _ = align_tracks(album_of(folder), dtracks())
-    for local, dt, _method in triples:
-        assert (dt.disc, dt.number) == identity(local)[:2], local.name
+    triples, _, conflicts = align_tracks_explained(album_of(folder), dtracks())
+    assert [(dt, m) for _l, dt, m in triples] == [(None, "ambiguous_disc")] * 5
+    assert [(c.path.relative_to(folder).as_posix(), c.folder_disc, c.tag_disc, c.reason) for c in conflicts] == [
+        ("CD1/01 d.flac", 1, 2, "sources_disagree"), ("CD1/02 e.flac", 1, 2, "sources_disagree"),
+        ("CD2/01 a.flac", 2, 1, "sources_disagree"), ("CD2/02 b.flac", 2, 1, "sources_disagree"),
+        ("CD2/03 c.flac", 2, 1, "sources_disagree")]
 
 
 def test_engine_ignores_disc_tags_that_do_not_fit_the_release(tmp_path):
