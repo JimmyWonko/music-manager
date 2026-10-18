@@ -3,7 +3,6 @@ the Problem (Problem.layout) and on AlbumFolder, and spelled out by discogs-tag.
 
 from __future__ import annotations
 
-import pytest
 from disc_fixtures import OVERLAP_ID, silent_flac
 from service_fixtures import tree
 from test_review_walk import (
@@ -19,11 +18,9 @@ from music_manager.fs import collect_albums
 from music_manager.service import LayoutConflict
 from music_manager.service._common import problems_from_json, problems_to_json
 
-PENDING = pytest.mark.xfail(strict=True, reason="layout_ambiguous has no structured detail yet")
 DOUBLE = ("Band A & Band B", "[1998]  Double Feature [LT-2CD]")
 
 
-@PENDING
 def test_disc_folders_and_loose_files_are_named(tmp_path):
     folder = mixed(tmp_path.joinpath(*DOUBLE))
     [album] = collect_albums(tmp_path)
@@ -31,7 +28,6 @@ def test_disc_folders_and_loose_files_are_named(tmp_path):
                                                    [folder / "01 One.flac"])
 
 
-@PENDING
 def test_album_folders_next_to_strays_are_named(tmp_path):
     artist = tmp_path / "Black Flag"
     real = artist_with_stray(artist)
@@ -42,11 +38,10 @@ def test_album_folders_next_to_strays_are_named(tmp_path):
     (artist / "Scans" / "promo.jpg").write_bytes(b"j")  # no audio: not a cause
     got = {a.path: a for a in collect_albums(tmp_path)}
     assert got[artist].layout_conflict == LayoutConflict(
-        "album_folders", [real, other], [artist / "another stray.flac", artist / "stray.flac"])
+        "album_folders", [other, real], [artist / "another stray.flac", artist / "stray.flac"])
     assert got[real].layout_conflict is None and got[other].layout_conflict is None
 
 
-@PENDING
 def test_service_problem_carries_the_layout(svc):  # noqa: F811
     folder = mixed(svc.joinpath(*DOUBLE))
     rows = _rows()
@@ -57,7 +52,6 @@ def test_service_problem_carries_the_layout(svc):  # noqa: F811
     assert problems_from_json(problems_to_json([problem])) == [problem]
 
 
-@PENDING
 def test_service_stray_problem_names_the_album_below(svc):  # noqa: F811
     artist = svc / "Black Flag"
     real = artist_with_stray(artist)
@@ -66,7 +60,6 @@ def test_service_stray_problem_names_the_album_below(svc):  # noqa: F811
     assert problem.layout == LayoutConflict("album_folders", [real], [artist / "stray.flac"])
 
 
-@PENDING
 def test_cli_names_the_subfolders_and_loose_files(tmp_path, monkeypatch):
     folder = mixed(tmp_path.joinpath("in", *DOUBLE))
     lib = tmp_path / "lib"
@@ -80,13 +73,13 @@ def test_cli_names_the_subfolders_and_loose_files(tmp_path, monkeypatch):
     assert tree(tmp_path / "in") == before
 
 
-@PENDING
 def test_cli_names_the_album_below_a_stray(tmp_path, monkeypatch):
     artist = tmp_path / "in" / "Black Flag"
     artist_with_stray(artist)
     lib = tmp_path / "lib"
     lib.mkdir()
-    _code, out = run_cli(monkeypatch, artist, "--dest", lib, "--release-id", OVERLAP_ID, "--yes")
+    # Two albums now (--release-id refuses that), so --auto: the stray is reported before any matching.
+    _code, out = run_cli(monkeypatch, artist, "--dest", lib, "--auto", "--yes")
     lines = [x.strip() for x in out.splitlines()]
     assert "held because of: [1984]  My War [SST023]/ (other folders with audio)" in lines, out
     assert "loose files: stray.flac" in lines

@@ -203,6 +203,11 @@ def process_album(
     if album.layout_problem:
         print()
         print(f"warning: {album.path}: {album.layout_problem}")
+        conflict = album.layout_conflict
+        if conflict is not None:
+            what = "disc folders with audio" if conflict.reason == "disc_folders" else "other folders with audio"
+            print(f"  held because of: {', '.join(f'{d.name}/' for d in conflict.subfolders)} ({what})")
+            print(f"  loose files: {', '.join(f.name for f in conflict.loose_files)}")
         print("  skipped: nothing written")
         return "skipped"
 

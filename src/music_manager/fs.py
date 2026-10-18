@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
 
+from .conflicts import LayoutConflict
+
 AUDIO_EXTS = {
     ".flac",
     ".mp3",
@@ -129,6 +131,7 @@ class AlbumFolder:
     extra_dirs: list[Path] = field(default_factory=list)
     # Non-empty: the folder's layout is ambiguous (see collect_albums) and it is never applied.
     layout_problem: str = ""
+    layout_conflict: LayoutConflict | None = None  # what caused it: subfolders and loose files
 
 
 def _dir_holds_track(folder: Path, tracks: list[Path]) -> bool:
@@ -230,14 +233,19 @@ def collect_albums(root: Path) -> list[AlbumFolder]:
                             key=natural_key)
             if nested:
                 problem = STRAY_AUDIO.format(folders=", ".join(f"{d}/" for d in nested))
-                albums.append(AlbumFolder(current, here + disc_tracks, layout_problem=problem))
+                conflict = LayoutConflict("album_folders", [current / d for d in nested], list(here))
+                albums.append(AlbumFolder(current, here + disc_tracks, layout_problem=problem,
+                                          layout_conflict=conflict))
                 dirnames[:] = nested
                 continue
             if disc_dirs:
                 tracks = here + disc_tracks
                 files, dirs = collect_extras(current, tracks)
-                problem = MIXED_DISCS.format(discs=", ".join(f"{d}/" for d in sorted(disc_dirs, key=natural_key)))
-                albums.append(AlbumFolder(current, tracks, files, dirs, layout_problem=problem))
+                ordered = sorted(disc_dirs, key=natural_key)
+                problem = MIXED_DISCS.format(discs=", ".join(f"{d}/" for d in ordered))
+                conflict = LayoutConflict("disc_folders", [current / d for d in ordered], list(here))
+                albums.append(AlbumFolder(current, tracks, files, dirs, layout_problem=problem,
+                                          layout_conflict=conflict))
                 dirnames[:] = []
                 continue
 

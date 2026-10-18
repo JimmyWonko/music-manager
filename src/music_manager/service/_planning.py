@@ -147,7 +147,8 @@ def album_target(album_id: int, release_id: int | None, template: CompiledTempla
     result = AlbumTarget(album_id, int(release_id), root, album, target, release, fetched, dtracks, original_year,
                          label_missing=not info.label.strip())
     if album.layout_problem:
-        result.problems.append(Problem(ProblemKind.LAYOUT_AMBIGUOUS, album.layout_problem, [album.path]))
+        result.problems.append(Problem(ProblemKind.LAYOUT_AMBIGUOUS, album.layout_problem, [album.path],
+                                       layout=album.layout_conflict))
     for kind, message, paths in check_layout(album, root, target):
         result.problems.append(Problem(LAYOUT_KIND[kind], message, list(paths)))
     if fetched:
