@@ -8,7 +8,7 @@ from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Generic, Literal, TypeVar
 
-from ..conflicts import DiscChoice, DiscConflict, LayoutConflict  # noqa: F401  (DiscChoice: re-exported)
+from ..conflicts import DiscChoice, DiscConflict, LayoutConflict  # noqa: F401  (re-exported)
 
 T = TypeVar("T")
 
@@ -96,16 +96,17 @@ class AlbumSort(StrEnum):  # every sort ends with folder path as the tiebreak, s
 
 
 class ProblemKind(StrEnum):
+    # Match on the string value, never on position: new kinds are appended at the end.
     DEST_INSIDE_SOURCE = "dest_inside_source"  # library or target folder is inside the album
     SOURCE_INSIDE_TARGET = "source_inside_target"
     SYMLINK_OUTSIDE = "symlink_outside"  # paths lists every offending link
     COLLISION = "collision"
     TRACK_MISMATCH = "track_mismatch"  # release track count differs from local files
-    LAYOUT_AMBIGUOUS = "layout_ambiguous"  # loose audio next to disc folders / other albums; never overridden
-    DISC_AMBIGUOUS = "disc_ambiguous"  # multi-disc: files whose disc can't be told (paths); never overridden
     FILE_CHANGED = "file_changed"  # edited/moved since plan or apply: rebuild / skipped on undo
     LEGACY_JOURNAL = "legacy_journal"  # undo of an old-format step needs trust_legacy=True
     RELEASE_NOT_FETCHED = "release_not_fetched"  # plan.build: release still downloading (Plan.fetch_job)
+    DISC_AMBIGUOUS = "disc_ambiguous"  # multi-disc: files whose disc can't be told (paths); never overridden
+    LAYOUT_AMBIGUOUS = "layout_ambiguous"  # loose audio next to disc folders / other albums; never overridden
 
 
 # --- jobs ---------------------------------------------------------------------
@@ -146,8 +147,10 @@ class Problem:
     paths: list[Path]
     # DISC_AMBIGUOUS: one entry per refused file, in file order (the same files as paths).
     disc_conflicts: list[DiscConflict] = field(default_factory=list)
-    # LAYOUT_AMBIGUOUS: which subfolders and loose files caused the hold.
-    layout: LayoutConflict | None = None
+    # LAYOUT_AMBIGUOUS ("" / [] otherwise); paths stays [album folder].
+    layout_reason: str = ""  # "disc_folders" (CD1/CD2 with audio) or "album_folders" (other folders with audio)
+    blocking_subdirs: list[Path] = field(default_factory=list)  # the subfolders that caused the hold
+    loose_files: list[Path] = field(default_factory=list)  # the audio files directly in the album folder
 
 
 @dataclass(frozen=True)

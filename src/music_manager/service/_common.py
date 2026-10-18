@@ -7,7 +7,7 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ..conflicts import DiscChoice, DiscConflict, LayoutConflict
+from ..conflicts import DiscChoice, DiscConflict
 from ..fs import AlbumFolder
 from ._state import State, events, state
 from ._types import (
@@ -62,9 +62,10 @@ def problems_to_json(problems: list[Problem]) -> str:
         item: dict = {"kind": str(p.kind), "message": p.message, "paths": [str(x) for x in p.paths]}
         if p.disc_conflicts:
             item["disc_conflicts"] = [_conflict_json(c) for c in p.disc_conflicts]
-        if p.layout is not None:
-            item["layout"] = {"reason": p.layout.reason, "subfolders": [str(x) for x in p.layout.subfolders],
-                              "loose_files": [str(x) for x in p.layout.loose_files]}
+        if p.layout_reason or p.blocking_subdirs or p.loose_files:
+            item["layout_reason"] = p.layout_reason
+            item["blocking_subdirs"] = [str(x) for x in p.blocking_subdirs]
+            item["loose_files"] = [str(x) for x in p.loose_files]
         out.append(item)
     return json.dumps(out, ensure_ascii=False)
 
@@ -89,12 +90,12 @@ def problems_from_json(text: str | None) -> list[Problem]:
             kind = ProblemKind(item["kind"])
         except (KeyError, ValueError):
             continue
-        layout = item.get("layout")
         out.append(Problem(
             kind, item.get("message", ""), [Path(p) for p in item.get("paths", [])],
             disc_conflicts=[_conflict_from(c) for c in item.get("disc_conflicts", [])],
-            layout=LayoutConflict(layout.get("reason", "album_folders"), [Path(x) for x in layout.get("subfolders", [])],
-                                  [Path(x) for x in layout.get("loose_files", [])]) if layout else None,
+            layout_reason=item.get("layout_reason", ""),
+            blocking_subdirs=[Path(x) for x in item.get("blocking_subdirs", [])],
+            loose_files=[Path(x) for x in item.get("loose_files", [])],
         ))
     return out
 

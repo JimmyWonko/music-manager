@@ -3,7 +3,6 @@ the Problem (Problem.layout) and on AlbumFolder, and spelled out by discogs-tag.
 
 from __future__ import annotations
 
-import pytest
 from disc_fixtures import OVERLAP_ID, silent_flac
 from service_fixtures import tree
 from test_review_walk import (
@@ -19,7 +18,6 @@ from music_manager.fs import collect_albums
 from music_manager.service import LayoutConflict
 from music_manager.service._common import problems_from_json, problems_to_json
 
-FLAT = pytest.mark.xfail(strict=True, reason="layout detail is not yet flat fields on Problem")
 DOUBLE = ("Band A & Band B", "[1998]  Double Feature [LT-2CD]")
 
 
@@ -44,7 +42,6 @@ def test_album_folders_next_to_strays_are_named(tmp_path):
     assert got[real].layout_conflict is None and got[other].layout_conflict is None
 
 
-@FLAT
 def test_service_problem_carries_the_layout(svc):  # noqa: F811
     folder = mixed(svc.joinpath(*DOUBLE))
     rows = _rows()
@@ -57,7 +54,6 @@ def test_service_problem_carries_the_layout(svc):  # noqa: F811
     assert problems_from_json(problems_to_json([problem])) == [problem]
 
 
-@FLAT
 def test_service_stray_problem_names_the_album_below(svc):  # noqa: F811
     artist = svc / "Black Flag"
     real = artist_with_stray(artist)
@@ -91,3 +87,12 @@ def test_cli_names_the_album_below_a_stray(tmp_path, monkeypatch):
     lines = [x.strip() for x in out.splitlines()]
     assert "held because of: [1984]  My War [SST023]/ (other folders with audio)" in lines, out
     assert "loose files: stray.flac" in lines
+
+
+def test_problem_kinds_are_only_ever_appended():
+    """Clients match on the value; the order is kept anyway so the contract's listing stays true."""
+    from music_manager.service import ProblemKind
+
+    assert [k.value for k in ProblemKind] == [
+        "dest_inside_source", "source_inside_target", "symlink_outside", "collision", "track_mismatch",
+        "file_changed", "legacy_journal", "release_not_fetched", "disc_ambiguous", "layout_ambiguous"]
