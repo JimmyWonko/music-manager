@@ -8,6 +8,8 @@ from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Generic, Literal, TypeVar
 
+from ..conflicts import DiscChoice, DiscConflict, LayoutConflict  # noqa: F401  (DiscChoice: re-exported)
+
 T = TypeVar("T")
 
 
@@ -142,6 +144,10 @@ class Problem:
     kind: ProblemKind
     message: str  # plain text for the dialog
     paths: list[Path]
+    # DISC_AMBIGUOUS: one entry per refused file, in file order (the same files as paths).
+    disc_conflicts: list[DiscConflict] = field(default_factory=list)
+    # LAYOUT_AMBIGUOUS: which subfolders and loose files caused the hold.
+    layout: LayoutConflict | None = None
 
 
 @dataclass(frozen=True)

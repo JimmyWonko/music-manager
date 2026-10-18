@@ -10,9 +10,15 @@ from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from .conflicts import DiscChoice, DiscConflict, DiscReason
 from .fs import DISC_DIR, AlbumFolder
 from .naming import ARTIST_NUM_SUFFIX, YEAR_RE, year4
-from .providers.discogs import DiscogsTrack, SearchResult, is_side_position, split_result_title
+from .providers.discogs import (
+    DiscogsTrack,
+    SearchResult,
+    is_side_position,
+    split_result_title,
+)
 from .tags.read import read_disc_number, read_easy_tags
 
 JUNK_BITS = re.compile(
@@ -253,28 +259,48 @@ def _tag_disc_hints(info, dtracks: list[DiscogsTrack], number_of) -> dict[int, i
     return hints
 
 
-def _place_by_title(group: list[tuple[int, Path]], candidates: list[int], dtracks: list[DiscogsTrack],
-                    title_match_min: float) -> dict[int, int] | None:
+def _title_picks(group: list[tuple[int, Path]], candidates: list[int], dtracks: list[DiscogsTrack],
+                 title_match_min: float) -> tuple[dict[int, int] | None, dict[int, DiscReason]]:
     """Files sharing one track number, each placed on the one same-number track its title matches.
 
-    None unless every file's title matches exactly one candidate (at title_match_min)
-    and no two files pick the same track.
+    Returns (picks, reasons): picks is None unless every file's title matches exactly one
+    candidate (at title_match_min) and no two files pick the same track; reasons says, for
+    every file of a refused group, why (see conflicts.DiscReason).
     """
-    picks: dict[int, int] = {}
+    good: dict[int, list[int]] = {}
     for k, local in group:
         title = _title_from_stem(local.stem)
-        good = [i for i in candidates if title and similar(title, dtracks[i].title) >= title_match_min]
-        if len(good) != 1:
-            return None
-        picks[k] = good[0]
-    if len(set(picks.values())) != len(picks):
-        return None
-    return picks
+        good[k] = [i for i in candidates if title and similar(title, dtracks[i].title) >= title_match_min]
+    single = [g[0] for g in good.values() if len(g) == 1]
+    reasons: dict[int, DiscReason] = {}
+    for k, g in good.items():
+        if not g:
+            reasons[k] = "no_title_match"
+        elif len(g) > 1:
+            reasons[k] = "several_title_matches"
+        elif single.count(g[0]) > 1:
+            reasons[k] = "same_track"
+    if reasons:
+        return None, {k: reasons.get(k, "held_with_group") for k in good}
+    return {k: g[0] for k, g in good.items()}, {}
+
+
+def _choice(dt: DiscogsTrack, number: int, title: str) -> DiscChoice:
+    return DiscChoice(dt.disc, dt.position or f"{dt.disc}-{dt.number}", number, dt.title,
+                      similar(title, dt.title) if title else 0.0)
 
 
 def align_tracks(
     album: AlbumFolder, dtracks: list[DiscogsTrack], title_match_min: float = TITLE_MATCH_MIN
 ) -> tuple[list[tuple[Path, DiscogsTrack | None, str]], bool]:
+    """Pair local files with Discogs tracks (see align_tracks_explained). Returns (triples, legacy)."""
+    triples, use_legacy, _conflicts = align_tracks_explained(album, dtracks, title_match_min)
+    return triples, use_legacy
+
+
+def align_tracks_explained(
+    album: AlbumFolder, dtracks: list[DiscogsTrack], title_match_min: float = TITLE_MATCH_MIN
+) -> tuple[list[tuple[Path, DiscogsTrack | None, str]], bool, list[DiscConflict]]:
     """Pair local files with Discogs tracks, saying how each pair was made.
 
     1. A file named after a side position the release has ("B2. Title")
@@ -302,8 +328,8 @@ def align_tracks(
 
     Returns (local file, track or None, method) for every local file, where
     method is "side", "number", "title", "position" (steps 1-4),
-    "ambiguous_disc" or "unmatched", and whether the old vinyl numbering was
-    detected.
+    "ambiguous_disc" or "unmatched", whether the old vinyl numbering was
+    detected, and a DiscConflict for every "ambiguous_disc" file (in file order).
     """
     discs = {dt.disc for dt in dtracks}
     max_disc = max(discs, default=1)
@@ -343,6 +369,7 @@ def align_tracks(
     chosen: list[int | None] = [None] * len(info)
     method: list[str] = ["unmatched"] * len(info)
     refused: set[int] = set()
+    conflicts: dict[int, DiscConflict] = {}
     if len(discs) > 1:
         tag_hints = _tag_disc_hints(info, dtracks, number_of)
         if tag_hints is not None:
@@ -358,14 +385,22 @@ def align_tracks(
             restarts = Counter(number_of(dtracks[i]) for i in open_tracks) == counts
             for n in repeated:
                 group = [(k, info[k][0]) for k in loose if info[k][2] == n]
+                same = [i for i in open_tracks if number_of(dtracks[i]) == n]
                 picks = None
+                reasons: dict[int, DiscReason] = dict.fromkeys((k for k, _l in group), "numbering")
                 if restarts:
-                    same = [i for i in open_tracks if number_of(dtracks[i]) == n]
-                    picks = _place_by_title(group, same, dtracks, title_match_min)
+                    picks, reasons = _title_picks(group, same, dtracks, title_match_min)
                 if picks is None:
-                    for k, _local in group:
+                    for k, local in group:
                         refused.add(k)
                         method[k] = "ambiguous_disc"
+                        title = _title_from_stem(local.stem)
+                        matches = sorted(
+                            (_choice(dt, number_of(dt), title) for dt in dtracks
+                             if title and similar(title, dt.title) >= title_match_min),
+                            key=lambda c: (-c.title_similarity, c.disc, c.number))
+                        conflicts[k] = DiscConflict(local, n, title, reasons[k],
+                                                    [_choice(dtracks[i], n, title) for i in same], matches)
                     continue
                 for k, i in picks.items():
                     chosen[k] = i
@@ -427,7 +462,7 @@ def align_tracks(
                 used.add(free[0])
 
     triples = [(info[k][0], dtracks[i] if i is not None else None, method[k]) for k, i in enumerate(chosen)]
-    return triples, use_legacy
+    return triples, use_legacy, [conflicts[k] for k in sorted(conflicts)]
 
 
 def ambiguous_disc_files(triples: list[tuple[Path, DiscogsTrack | None, str]]) -> list[Path]:

@@ -10,7 +10,8 @@ from pathlib import Path
 
 from .fs import AlbumFolder, file_sha256
 from .journal import Journal
-from .match import TITLE_MATCH_MIN, align_tracks, ambiguous_disc_files
+from .conflicts import DiscConflict, describe_disc_conflict
+from .match import TITLE_MATCH_MIN, align_tracks_explained, ambiguous_disc_files
 from .moves import PlannedFile, _mkdirs_logged, _prune_empty, _trash_logged, describe_moves, move_planned, prune_limit
 from .naming import (
     album_folder_name,
@@ -238,6 +239,7 @@ class AlbumLayout:
     artist: str = ""
     title: str = ""
     ambiguous: list[Path] = field(default_factory=list)  # refused: disc unknown (also in unmatched)
+    disc_conflicts: list[DiscConflict] = field(default_factory=list)  # why each of ambiguous was refused
 
 
 def layout_album(
@@ -268,12 +270,14 @@ def layout_album(
     if check:
         validate_layout(album, dest_root, target_dir)
 
-    pairs, legacy = align_tracks(album, dtracks, title_match_min)
+    pairs, legacy, conflicts = align_tracks_explained(album, dtracks, title_match_min)
     if legacy:
         log("  note  these files use the old vinyl numbering (B1 = 21); they are renumbered 1..N")
     ambiguous = ambiguous_disc_files(pairs)
     if ambiguous:
         log(f"  warning: {disc_warning(album, ambiguous)}")
+        for conflict in conflicts:
+            log(f"    {describe_disc_conflict(conflict, album.path)}")
 
     plan: list[PlannedFile] = []
     unmatched: list[Path] = []
@@ -315,7 +319,7 @@ def layout_album(
                 log(f"  note  hand-made playlist {sidecar.name} is moved as-is; it may list old file names")
     return AlbumLayout(album, dest_root, target_dir, pairs, plan, unmatched, moves, old_playlists, legacy, clashes,
                        release_id=int(release.get("id") or 0), artist=info.album_artist, title=info.title,
-                       ambiguous=ambiguous)
+                       ambiguous=ambiguous, disc_conflicts=conflicts)
 
 
 def disc_warning(album: AlbumFolder, files: list[Path]) -> str:

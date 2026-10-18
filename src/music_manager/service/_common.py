@@ -7,6 +7,7 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ..conflicts import DiscChoice, DiscConflict, LayoutConflict
 from ..fs import AlbumFolder
 from ._state import State, events, state
 from ._types import (
@@ -42,9 +43,43 @@ def from_iso(text: str | None) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
+def _choice_json(c: DiscChoice) -> dict:
+    return {"disc": c.disc, "position": c.position, "number": c.number, "title": c.title,
+            "title_similarity": c.title_similarity}
+
+
+def _conflict_json(c: DiscConflict) -> dict:
+    return {"path": str(c.path), "number": c.number, "title": c.title, "reason": c.reason,
+            "same_number": [_choice_json(x) for x in c.same_number],
+            "title_matches": [_choice_json(x) for x in c.title_matches],
+            "folder_disc": c.folder_disc, "tag_disc": c.tag_disc, "sidecar_disc": c.sidecar_disc,
+            "sidecar": str(c.sidecar) if c.sidecar is not None else None}
+
+
 def problems_to_json(problems: list[Problem]) -> str:
-    return json.dumps([{"kind": str(p.kind), "message": p.message, "paths": [str(x) for x in p.paths]}
-                       for p in problems], ensure_ascii=False)
+    out = []
+    for p in problems:
+        item: dict = {"kind": str(p.kind), "message": p.message, "paths": [str(x) for x in p.paths]}
+        if p.disc_conflicts:
+            item["disc_conflicts"] = [_conflict_json(c) for c in p.disc_conflicts]
+        if p.layout is not None:
+            item["layout"] = {"reason": p.layout.reason, "subfolders": [str(x) for x in p.layout.subfolders],
+                              "loose_files": [str(x) for x in p.layout.loose_files]}
+        out.append(item)
+    return json.dumps(out, ensure_ascii=False)
+
+
+def _choice_from(d: dict) -> DiscChoice:
+    return DiscChoice(int(d["disc"]), d.get("position", ""), int(d["number"]), d.get("title", ""),
+                      float(d.get("title_similarity", 0.0)))
+
+
+def _conflict_from(d: dict) -> DiscConflict:
+    return DiscConflict(Path(d["path"]), d.get("number"), d.get("title", ""), d.get("reason", "numbering"),
+                        [_choice_from(x) for x in d.get("same_number", [])],
+                        [_choice_from(x) for x in d.get("title_matches", [])],
+                        d.get("folder_disc"), d.get("tag_disc"), d.get("sidecar_disc"),
+                        Path(d["sidecar"]) if d.get("sidecar") else None)
 
 
 def problems_from_json(text: str | None) -> list[Problem]:
@@ -54,7 +89,13 @@ def problems_from_json(text: str | None) -> list[Problem]:
             kind = ProblemKind(item["kind"])
         except (KeyError, ValueError):
             continue
-        out.append(Problem(kind, item.get("message", ""), [Path(p) for p in item.get("paths", [])]))
+        layout = item.get("layout")
+        out.append(Problem(
+            kind, item.get("message", ""), [Path(p) for p in item.get("paths", [])],
+            disc_conflicts=[_conflict_from(c) for c in item.get("disc_conflicts", [])],
+            layout=LayoutConflict(layout.get("reason", "album_folders"), [Path(x) for x in layout.get("subfolders", [])],
+                                  [Path(x) for x in layout.get("loose_files", [])]) if layout else None,
+        ))
     return out
 
 

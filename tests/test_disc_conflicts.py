@@ -21,8 +21,6 @@ from test_review_flat_multidisc import (
 from music_manager import service
 from music_manager.service._common import problems_from_json, problems_to_json
 
-PENDING = pytest.mark.xfail(strict=True, reason="disc_ambiguous has no structured conflicts yet")
-
 
 def choices(items):
     return [(c.disc, c.position, c.title) for c in items]
@@ -39,7 +37,6 @@ def held_problem(root, discogs, release_tracks, names=None):
     return problem
 
 
-@PENDING
 def test_service_names_each_conflict_of_the_reviews_example(svc):  # noqa: F811
     root, discogs = svc
     problem = held_problem(root, discogs, REVIEW_RELEASE, REVIEW_NAMES)
@@ -66,7 +63,6 @@ def test_service_names_each_conflict_of_the_reviews_example(svc):  # noqa: F811
     assert all(c.folder_disc is None and c.tag_disc is None for c in problem.disc_conflicts)
 
 
-@PENDING
 def test_numbering_that_does_not_restart_like_the_release(svc):  # noqa: F811
     root, discogs = svc
     # The flat folder is missing disc 2's track 3, so its numbers aren't the release's per-disc numbering.
@@ -91,7 +87,6 @@ def test_conflicts_survive_the_held_status_round_trip(svc):  # noqa: F811
     assert problems_from_json(problems_to_json([problem])) == [problem]
 
 
-@PENDING
 def test_cli_lists_each_conflict(tmp_path, monkeypatch):
     src = make_flat(tmp_path.joinpath("in", *FOLDER), REVIEW_RELEASE, REVIEW_NAMES)
     lib = tmp_path / "lib"

@@ -22,12 +22,13 @@ from mutagen.id3 import ID3, TIT2, TPE1, TXXX
 
 from .. import naming
 from ..apply import AlbumApplyError, apply_album, disc_warning
+from ..conflicts import describe_disc_conflict
 from ..fs import AlbumFolder, collect_albums, collect_extras
 from ..journal import undo_journal
 from ..match import (
     AUTO_MIN_MARGIN,
     AUTO_MIN_SCORE,
-    align_tracks,
+    align_tracks_explained,
     ambiguous_disc_files,
     format_score_components,
     guess_from_album_dir,
@@ -263,9 +264,12 @@ def process_album(
             print("  skipped: track count mismatch in --auto mode (use --allow-track-mismatch to apply anyway)")
             return "skipped"
 
-    unsure = ambiguous_disc_files(align_tracks(album, dtracks)[0])
+    triples, _legacy, conflicts = align_tracks_explained(album, dtracks)
+    unsure = ambiguous_disc_files(triples)
     if unsure:
         print(f"  warning: {disc_warning(album, unsure)}")
+        for conflict in conflicts:
+            print(f"    {describe_disc_conflict(conflict, album.path)}")
         print("  skipped: nothing written")
         return "skipped"
 

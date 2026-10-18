@@ -26,10 +26,13 @@ from ._types import (
     Collision,
     ConfigError,
     Destination,
+    DiscChoice,
+    DiscConflict,
     FileChange,
     Job,
     JobKind,
     JobState,
+    LayoutConflict,
     LocalTrack,
     MatchStatus,
     MMError,
@@ -54,7 +57,7 @@ from ._types import (
 
 __all__ = [
     "DISCOGS_CREDIT", "Album", "AlbumFilter", "AlbumPlan", "AlbumRow", "AlbumSort", "AutoRules", "Candidate",
-    "Collision", "ConfigError", "Destination", "Events", "FileChange", "Job", "JobKind", "JobState", "LocalTrack",
+    "Collision", "ConfigError", "Destination", "DiscChoice", "DiscConflict", "Events", "FileChange", "Job", "JobKind", "JobState", "LayoutConflict", "LocalTrack",
     "MMError", "MatchStatus", "NotFound", "Operation", "Page", "Plan", "PlanStale", "Problem", "ProblemKind",
     "ProviderCredit", "ProviderError", "RemoteTrack", "ScorePart", "Settings", "TagChange", "Template",
     "TemplatePreview", "TrackPair", "ValidationError", "configure", "events", "jobs", "journal", "library", "match",
