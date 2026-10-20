@@ -18,16 +18,21 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+ui = ["PySide6"]
 
 [project.scripts]
-discogs-tag = "discogs_tag:main"
-album-m3u = "album_m3u:main"
+discogs-tag = "music_manager.cli.discogs_tag:main"
+album-m3u = "music_manager.cli.album_m3u:main"
 
 [project.urls]
 Homepage = "https://github.com/JimmyWonko/music-manager"
 
-[tool.setuptools]
-py-modules = ["discogs_tag", "album_m3u", "mm_common"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.setuptools.dynamic]
-version = {attr = "mm_common.__version__"}
+version = {attr = "music_manager.__version__"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

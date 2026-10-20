@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Create one .m3u playlist per album in a music library.
+"""album-m3u: create one .m3u playlist per album in a music library.
 
 An album is any folder that directly contains audio files, or a folder
 whose CD1/CD2/Disc 1/... subfolders contain the audio (a multi-disc album).
@@ -37,13 +36,9 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from mm_common import (  # noqa: E402
+from ..fs import audio_in, disc_dirs_with_audio, send_to_trash
+from ..playlists import (
     album_playlist_tracks,
-    send_to_trash,
-    audio_in,
-    disc_dirs_with_audio,
     generated_playlists_for_album,
     is_generated_playlist,
     is_playlist,

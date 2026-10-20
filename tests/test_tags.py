@@ -8,6 +8,9 @@ from mutagen.asf import ASF
 from mutagen.id3 import APIC, COMM, ID3, TSSE, TXXX, UFID
 from mutagen.mp4 import MP4, MP4FreeForm
 
+from music_manager.tags.read import already_tagged
+from music_manager.tags.write import write_tags
+
 ALL = ["mp3", "flac", "m4a", "wav", "aiff", "wma", "ogg", "opus", "wv"]
 ID3_FORMATS = ["mp3", "wav", "aiff"]
 VORBIS_FORMATS = ["flac", "ogg", "opus"]
@@ -31,18 +34,18 @@ def text_of(path, key):
 
 
 @pytest.mark.parametrize("ext", ALL)
-def test_round_trip(dt, sample, meta, ext):
+def test_round_trip(sample, meta, ext):
     path = sample(ext)
-    dt.write_tags(path, meta)
-    assert dt.already_tagged(path) == "123"
+    write_tags(path, meta)
+    assert already_tagged(path) == "123"
     # the file is still valid audio afterwards
     assert MutagenFile(path) is not None
 
 
 @pytest.mark.parametrize("ext", ID3_FORMATS)
-def test_id3_formats_get_id3v24_frames(dt, sample, meta, ext):
+def test_id3_formats_get_id3v24_frames(sample, meta, ext):
     path = sample(ext)
-    dt.write_tags(path, meta)
+    write_tags(path, meta)
     tags = ID3(path) if ext == "mp3" else MutagenFile(path).tags
     assert isinstance(tags, ID3)
     assert tags.version[:2] == (2, 4)
@@ -61,9 +64,9 @@ def test_id3_formats_get_id3v24_frames(dt, sample, meta, ext):
 
 
 @pytest.mark.parametrize("ext", VORBIS_FORMATS)
-def test_vorbis_formats_still_use_vorbis_comments(dt, sample, meta, ext):
+def test_vorbis_formats_still_use_vorbis_comments(sample, meta, ext):
     path = sample(ext)
-    dt.write_tags(path, meta)
+    write_tags(path, meta)
     audio = MutagenFile(path)
     assert not isinstance(audio.tags, ID3)
     for key, want in [("TITLE", "Söng"), ("TRACKNUMBER", "3"), ("TRACKTOTAL", "10"), ("DISCNUMBER", "1"),
@@ -75,9 +78,9 @@ def test_vorbis_formats_still_use_vorbis_comments(dt, sample, meta, ext):
             assert handle.read(3) != b"ID3"
 
 
-def test_wma_uses_asf_attribute_names(dt, sample, meta):
+def test_wma_uses_asf_attribute_names(sample, meta):
     path = sample("wma")
-    dt.write_tags(path, meta)
+    write_tags(path, meta)
     tags = ASF(path).tags
     want = {
         "Title": "Söng", "Author": "Ärtist", "WM/AlbumArtist": "Ärtist", "WM/AlbumTitle": "Albüm",
@@ -90,9 +93,9 @@ def test_wma_uses_asf_attribute_names(dt, sample, meta):
     assert "TITLE" not in tags.keys() and "TRACKNUMBER" not in tags.keys()
 
 
-def test_mp4_writes_original_date_label_catalog_and_ids(dt, sample, meta):
+def test_mp4_writes_original_date_label_catalog_and_ids(sample, meta):
     path = sample("m4a")
-    dt.write_tags(path, meta)
+    write_tags(path, meta)
     tags = MP4(path).tags
     ff = "----:com.apple.iTunes:"
     assert tags[ff + "ORIGINALDATE"][0] == b"1981"
@@ -104,9 +107,9 @@ def test_mp4_writes_original_date_label_catalog_and_ids(dt, sample, meta):
     assert tags["\xa9day"] == ["1999-04"]
 
 
-def test_ape_wavpack(dt, sample, meta):
+def test_ape_wavpack(sample, meta):
     path = sample("wv")
-    dt.write_tags(path, meta)
+    write_tags(path, meta)
     tags = APEv2(path)
     assert str(tags["Track"]) == "3/10" and str(tags["Disc"]) == "1/2"
     assert str(tags["Album Artist"]) == "Ärtist" and str(tags["Year"]) == "1999-04"
@@ -114,7 +117,7 @@ def test_ape_wavpack(dt, sample, meta):
 
 # --- stale tags (bug 5) -----------------------------------------------------
 
-def test_flac_stale_aliases_cleared_but_replaygain_kept(dt, sample, meta):
+def test_flac_stale_aliases_cleared_but_replaygain_kept(sample, meta):
     path = sample("flac")
     audio = MutagenFile(path)
     if audio.tags is None:
@@ -130,7 +133,7 @@ def test_flac_stale_aliases_cleared_but_replaygain_kept(dt, sample, meta):
     audio.tags["MUSICBRAINZ_ALBUMID"] = ["abc"]
     audio.save()
 
-    removed = dt.write_tags(path, dict(meta, master_id=0))
+    removed = write_tags(path, dict(meta, master_id=0))
     tags = MutagenFile(path).tags
     assert "TOTALTRACKS" not in tags and tags["TRACKTOTAL"] == ["10"]
     assert "ALBUM ARTIST" not in tags and tags["ALBUMARTIST"] == ["Ärtist"]
@@ -142,7 +145,7 @@ def test_flac_stale_aliases_cleared_but_replaygain_kept(dt, sample, meta):
     assert {k.upper() for k in removed} >= {"TOTALTRACKS", "ALBUM ARTIST", "ORGANIZATION", "DISCOGS_MASTER_ID"}
 
 
-def test_clear_other_tags_flag(dt, sample, meta):
+def test_clear_other_tags_flag(sample, meta):
     path = sample("flac")
     audio = MutagenFile(path)
     if audio.tags is None:
@@ -152,7 +155,7 @@ def test_clear_other_tags_flag(dt, sample, meta):
                        "MUSICBRAINZ_ALBUMID": "abc", "COMPOSER": "someone"}.items():
         audio.tags[key] = [value]
     audio.save()
-    dt.write_tags(path, meta, clear_other=True)
+    write_tags(path, meta, clear_other=True)
     tags = MutagenFile(path).tags
     for key in ("REPLAYGAIN_ALBUM_GAIN", "R128_TRACK_GAIN", "ACCURATERIPDISCID", "ENCODER", "LYRICS", "ISRC"):
         assert key in tags, key
@@ -161,7 +164,7 @@ def test_clear_other_tags_flag(dt, sample, meta):
     assert tags["TITLE"] == ["Söng"]
 
 
-def test_mp3_stale_frames_and_clear_other(dt, sample, meta):
+def test_mp3_stale_frames_and_clear_other(sample, meta):
     path = sample("mp3")
     tags = ID3()
     tags.add(TXXX(encoding=3, desc="discogs_release_id", text="1"))  # other case
@@ -175,13 +178,13 @@ def test_mp3_stale_frames_and_clear_other(dt, sample, meta):
     tags.add(APIC(encoding=3, mime="image/jpeg", type=3, desc="", data=b"\xff\xd8"))
     tags.save(path)
 
-    dt.write_tags(path, meta)
+    write_tags(path, meta)
     after = ID3(path)
     assert [str(f) for f in after.getall("TXXX") if f.desc.casefold() == "discogs_release_id"] == ["123"]
     assert "TXXX:CATALOG" not in after and str(after["TXXX:CATALOGNUMBER"]) == "CAT1"
     assert "TXXX:MusicBrainz Album Id" in after and "COMM::eng" in after  # kept by default
 
-    dt.write_tags(path, meta, clear_other=True)
+    write_tags(path, meta, clear_other=True)
     after = ID3(path)
     assert "TXXX:MusicBrainz Album Id" not in after and "COMM::eng" not in after
     assert "UFID:http://musicbrainz.org" not in after
@@ -190,7 +193,7 @@ def test_mp3_stale_frames_and_clear_other(dt, sample, meta):
     assert str(after["TIT2"]) == "Söng"
 
 
-def test_mp4_clear_other_keeps_art_and_encoder(dt, sample, meta):
+def test_mp4_clear_other_keeps_art_and_encoder(sample, meta):
     path = sample("m4a")
     audio = MP4(path)
     if audio.tags is None:
@@ -200,39 +203,39 @@ def test_mp4_clear_other_keeps_art_and_encoder(dt, sample, meta):
     audio.tags["----:com.apple.iTunes:replaygain_track_gain"] = [MP4FreeForm(b"-1 dB")]
     audio.tags["----:com.apple.iTunes:MusicBrainz Album Id"] = [MP4FreeForm(b"abc")]
     audio.save()
-    dt.write_tags(path, meta, clear_other=True)
+    write_tags(path, meta, clear_other=True)
     tags = MP4(path).tags
     assert "\xa9cmt" not in tags and "----:com.apple.iTunes:MusicBrainz Album Id" not in tags
     assert tags["\xa9gen"] == ["Rock"]
     assert "\xa9too" in tags and "----:com.apple.iTunes:replaygain_track_gain" in tags
 
 
-def test_retag_to_other_release_drops_release_specific_values(dt, sample, meta):
+def test_retag_to_other_release_drops_release_specific_values(sample, meta):
     path = sample("flac")
-    dt.write_tags(path, meta)
-    dt.write_tags(path, dict(meta, release_id=999, label="", catalognumber="", master_id=0))
+    write_tags(path, meta)
+    write_tags(path, dict(meta, release_id=999, label="", catalognumber="", master_id=0))
     tags = MutagenFile(path).tags
     assert tags["DISCOGS_RELEASE_ID"] == ["999"]
     assert "LABEL" not in tags and "CATALOGNUMBER" not in tags and "DISCOGS_MASTER_ID" not in tags
 
 
-def test_same_release_without_label_keeps_existing_label(dt, sample, meta):
+def test_same_release_without_label_keeps_existing_label(sample, meta):
     path = sample("flac")
-    dt.write_tags(path, meta)
-    dt.write_tags(path, dict(meta, label=""))
+    write_tags(path, meta)
+    write_tags(path, dict(meta, label=""))
     assert MutagenFile(path).tags["LABEL"] == ["Label"]
 
 
 @pytest.mark.parametrize("ext", ALL)
-def test_dry_run_does_not_touch_file(dt, sample, meta, ext):
+def test_dry_run_does_not_touch_file(sample, meta, ext):
     path = sample(ext)
     before = path.read_bytes()
-    dt.write_tags(path, meta, dry_run=True)
+    write_tags(path, meta, dry_run=True)
     assert path.read_bytes() == before
 
 
-def test_unsupported_file_raises(dt, tmp_path, meta):
+def test_unsupported_file_raises(tmp_path, meta):
     path = tmp_path / "broken.flac"
     path.write_bytes(b"not audio at all")
     with pytest.raises((RuntimeError, MutagenError)):
-        dt.write_tags(path, meta)
+        write_tags(path, meta)

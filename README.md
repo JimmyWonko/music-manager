@@ -2,7 +2,8 @@
 
 Utilities for a local music library. `discogs-tag` looks up a Discogs
 release, writes tags, and renames the album into the folder shape below.
-`album-m3u` writes one playlist per album folder. Both use `mm_common.py`.
+`album-m3u` writes one playlist per album folder. Both are thin command-line
+fronts for the `music_manager` package (`src/music_manager/`).
 
 The tool retags files and moves them. Start with `--dry-run` on a copy
 of an album.
@@ -28,9 +29,10 @@ python3 discogs-tag.py --help
 python3 album-m3u --help
 ```
 
-`discogs-tag.py` and `album-m3u` are launchers. The implementation is
-`discogs_tag.py`, `album_m3u.py`, and `mm_common.py`. A symlink to a
-launcher still finds `mm_common.py`.
+`discogs-tag.py` and `album-m3u` are launchers. The implementation is the
+`music_manager` package under `src/` (`music_manager.cli.discogs_tag` and
+`music_manager.cli.album_m3u` for the two commands). A symlink to a
+launcher still finds `src/`.
 
 ## Discogs token
 
@@ -82,6 +84,55 @@ be tagged, nothing is moved. If a move fails partway (disk full, drive
 unplugged), the error lists every file that was moved and where, and
 every file that was not. One album failing never stops the run; failed
 albums are listed at the end.
+
+Multi-disc albums are paired on (disc, track). The disc comes from the
+files' disc number tags first (when they fit the release for the whole
+album), then from `CD1`/`CD2` folders, then from `1-01`-style names. In
+one flat folder whose numbers restart on each disc (`01 One` ... `01
+Four`), files are placed only when the numbering restarts exactly like
+the release's discs and each title picks one of the same-number tracks.
+Otherwise discogs-tag warns, names the files and skips the album without
+writing anything. Single-disc albums are paired as before.
+
+## Check for swapped discs (`--check-disc-swaps`)
+
+Before this fix, re-running discogs-tag on its own flat `2CD` folder
+swapped the disc-1 and disc-2 tracks that share a number. The tags still
+agree with Discogs, so only the audio shows it. This check compares each
+file's real length with the Discogs length at its tagged disc and track.
+It flags an album when giving the same-number files to the other disc
+fits clearly better (by at least 5 s per track, `SWAP_MARGIN_S`), and
+prints the evidence for each track. As secondary evidence it also reports
+title tags that don't match the release, and files whose last apply
+journal shows them moving to another disc.
+
+It also checks every file's disc folder (`CD1/`, `Disc 2/`) against its
+disc tag (DISCNUMBER), and uses the album's `.cue` and `.m3u` files as the
+tiebreaker: the one that lists the file (by its FILE entry or file name,
+else by track number and title) gives its disc from a `REM DISCNUMBER`
+line, its own `CDn` folder, or a "CD2" in its name. Files whose sources
+disagree make the album **DISAGREE**, with a line per file such as
+
+```text
+CD2/13 Mason Jar.flac: folder CD2 (disc 2), DISCNUMBER 1, cue/m3u disc 1 (Anthology CD1.cue, Anthology CD1.m3u) -> the folder is wrong
+```
+
+The length check can't see this (each file's audio and tags still agree).
+Move the files into the folder of their disc, or apply from a flat copy.
+
+```sh
+discogs-tag --check-disc-swaps "/path/to/Music"
+discogs-tag --check-disc-swaps --report ~/disc-swaps.txt "/path/to/Music"
+```
+
+It is strictly read-only. Audio files are only opened for reading;
+nothing is tagged, moved, indexed or journaled. The Discogs cache is read
+but never written unless you pass `--allow-cache-write`. Requests are
+rate-limited like every other Discogs call. Without a token, only cached
+releases (under 6 hours old) are used. `--report FILE` also writes the
+report to FILE, which must not exist yet. Exit status: 0 = nothing
+flagged, 3 = album(s) flagged (likely swapped, mixed or disagree), 1 = could not run. Fix a flagged album
+with `--undo-journal` on the apply that swapped it, or by re-tagging it.
 
 ## Where files go
 
@@ -223,6 +274,10 @@ fresh one is written in the new folder. Hand-made playlists are moved as they ar
 | `--normalize-folders` | Rename album folders under `path` to the current naming rule. Preview unless `--apply`. |
 | `--undo-journal FILE` | Reverse everything recorded in a journal (an apply or `--normalize-folders`). Preview unless `--apply`. |
 | `--apply` | Really make the change (only with `--normalize-folders` or `--undo-journal`). |
+| `--check-disc-swaps` | Read-only report of multi-disc albums under `path` whose same-number tracks look swapped between discs, or whose disc folders disagree with the files' disc tags or cue/m3u. |
+| `--report FILE` | With `--check-disc-swaps`: also write the report to FILE (must not exist). |
+| `--allow-cache-write` | With `--check-disc-swaps`: allow Discogs responses to be cached (default: cache is only read). |
+| `--journal-dir DIR` | With `--check-disc-swaps`: the apply journals to read (default: the discogs-tag journal folder). |
 | `-h`, `--help` | Show this help. |
 
 Without a TTY, pass `--release-id` or `--auto`. Otherwise the album is
@@ -291,6 +346,32 @@ files that no longer exist is reported so you can review it.
 of date (renamed or added tracks), and removes generated playlists that a
 newer one replaces (sent to the trash, never deleted outright: old per-disc playlists, a playlist named after the
 album folder's previous name).
+
+## Python API (`music_manager.service`)
+
+A desktop app (or any other front end) drives the same engine through
+`music_manager.service`, described in `API-CONTRACT.md`: `library`
+(scan and browse), `match` (find, review and choose releases), `plan`
+(a read-only preview of every move and tag change, then apply),
+`journal` (history and undo), `templates`, `settings`, `jobs` and the
+`events` object (Qt signals when PySide6 is installed, plain callbacks
+otherwise). Slow calls return a job id and run on one worker thread.
+`plan.build` never calls Discogs: when a chosen release is missing or
+older than Discogs' 6-hour caching limit, the plan marks that album
+`release_not_fetched`, downloads the release in a background job
+(`Plan.fetch_job`) and you build the plan again when the job is done.
+Requests to Discogs are paced to at most 55 a minute and wait out
+`Retry-After` on HTTP 429.
+
+The service keeps its settings in `$XDG_CONFIG_HOME/music-manager/config.toml`
+and its index and journals under
+`$XDG_DATA_HOME/music-manager/`. It has no built-in library path: set
+`library_roots` with `settings.set` first. Journals written by
+`discogs-tag` show up in its history too.
+`service.configure(data_dir, config_dir)` moves everything else it would
+touch under `~` (discogs-tag journals, the Discogs cache, the trash and the
+Discogs token) into those two folders, so an embedding app never writes to
+the home folder.
 
 ## Tests
 

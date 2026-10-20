@@ -7,8 +7,10 @@ import sys
 
 from conftest import REPO
 
+from music_manager.providers.discogs import save_token
 
-def test_token_never_world_readable(dt, tmp_path, monkeypatch):
+
+def test_token_never_world_readable(tmp_path, monkeypatch):
     path = tmp_path / "cfg" / "token"
     old = os.umask(0o022)
     seen = {}
@@ -18,9 +20,9 @@ def test_token_never_world_readable(dt, tmp_path, monkeypatch):
         seen["mode"] = stat.S_IMODE(os.stat(src).st_mode)
         return real_replace(src, dst)
 
-    monkeypatch.setattr(dt.os, "replace", spy)
+    monkeypatch.setattr(os, "replace", spy)
     try:
-        dt.save_token("  secret  ", path)
+        save_token("  secret  ", path)
     finally:
         os.umask(old)
     assert seen["mode"] == 0o600  # already private before it got its real name
@@ -30,7 +32,7 @@ def test_token_never_world_readable(dt, tmp_path, monkeypatch):
 
     # replacing an existing, too-open token file also ends at 0600
     path.chmod(0o644)
-    dt.save_token("new", path)
+    save_token("new", path)
     assert stat.S_IMODE(path.stat().st_mode) == 0o600 and path.read_text() == "new\n"
 
 

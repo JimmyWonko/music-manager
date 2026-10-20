@@ -7,6 +7,10 @@ import sys
 
 from conftest import REPO
 
+import music_manager
+from music_manager.cli.discogs_tag import default_dest
+from music_manager.providers.discogs import USER_AGENT
+
 
 def _env(**extra):
     env = {k: v for k, v in os.environ.items() if k != "DEFAULT_MUSIC"}
@@ -15,39 +19,35 @@ def _env(**extra):
 
 
 def test_no_hardcoded_library_paths():
-    for name in (
-        "discogs-tag.py",
-        "discogs_tag.py",
-        "album-m3u",
-        "album_m3u.py",
-        "mm_common.py",
-        "README.md",
-    ):
+    names = ["discogs-tag.py", "album-m3u", "README.md"]
+    names += [str(p.relative_to(REPO)) for p in sorted((REPO / "src" / "music_manager").rglob("*.py"))]
+    assert len(names) > 10
+    for name in names:
         assert "/run/media/" not in (REPO / name).read_text(encoding="utf-8"), name
 
 
-def test_user_agent_names_the_app(dt):
-    assert dt.USER_AGENT.startswith(f"music-manager/{dt.mm_common.__version__} ")
-    assert "https://github.com/JimmyWonko/music-manager" in dt.USER_AGENT
-    assert "xen" not in dt.USER_AGENT.casefold()
+def test_user_agent_names_the_app():
+    assert USER_AGENT.startswith(f"music-manager/{music_manager.__version__} ")
+    assert "https://github.com/JimmyWonko/music-manager" in USER_AGENT
+    assert "xen" not in USER_AGENT.casefold()
 
 
-def test_default_dest_none_without_library(dt, tmp_path):
+def test_default_dest_none_without_library(tmp_path):
     missing = tmp_path / "not-there"
-    assert dt.default_dest(tmp_path / "Artist - Album", library=missing) is None
+    assert default_dest(tmp_path / "Artist - Album", library=missing) is None
 
 
-def test_default_dest_uses_configured_library(dt, tmp_path):
+def test_default_dest_uses_configured_library(tmp_path):
     lib = tmp_path / "Library"
     lib.mkdir()
-    assert dt.default_dest(tmp_path / "in" / "Artist - Album", library=lib) == lib.resolve()
+    assert default_dest(tmp_path / "in" / "Artist - Album", library=lib) == lib.resolve()
 
 
-def test_default_dest_featuring_wins(dt, tmp_path):
+def test_default_dest_featuring_wins(tmp_path):
     lib = tmp_path / "Library"
     lib.mkdir()
     album = tmp_path / "Other" / "Aesop Rock" / "Featuring" / "Some Album"
-    assert dt.default_dest(album, library=lib) == (tmp_path / "Other" / "Aesop Rock" / "Featuring").resolve()
+    assert default_dest(album, library=lib) == (tmp_path / "Other" / "Aesop Rock" / "Featuring").resolve()
 
 
 def test_discogs_tag_refuses_without_dest(tmp_path, sample):
