@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import bisect
+import builtins
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,7 @@ from ._types import (
     FileChange,
     Job,
     JobKind,
+    ManualPair,
     MatchStatus,
     MMError,
     NotFound,
@@ -345,7 +347,23 @@ def _restore_album(st: State, album_id: int, original: Path) -> None:
         _reindex(st, album_id, root, original, MatchStatus.NEEDS_REVIEW)
     else:
         set_status(album_id, MatchStatus.NEEDS_REVIEW)
-    events.album_changed.emit(album_id)
+    if st.index.one("SELECT id FROM albums WHERE id = ?", (album_id,)) is not None:  # an adopted cluster
+        events.album_changed.emit(album_id)  # undone into its folder is removed (album_removed)
 
 
-__all__ = ["list", "undo", "undo_plan"]
+def manual_pairs(operation_id: int) -> builtins.list[ManualPair]:
+    """The manual pairs (match.pin) an apply used, from its journal, in journal order. [] for other operations."""
+    st = state()
+    row = operation_row(int(operation_id), st)
+    if not row["journal"] or not Path(row["journal"]).is_file():
+        return []
+    entries = journal_mod.read_journal(Path(row["journal"]), log=lambda _line: None)
+    starts, groups, _origins = _groups(st, int(operation_id), entries)
+    out = []
+    for g, i in enumerate(starts):
+        for m in entries[i].get("manual") or []:
+            out.append(ManualPair(groups[g][0], Path(m["path"]), str(m["position"]), bool(m.get("override_hold"))))
+    return out
+
+
+__all__ = ["list", "manual_pairs", "undo", "undo_plan"]

@@ -55,6 +55,7 @@ class JobKind(Enum):
     FETCH_CANDIDATES = "fetch_candidates"
     APPLY = "apply"
     UNDO = "undo"
+    CLUSTER = "cluster"  # library.scan_clusters
 
 
 class JobState(Enum):
@@ -109,6 +110,7 @@ class ProblemKind(StrEnum):
     LAYOUT_AMBIGUOUS = "layout_ambiguous"  # loose audio next to disc folders / other albums; never overridden
     DISC_FOLDER_MISMATCH = "disc_folder_mismatch"  # destination puts tracks in another disc's CD folder
     DISC_TRACK_COUNT = "disc_track_count"  # a disc's file and track counts differ, titles don't settle it (paths)
+    PIN_CONFLICT = "pin_conflict"  # a manual pin (match.pin) can't be used as it is (paths: its files)
 
 
 # --- jobs ---------------------------------------------------------------------
@@ -142,6 +144,22 @@ class ProviderCredit:
 DISCOGS_CREDIT = ProviderCredit("Discogs", "Data provided by Discogs", "https://www.discogs.com/")
 
 
+PinConflictReason = Literal["stale", "unknown_position", "duplicate_position", "override_hold_required",
+                            "disc_folder_mismatch"]
+
+
+@dataclass(frozen=True)
+class PinConflict:
+    """Why one manual pin (match.pin) is not used."""
+    path: Path
+    position: str  # as pinned
+    # stale: the file changed or left the album since it was pinned; unknown_position: not on the release;
+    # duplicate_position: another pin names the same track; override_hold_required: the engine holds this
+    # file (disc_ambiguous / disc_track_count); disc_folder_mismatch: the file sits in another disc's CD
+    # folder. The last two are used with override_hold=True.
+    reason: PinConflictReason
+
+
 @dataclass(frozen=True)
 class Problem:
     kind: ProblemKind
@@ -155,6 +173,8 @@ class Problem:
     loose_files: list[Path] = field(default_factory=list)  # the audio files directly in the album folder
     # DISC_FOLDER_MISMATCH: one per track the destination puts into another disc's CD folder (same files as paths).
     folder_mismatches: list[DiscFolderMismatch] = field(default_factory=list)
+    # PIN_CONFLICT: one per refused pin (the same files as paths).
+    pin_conflicts: list[PinConflict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -190,6 +210,7 @@ class AlbumRow:
     added_at: datetime  # when a scan first saw this folder (timezone-aware UTC)
     held_for: list[Problem] = field(default_factory=list)  # empty unless status is HELD
     loose_tracks: bool = False  # loose files next to subfolders with audio: artist = folder name, title ""
+    cluster_id: str | None = None  # set when this album is an adopted cluster (library.adopt_cluster)
 
 
 @dataclass(frozen=True)
@@ -222,7 +243,7 @@ class RemoteTrack:
 
 @dataclass(frozen=True)
 class TrackPair:
-    method: Literal["number", "side", "title", "position", "unmatched"]
+    method: Literal["number", "side", "title", "position", "manual", "unmatched"]  # manual: match.pin
     local: LocalTrack | None  # None: Discogs track with no local file
     remote: RemoteTrack | None  # None: local file with no Discogs track
     title_similarity: float
@@ -269,6 +290,78 @@ class Destination:
     problems: list[Problem]
 
 
+# --- clusters and the album-match view -------------------------------------------
+
+@dataclass(frozen=True)
+class ClusterFile:
+    path: Path
+    disc: int  # DISCNUMBER tag, else CD folder / "2-01" name, else 1
+    number: int | None
+    title: str
+    duration_s: float | None
+    album: str  # the file's own album tag ("" if none); what it was clustered by
+    artist: str  # its albumartist tag, else artist tag
+
+
+@dataclass(frozen=True)
+class Cluster:
+    id: str  # "cl-" + hash of its files: stable while the set of files is the same
+    artist: str  # most common (album)artist of its files
+    title: str  # most common album tag (folder name for files without one)
+    folder: Path  # the folder holding the files (their common parent)
+    files: list[ClusterFile]  # path order
+    disc_count: int  # distinct disc numbers
+    album_id: int | None = None  # the album row once adopted (library.adopt_cluster), else None
+    kind: str = "tag_cluster"  # or "unclustered": files moved out of every cluster (move_to_cluster None)
+
+
+@dataclass(frozen=True)
+class ClusterRow:
+    """One line of match.clusters: a folder album, a tag cluster (adopted or not), or unclustered files."""
+    id: str  # "album-<album id>" for a folder album, else the Cluster id ("cl-..." / "un-...")
+    kind: Literal["folder", "tag_cluster", "unclustered"]
+    artist: str
+    title: str
+    file_count: int
+    status: MatchStatus | None  # None for a cluster that is not adopted yet
+    album_id: int | None
+    loose_tracks: bool  # its files are loose files of a folder that also holds albums
+    folder: Path
+
+
+@dataclass(frozen=True)
+class Pin:
+    """A manual pair (drag-and-drop): this file is this release track."""
+    path: Path
+    position: str  # the release track's position as Discogs lists it ("4", "B2", "2-3")
+    release_id: int  # pins apply to this release only
+    override_hold: bool  # the user accepted overriding a disc hold for this file
+    stale: bool  # the file changed since it was pinned: ignored (a PIN_CONFLICT) until pinned again
+
+
+@dataclass(frozen=True)
+class ManualPair:
+    """A manual pair recorded in an apply journal (journal.manual_pairs)."""
+    album_id: int
+    path: Path  # the file before the apply
+    position: str
+    override_hold: bool
+
+
+@dataclass(frozen=True)
+class MatchView:
+    album_id: int | None  # None: a cluster not adopted yet (no candidates, every file unmatched)
+    cluster_id: str | None
+    release_id: int | None  # the release shown: asked for, else chosen, else best candidate
+    fetched: bool  # its full tracklist is known (pairs are empty until then)
+    candidates: list[Candidate]  # best first, as match.candidates
+    pairs: list[TrackPair]  # every pairing, as Candidate.alignment (local file -> release track)
+    unmatched_files: list[LocalTrack]  # local files no release track was paired with
+    unmatched_tracks: list[RemoteTrack]  # release tracks with no local file
+    problems: list[Problem]  # what plan.build would hold this album for with this release
+    pins: list[Pin] = field(default_factory=list)  # the album's pins for this release
+
+
 # --- plans ----------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -285,6 +378,7 @@ class FileChange:
     path_after: Path
     tags: list[TagChange]
     skip_reason: str | None = None  # None means the step runs
+    pinned: bool = False  # a track paired by the user (match.pin)
 
 
 @dataclass(frozen=True)
