@@ -176,6 +176,12 @@ def disc_sources(album: AlbumFolder, listings: list[SidecarListing] | None = Non
             if number is not None and title:
                 hits = [s for s in listings
                         if any(n == number and similar(title, t) >= TITLE_MIN for n, t in s.tracks)]
+        # A cue's FILE entries and an m3u's lines are relative to the sidecar's folder: when the
+        # sidecar beside the file lists it, the same name in another disc folder's sidecar is
+        # that disc's own file ("05 - Blue Umbrella.flac" on both discs), not this one.
+        beside = [s for s in hits if s.path.parent == path.parent]
+        if beside:
+            hits = beside
         discs = tuple(sorted({s.disc for s in hits if s.disc is not None}))
         hits.sort(key=lambda s: (s.path.suffix.lower() != ".cue", str(s.path)))
         out.append(DiscSources(path, _folder_disc(path, album.path), read_disc_number(path), discs,

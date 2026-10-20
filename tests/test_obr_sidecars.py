@@ -8,7 +8,6 @@ sources_disagree.
 
 from __future__ import annotations
 
-import pytest
 from obr_fixtures import make_album, release
 
 from music_manager.discsources import disagreements
@@ -17,7 +16,6 @@ from music_manager.match import align_tracks
 from music_manager.providers.discogs import flatten_tracklist, release_artists
 
 
-@pytest.mark.xfail(strict=True, reason="sidecar names are matched without their folder")
 def test_same_file_name_on_both_discs_is_listed_by_its_own_discs_sidecars(tmp_path):
     make_album(tmp_path / "Album")
     [album] = collect_albums(tmp_path)
