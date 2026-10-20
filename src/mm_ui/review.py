@@ -4,12 +4,12 @@ from __future__ import annotations
 import html
 from pathlib import Path
 
-from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QAbstractListModel, QModelIndex, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut, QColor, QBrush
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QListView, QListWidget, QListWidgetItem, QProgressBar, QProgressDialog, QMainWindow, QMessageBox, QPushButton, QSplitter, QTableWidget,
-    QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ._meta import DISPLAY_NAME
@@ -162,6 +162,55 @@ class AlbumListModel(QAbstractListModel):
                 self.dataChanged.emit(self.index(i), self.index(i))
 
 
+class _PreviewLabel(QLabel):
+    """The "After apply" text: wraps, and tells its scroll area to refit whenever the text changes."""
+
+    def __init__(self):
+        super().__init__()
+        self.setWordWrap(True); self.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+
+    def setText(self, text):
+        super().setText(text); self._refit()
+
+    def clear(self):
+        super().clear(); self._refit()
+
+    def _refit(self):
+        p = self.parentWidget()
+        while p is not None and not isinstance(p, _FitScroll):
+            p = p.parentWidget()
+        if p is not None:
+            p.updateGeometry()
+
+
+class _FitScroll(QScrollArea):
+    """As tall as its text up to MAX_H, then scrolls; never makes the window wider than the screen."""
+    MAX_H = 260
+
+    def __init__(self, label):
+        super().__init__()
+        self.setWidgetResizable(True); self.setFrameShape(QFrame.NoFrame); self.setWidget(label)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+
+    def _height(self):
+        w = self.widget()
+        width = max(self.viewport().width(), 200)
+        h = w.heightForWidth(width) if w.hasHeightForWidth() else w.sizeHint().height()
+        return min(self.MAX_H, max(h, w.minimumSizeHint().height()) + 2)
+
+    def sizeHint(self):
+        return QSize(super().sizeHint().width(), self._height())
+
+    def minimumSizeHint(self):
+        return QSize(100, self._height())
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self.height() != self._height():
+            self.updateGeometry()
+
+
 class ReviewWindow(QMainWindow):
     plan_flow_done = Signal()        # open_apply finished (dialog closed / apply started / build failed)
     def __init__(self, svc: Backend | None = None):
@@ -208,7 +257,7 @@ class ReviewWindow(QMainWindow):
         self.table.verticalHeader().hide(); self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.loading = QLabel("Fetching full release from Discogs… track alignment and artwork appear when it's ready.")
         self.loading.setStyleSheet("color:#8a6d00;background:#fff6d6;padding:6px;border-radius:4px")
-        self.preview = QLabel(); self.preview.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.preview = _PreviewLabel(); self.preview.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._preview_css = "font-family:monospace;background:#f3f3f3;padding:6px;border-radius:4px;"
         self.preview.setStyleSheet(self._preview_css)
         self.skip_btn = QPushButton("Skip  (S)")
@@ -227,7 +276,9 @@ class ReviewWindow(QMainWindow):
         info_row.addWidget(self.artwork); info_row.addLayout(info_box, 1)
         dl.addLayout(head); dl.addLayout(info_row)
         dl.addWidget(self.loading); dl.addWidget(self.table, 1)
-        dl.addWidget(QLabel("After apply:")); dl.addWidget(self.preview)
+        # long engine messages (disc conflicts, folder mismatches) scroll here instead of widening the window
+        self.preview_scroll = _FitScroll(self.preview)
+        dl.addWidget(QLabel("After apply:")); dl.addWidget(self.preview_scroll)
         self.naming_btn = QPushButton("Change naming template…")   # shown for disc_folder_mismatch
         self.naming_btn.setToolTip("The naming template puts some tracks into another disc's CD folder")
         self.naming_btn.clicked.connect(self.show_naming)
@@ -364,7 +415,7 @@ class ReviewWindow(QMainWindow):
             for pair in c.alignment:
                 r = self.table.rowCount(); self.table.insertRow(r)
                 lt, rt = pair.local, pair.remote
-                vals = [str(lt.number) if lt else "", lt.title if lt else "—", mmss(lt.duration_s) if lt else "",
+                vals = [(str(lt.number) if lt.number is not None else "") if lt else "", lt.title if lt else "—", mmss(lt.duration_s) if lt else "",
                         rt.position if rt else "", rt.title if rt else "—", mmss(rt.duration_s) if rt else "",
                         "✓" if pair.ok else f"✗ {pair.duration_delta_s:+.0f}s" if pair.duration_delta_s else "✗",
                         METHOD_TEXT.get(str(getattr(pair, "method", "")), str(getattr(pair, "method", "")))]
@@ -454,7 +505,7 @@ class ReviewWindow(QMainWindow):
     def fill_local_only(self, album):
         for t in album.tracks:
             r = self.table.rowCount(); self.table.insertRow(r)
-            for col, v in enumerate([str(t.number), t.title, mmss(t.duration_s), "", "…", "", "", ""]):
+            for col, v in enumerate([str(t.number) if t.number is not None else "", t.title, mmss(t.duration_s), "", "…", "", "", ""]):
                 self.table.setItem(r, col, QTableWidgetItem(v))
 
     # ---------------------------------------------------------------- actions
@@ -738,6 +789,8 @@ def _rel_to(path, folder) -> str:
 def _fit_list_height(lw: QListWidget, cap: int) -> None:
     """A QListWidget only as tall as its items (up to cap), so two held albums don't leave a white box."""
     h = sum(lw.sizeHintForRow(i) for i in range(lw.count())) + 2 * lw.frameWidth() + 4
+    if lw.sizeHintForColumn(0) > lw.width() - 2 * lw.frameWidth():     # long lines: leave room for the scrollbar
+        h += lw.horizontalScrollBar().sizeHint().height()
     lw.setFixedHeight(max(min(h, cap), 2 * lw.frameWidth() + lw.fontMetrics().height() + 8))
 
 
@@ -854,7 +907,7 @@ class ApplyDialog(QDialog):
                 it.setForeground(QBrush(QColor("#a33")))
                 self.problem_list.addItem(it)
             lay.addWidget(self.problem_label); lay.addWidget(self.problem_list)
-            _fit_list_height(self.problem_list, 170)
+            _fit_list_height(self.problem_list, 300)   # one disc conflict alone is ~9 lines
         else:
             self.problem_label.hide(); self.problem_list.hide()
         # releases still downloading / failed to download (apply): left out, status unchanged

@@ -333,3 +333,13 @@ def test_review_shows_auto_score_when_it_differs(fake, qtbot):
     w.pick_candidate(next(i for i, c in enumerate(cands) if c.release_id == c0.release_id))
     assert f"auto {c0.auto_score:.0%}" in w.cand_title.text()
     assert "of the score" in w.breakdown.text() and "track count" in w.breakdown.text()
+
+
+def test_long_after_apply_text_never_widens_the_review_window(fake, qtbot):
+    """Long engine messages (disc conflicts, folder mismatches) wrap/scroll in the preview; the window stays
+    narrower than a 1280px screen (it used to grow to ~1800px)."""
+    from mm_ui.review import ReviewWindow
+    w = ReviewWindow(fake); qtbot.addWidget(w)
+    w.preview.setText("⚠ " + "a long sentence from the engine " * 40 + "\n    Files (1):\n      " + "x" * 300)
+    assert w.minimumSizeHint().width() < 1280
+    assert 0 < w.preview_scroll.sizeHint().height() <= w.preview_scroll.MAX_H
