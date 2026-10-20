@@ -306,6 +306,7 @@ class AlbumLayout:
     ambiguous: list[Path] = field(default_factory=list)  # refused: disc unknown (also in unmatched)
     disc_conflicts: list[DiscConflict] = field(default_factory=list)  # why each of ambiguous was refused
     count_holds: list[TrackCountHold] = field(default_factory=list)  # refused: discs whose counts differ
+    pin_overrides: set[Path] = field(default_factory=set)  # manual pairs the user let override a hold
 
 
 def layout_album(
@@ -321,6 +322,7 @@ def layout_album(
     log: Callable[[str], None] = print,
     title_match_min: float = TITLE_MATCH_MIN,
     disc_folders: bool = True,
+    pins: dict[Path, int] | None = None,
 ) -> AlbumLayout:
     """Plan one album's apply: where it goes, every file's tags and destination. Read-only.
 
@@ -332,6 +334,7 @@ def layout_album(
     per-disc folder of target_dir (see disc_folder_names), unless the file name already has a
     folder or target_dir is itself a CD1/Disc 2 folder. False (a template with %discnumber%)
     keeps whatever the namer says.
+    pins: the user's manual pairs, file -> index into dtracks (see align_tracks_detailed).
     """
     info = release_info(release, dtracks, original_year)
     if target_dir is None:
@@ -342,7 +345,7 @@ def layout_album(
     if check:
         validate_layout(album, dest_root, target_dir)
 
-    pairs, legacy, conflicts, holds = align_tracks_detailed(album, dtracks, title_match_min)
+    pairs, legacy, conflicts, holds = align_tracks_detailed(album, dtracks, title_match_min, pins)
     if legacy:
         log("  note  these files use the old vinyl numbering (B1 = 21); they are renumbered 1..N")
     ambiguous = ambiguous_disc_files(pairs)
@@ -531,7 +534,11 @@ def execute_layout(
         if journal is None:
             journal = Journal("apply", journal_dir)
         journal.write(action="start", command="apply", album=str(album.path), dest=str(target_dir),
-                      release_id=layout.release_id, artist=layout.artist, title=layout.title)
+                      release_id=layout.release_id, artist=layout.artist, title=layout.title,
+                      **({"manual": manual} if (manual := [
+                          {"path": str(src), "position": dt.position or f"{dt.disc}-{dt.number}",
+                           "pinned": True, "override_hold": src in layout.pin_overrides}
+                          for src, dt, how in layout.pairs if how == "manual" and dt is not None]) else {}))
     else:
         journal = None
     tagged: list[Path] = []

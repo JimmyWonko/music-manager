@@ -125,7 +125,7 @@ def _file_changes(t: AlbumTarget, clear_other: bool, warnings: list[str]) -> lis
     assert layout is not None
     changes: list[FileChange] = []
     by_source = {item.source: item for item in layout.tracks}
-    for local, _dt, _method in layout.pairs:
+    for local, _dt, method in layout.pairs:
         item = by_source.get(local)
         if item is None:
             changes.append(FileChange("track", local, local, [],
@@ -136,7 +136,7 @@ def _file_changes(t: AlbumTarget, clear_other: bool, warnings: list[str]) -> lis
         except Exception as exc:  # noqa: BLE001 - unreadable file: the apply will report it
             tags = []
             warnings.append(f"cannot read the tags of {item.source}: {exc}")
-        changes.append(FileChange("track", item.source, item.dest, tags))
+        changes.append(FileChange("track", item.source, item.dest, tags, pinned=method == "manual"))
     for item in layout.moves:
         changes.append(FileChange("extra", item.source, item.dest, []))
     for old in layout.old_playlists:
@@ -277,6 +277,9 @@ def build(album_ids: list[int], template: str | None = None,
                 steps += 1
                 if dest_dev is not None and _device(change.path_before) != dest_dev:
                     bytes_to_copy += _size(change.path_before)
+        if t.layout is not None and t.layout.pin_overrides:
+            warnings.append(f"{len(t.layout.pin_overrides)} manual pair(s) of {t.album.path.name} override a disc hold "
+                            "(match.pin override_hold=True)")
         cover_url = None
         if cfg.save_cover_art:
             url, _thumb = _primary_image(t.release)
@@ -445,6 +448,8 @@ def apply(plan_id: int) -> Job:
                 moved += len(done)
                 applied.append(r)
                 _reindex(st, ap.album_id, t.root, t.target, MatchStatus.APPLIED, chosen_release=ap.release_id)
+                with st.index.tx() as conn:  # the pins are used up: the journal keeps them (journal.manual_pairs)
+                    conn.execute("DELETE FROM pins WHERE album_id = ?", (ap.album_id,))
         finally:
             if journal is not None:
                 journal.close()

@@ -75,12 +75,14 @@ class Item:
     albumartist: str
     artist: str
     folder_name: str = ""
+    forced: str = ""  # a group key (FileCluster.key) the user moved this file to; "" = by its tags
 
 
 class FileCluster:
     """Picard's FileCluster: the files of one cluster, with artist and title chosen by vote."""
 
-    def __init__(self):
+    def __init__(self, key: str = ""):
+        self.key = key  # "<album token>|<album-artist token>": stable while the album tags are
         self.items: list[Item] = []
         self._artist_counts: Counter = Counter()
         self._artists: defaultdict = defaultdict(Counter)
@@ -111,22 +113,33 @@ def cluster(items: list[Item]) -> list[FileCluster]:
     no album tag uses its folder name. Files with neither are left out. Clusters come back
     in first-seen order.
     """
-    groups: dict[tuple[str, str], FileCluster] = {}
-    by_album: dict[str, tuple[str, str]] = {}
+    groups: dict[str, FileCluster] = {}
+    by_album: dict[str, str] = {}
     pending: list[tuple[str, str, str, Item]] = []
+    forced: list[tuple[str, str, str, Item]] = []
     for item in items:
         album = item.album.strip() or item.folder_name.strip()
         token = album_token(album)
+        artist = item.albumartist.strip() or item.artist.strip() or VARIOUS_ARTISTS
+        if item.forced:
+            forced.append((item.forced, album, artist, item))
+            continue
         if not token:
             continue
         if item.albumartist.strip():
-            key = (token, tokenize(item.albumartist))
-            groups.setdefault(key, FileCluster()).add(album, item.albumartist.strip(), item)
+            key = f"{token}|{tokenize(item.albumartist)}"
+            groups.setdefault(key, FileCluster(key)).add(album, item.albumartist.strip(), item)
             by_album.setdefault(token, key)
         else:
             pending.append((token, album, item.artist.strip(), item))
     for token, album, artist, item in pending:
-        key = by_album.get(token) or (token, "")
+        key = by_album.get(token) or f"{token}|"
         by_album.setdefault(token, key)
-        groups.setdefault(key, FileCluster()).add(album, artist or VARIOUS_ARTISTS, item)
+        groups.setdefault(key, FileCluster(key)).add(album, artist or VARIOUS_ARTISTS, item)
+    for key, album, artist, item in forced:  # moved by the user: joins that group whatever its tags,
+        group = groups.setdefault(key, FileCluster(key))  # and does not rename it
+        if group.items:
+            group.items.append(item)
+        else:
+            group.add(album, artist, item)
     return list(groups.values())

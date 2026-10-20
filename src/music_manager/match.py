@@ -365,22 +365,28 @@ def _count_guard(info, chosen: list[int | None], method: list[str], dtracks: lis
                     medleys.append((info[k][0], tuple(dtracks[i].position or f"{d}-{dtracks[i].number}"
                                                       for i in hit)))
                     break
+        manual = {k for k in files_d if method[k] == "manual"}  # the user's pairs: kept, count as agreeing
         if not medleys:
-            paired = [k for k in files_d if chosen[k] is not None]
+            paired = [k for k in files_d if chosen[k] is not None and k not in manual]
             if all(_title_score(titles[k], dtracks[chosen[k]].title) >= title_match_min for k in paired):
                 continue  # every pair's title agrees: nothing was shifted
-            good = {k: [i for i in tracks_d if _title_score(titles[k], dtracks[i].title) >= title_match_min]
-                    for k in files_d}
+            free_d = [i for i in tracks_d if all(chosen[m] != i for m in manual)]
+            rest = [k for k in files_d if k not in manual]
+            good = {k: [i for i in free_d if _title_score(titles[k], dtracks[i].title) >= title_match_min]
+                    for k in rest}
             picks = [g[0] for g in good.values() if len(g) == 1]
-            if len(picks) == len(files_d) and len(set(picks)) == len(picks):
-                for k in files_d:
+            if len(picks) == len(rest) and len(set(picks)) == len(picks):
+                for k in rest:
                     chosen[k] = good[k][0]
                     method[k] = "title"
                 continue
         for k in files_d:
+            if k in manual:
+                continue
             chosen[k] = None
             method[k] = "track_count"
-        holds.append(TrackCountHold(d, len(files_d), len(tracks_d), tuple(info[k][0] for k in files_d),
+        holds.append(TrackCountHold(d, len(files_d), len(tracks_d), tuple(info[k][0] for k in files_d
+                                                                          if k not in manual),
                                     tuple(medleys)))
     return holds
 
@@ -402,7 +408,8 @@ def align_tracks_explained(
 
 
 def align_tracks_detailed(
-    album: AlbumFolder, dtracks: list[DiscogsTrack], title_match_min: float = TITLE_MATCH_MIN
+    album: AlbumFolder, dtracks: list[DiscogsTrack], title_match_min: float = TITLE_MATCH_MIN,
+    pins: dict[Path, int] | None = None,
 ) -> tuple[list[tuple[Path, DiscogsTrack | None, str]], bool, list[DiscConflict], list[TrackCountHold]]:
     """Pair local files with Discogs tracks, saying how each pair was made.
 
@@ -438,6 +445,10 @@ def align_tracks_detailed(
        paired (method "track_count") and the disc is a TrackCountHold. A file
        whose title is several consecutive tracks joined (a medley) always holds
        its disc. Numbers or positions never shift titles onto other files.
+
+    pins: file -> index into dtracks, decided by the user (method "manual"). They are placed
+    first, never refused or moved by a later step, and count as agreeing in step 5; the
+    caller validates them (see service match.pin).
 
     A single-disc release is paired by steps 1-4 as before (no disc tags are
     read); step 5 applies to it too.
@@ -488,11 +499,18 @@ def align_tracks_detailed(
     method: list[str] = ["unmatched"] * len(info)
     refused: set[int] = set()
     conflicts: dict[int, DiscConflict] = {}
+    pinned: set[int] = set()
+    for k, (local, *_rest) in enumerate(info):
+        i = (pins or {}).get(local)
+        if i is not None and 0 <= i < len(dtracks) and i not in used:
+            chosen[k], method[k] = i, "manual"
+            used.add(i)
+            pinned.add(k)
     if len(discs) > 1:
         # A file whose CD folder, disc tag and cue/m3u don't all agree is never paired.
         index = {local: k for k, (local, *_rest) in enumerate(info)}
         for src in disc_sources(album):
-            if src.agree or src.path not in index:
+            if src.agree or src.path not in index or index[src.path] in pinned:
                 continue
             k = index[src.path]
             local, _disc_hint, number, _side_index = info[k]
@@ -508,7 +526,8 @@ def align_tracks_detailed(
             info = [(local, tag_hints.get(k, disc_hint), number, side_index)
                     for k, (local, disc_hint, number, side_index) in enumerate(info)]
         loose = [k for k, (_l, disc_hint, number, side_index) in enumerate(info)
-                 if number is not None and disc_hint is None and side_index is None and k not in refused]
+                 if number is not None and disc_hint is None and side_index is None and k not in refused
+                 and k not in pinned]
         counts = Counter(info[k][2] for k in loose)
         repeated = sorted(n for n, c in counts.items() if c > 1)
         if repeated:

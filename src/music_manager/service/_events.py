@@ -21,6 +21,9 @@ try:  # pragma: no cover - depends on the environment
         album_changed = Signal(int)  # album_id: refetch it
         candidate_ready = Signal(int, int)  # album_id, release_id: full release fetched
         rate_limited = Signal(float)  # seconds until the next Discogs request
+        clusters_changed = Signal(object)  # list[str]: cluster ids now current (after a cluster scan, adopt, ...)
+        cluster_changed = Signal(str, str)  # old id, new id ("" = gone): a cluster's files changed
+        match_view_changed = Signal(int)  # album_id: match.view changed (pins)
 
     QT = True
 except ImportError:  # pragma: no cover - depends on the environment
@@ -55,3 +58,6 @@ except ImportError:  # pragma: no cover - depends on the environment
             self.album_changed = _Signal()
             self.candidate_ready = _Signal()
             self.rate_limited = _Signal()
+            self.clusters_changed = _Signal()
+            self.cluster_changed = _Signal()
+            self.match_view_changed = _Signal()

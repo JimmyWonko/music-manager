@@ -39,6 +39,7 @@ from ._types import (
     Job,
     JobKind,
     MatchStatus,
+    MMError,
     NotFound,
     Page,
     ValidationError,
@@ -360,11 +361,11 @@ def _claimed(st: State, album_id: int | None) -> set[str]:
     return {r["path"] for r in rows}
 
 
-def _cluster_id(paths: list[Path]) -> str:
-    return "cl-" + hashlib.sha1("\n".join(sorted(str(p) for p in paths)).encode()).hexdigest()[:12]
+def _cluster_id(paths: list[Path], prefix: str = "cl-") -> str:
+    return prefix + hashlib.sha1("\n".join(sorted(str(p) for p in paths)).encode()).hexdigest()[:12]
 
 
-def _cluster_file(path: Path, folder: Path) -> tuple[ClusterFile, Item]:
+def _cluster_file(path: Path, folder: Path, forced: str = "") -> tuple[ClusterFile, Item]:
     try:
         tags = _read_tag_file(path, easy=True)[1]
     except Exception:  # noqa: BLE001 - an unreadable file still clusters by folder name
@@ -373,31 +374,79 @@ def _cluster_file(path: Path, folder: Path) -> tuple[ClusterFile, Item]:
     album, albumartist, artist = _first(tags, "album"), _first(tags, "albumartist"), _first(tags, "artist")
     cf = ClusterFile(path, info["disc"], info["number"], info["title"], info["duration"], album,
                      albumartist or artist)
-    return cf, Item(cf, album, albumartist, artist, path.parent.name)
+    return cf, Item(cf, album, albumartist, artist, path.parent.name, forced)
 
 
-def _group(paths: list[Path], folder: Path) -> list[Cluster]:
-    files = [_cluster_file(p, folder) for p in sorted(paths)]
+def _moves(st: State) -> dict[str, str]:
+    """Files the user moved (move_to_cluster): path -> group key, "" = unclustered."""
+    return {r["path"]: r["key"] for r in st.index.query("SELECT path, key FROM cluster_moves")}
+
+
+def _group(st: State, paths: list[Path], folder: Path) -> list[Cluster]:
+    moves = _moves(st)
+    unclustered = sorted(p for p in paths if moves.get(str(p)) == "")
+    files = [_cluster_file(p, folder, moves.get(str(p), "")) for p in sorted(paths) if p not in unclustered]
     out = []
     for fc in cluster_items([item for _cf, item in files]):
         members = sorted((item.key for item in fc.items), key=lambda f: str(f.path))
-        out.append(Cluster(_cluster_id([f.path for f in members]), fc.artist, fc.title, folder, members,
-                           len({f.disc for f in members})))
+        c = Cluster(_cluster_id([f.path for f in members]), fc.artist, fc.title, folder, members,
+                    len({f.disc for f in members}))
+        st.cluster_keys[c.id] = fc.key
+        out.append(c)
+    if unclustered:
+        members = [_cluster_file(p, folder)[0] for p in unclustered]
+        out.append(Cluster(_cluster_id(unclustered, "un-"), "", "", folder, members, len({f.disc for f in members}),
+                           kind="unclustered"))
     return out
 
 
-def _adopted(st: State) -> list[Cluster]:
+def _adopted(st: State, folder: Path | None = None) -> list[Cluster]:
     out = []
     for row in st.index.query("SELECT * FROM albums WHERE folder LIKE ?", (f"%{CLUSTER_KEY}%",)):
         cg = cluster_guess(row)
-        if not cg:
+        if not cg or (folder is not None and Path(cg["cluster_folder"]) != folder):
             continue
-        folder = Path(cg["cluster_folder"])
-        files = [f for f, _item in (_cluster_file(t.path, folder) for t in local_tracks(row["id"], st)
+        where = Path(cg["cluster_folder"])
+        files = [f for f, _item in (_cluster_file(t.path, where) for t in local_tracks(row["id"], st)
                                     if t.path.is_file())]
-        out.append(Cluster(cg["cluster"], row["artist"], row["title"], folder, files, len({f.disc for f in files}),
+        out.append(Cluster(cg["cluster"], row["artist"], row["title"], where, files, len({f.disc for f in files}),
                            album_id=row["id"]))
     return out
+
+
+def _loose_rows(st: State, folder: Path | None = None):
+    rows = st.index.query("SELECT * FROM albums WHERE folder NOT LIKE ?", (f"%{CLUSTER_KEY}%",))
+    return [r for r in rows if json.loads(r["guess"] or "{}").get("loose_tracks")
+            and (folder is None or Path(r["folder"]) == folder)]
+
+
+def _folder_clusters(st: State, row) -> list[Cluster]:
+    files = [t.path for t in local_tracks(row["id"], st) if t.path.is_file()]
+    return _group(st, files, Path(row["folder"]))
+
+
+def _remember(st: State, found: list[Cluster]) -> list[Cluster]:
+    found.sort(key=lambda c: (str(c.folder), c.kind == "unclustered", str(c.files[0].path) if c.files else ""))
+    with st.lock:
+        st.clusters.update({c.id: c for c in found})
+    return found
+
+
+def _all_clusters(st: State, progress=None) -> list[Cluster]:
+    found: list[Cluster] = []
+    rows = _loose_rows(st)
+    for i, row in enumerate(rows):
+        if progress is not None:
+            progress(i, len(rows), f"clustering {Path(row['folder']).name}")
+        found += _folder_clusters(st, row)
+    return _remember(st, found + _adopted(st))
+
+
+def _in_folder(st: State, folder: Path) -> list[Cluster]:
+    found: list[Cluster] = []
+    for row in _loose_rows(st, folder):
+        found += _folder_clusters(st, row)
+    return _remember(st, found + _adopted(st, folder))
 
 
 def clusters(paths: list[Path] | None = None) -> list[Cluster]:
@@ -405,33 +454,37 @@ def clusters(paths: list[Path] | None = None) -> list[Cluster]:
 
     paths None: the files of every loose-tracks album (AlbumRow.loose_tracks), clustered folder
     by folder, plus every adopted cluster (album_id set). paths: exactly these audio files
-    (absolute, inside a library root), clustered together. Sorted by folder, then first file.
+    (absolute, inside a library root), clustered together. Files moved with move_to_cluster
+    follow the move; files moved out of every cluster come back as one kind="unclustered"
+    cluster per folder (last in that folder). Sorted by folder, then first file.
     """
     st = state()
     if paths is None:
-        found: list[Cluster] = []
-        for row in st.index.query("SELECT * FROM albums WHERE folder NOT LIKE ?", (f"%{CLUSTER_KEY}%",)):
-            if not json.loads(row["guess"] or "{}").get("loose_tracks"):
-                continue
-            files = [t.path for t in local_tracks(row["id"], st) if t.path.is_file()]
-            found += _group(files, Path(row["folder"]))
-        found += _adopted(st)
-    else:
-        files = [Path(p) for p in paths]
-        if not files:
-            raise ValidationError("no files given", field="paths")
-        for p in files:
-            if not p.is_absolute() or not p.is_file() or not is_audio(p):
-                raise ValidationError(f"not an audio file: {p}", field="paths")
-            if root_for(p, st) is None:
-                raise ValidationError(f"not inside a library root: {p}", field="paths")
-        folder = Path(os.path.commonpath([str(p.parent) for p in files]))
-        adopted = {c.id: c for c in _adopted(st)}
-        found = [adopted.get(c.id, c) for c in _group(files, folder)]
-    found.sort(key=lambda c: (str(c.folder), str(c.files[0].path) if c.files else ""))
-    with st.lock:
-        st.clusters.update({c.id: c for c in found})
-    return found
+        return _all_clusters(st)
+    files = [Path(p) for p in paths]
+    if not files:
+        raise ValidationError("no files given", field="paths")
+    for p in files:
+        if not p.is_absolute() or not p.is_file() or not is_audio(p):
+            raise ValidationError(f"not an audio file: {p}", field="paths")
+        if root_for(p, st) is None:
+            raise ValidationError(f"not inside a library root: {p}", field="paths")
+    folder = Path(os.path.commonpath([str(p.parent) for p in files]))
+    adopted = {c.id: c for c in _adopted(st)}
+    return _remember(st, [adopted.get(c.id, c) for c in _group(st, files, folder)])
+
+
+def scan_clusters() -> Job:
+    """clusters() as a Job (JobKind.CLUSTER) with progress per folder; emits clusters_changed(ids) when done."""
+    st = state()
+
+    def work(ctx) -> str:
+        found = _all_clusters(st, progress=ctx.progress)
+        events.clusters_changed.emit([c.id for c in found])
+        tags = sum(1 for c in found if c.kind == "tag_cluster")
+        return f"{tags} cluster(s), {sum(len(c.files) for c in found)} file(s)"
+
+    return st.runner.submit(JobKind.CLUSTER, work, message="clustering")
 
 
 def cluster(cluster_id: str) -> Cluster:
@@ -447,6 +500,44 @@ def cluster(cluster_id: str) -> Cluster:
     return found
 
 
+def _track_row(aid: int, seq: int, path: Path, folder: Path) -> tuple:
+    size, mtime = _stat(path)
+    info = _track_info(path, folder)
+    return (aid, seq, str(path), info["disc"], info["number"], info["title"], info["duration"], size, mtime)
+
+
+def _stat(path: Path) -> tuple[int | None, int | None]:
+    try:
+        stat = path.stat()
+        return stat.st_size, stat.st_mtime_ns
+    except OSError:
+        return None, None
+
+
+def _rekey(conn, aid: int) -> tuple[str, str]:
+    """An adopted cluster's files changed: new id (path hash), folder key and track count. (old id, new id)."""
+    row = conn.execute("SELECT guess FROM albums WHERE id = ?", (aid,)).fetchone()
+    guess = json.loads(row["guess"])
+    paths = [Path(r["path"]) for r in conn.execute("SELECT path FROM tracks WHERE album_id = ? ORDER BY path", (aid,))]
+    old, new = guess["cluster"], _cluster_id(paths)
+    conn.executemany("UPDATE tracks SET seq = ? WHERE path = ?", [(i, str(p)) for i, p in enumerate(paths)])
+    guess["cluster"] = new
+    conn.execute("UPDATE albums SET folder = ?, guess = ?, track_count = ? WHERE id = ?",
+                 (str(Path(guess["cluster_folder"]) / f"{CLUSTER_KEY}{new}"), json.dumps(guess), len(paths), aid))
+    return old, new
+
+
+def _refresh_loose(st: State, folder: Path) -> None:
+    """Re-read a folder's loose-tracks row from disk (it takes back every file no adopted cluster holds)."""
+    found = next((a for a in collect_albums(folder) if a.path == folder), None) if folder.is_dir() else None
+    root = root_for(folder, st)
+    if found is None or root is None:
+        return
+    rows = _loose_rows(st, folder)
+    aid, _changed = index_album(st, root, found, album_id=rows[0]["id"] if rows else None)
+    events.album_changed.emit(aid)
+
+
 def adopt_cluster(cluster_id: str) -> AlbumRow:
     """Make a cluster an album (index only; nothing on disk changes) so match / plan / apply take it.
 
@@ -458,6 +549,8 @@ def adopt_cluster(cluster_id: str) -> AlbumRow:
     c = cluster(cluster_id)
     if c.album_id is not None:
         return row_to_album_row(st.index.one("SELECT * FROM albums WHERE id = ?", (c.album_id,)))
+    if c.kind != "tag_cluster":
+        raise ValidationError("unclustered files can't be adopted: move them into a cluster first", field="cluster_id")
     if not c.files:
         raise ValidationError(f"cluster {cluster_id} has no files", field="cluster_id")
     root = root_for(c.folder, st) or root_for(c.files[0].path, st)
@@ -472,10 +565,12 @@ def adopt_cluster(cluster_id: str) -> AlbumRow:
     guess = {"artist": c.artist, "album": c.title, "year": min(years) if years else "",
              "catno": guess.get("catno", ""), "cluster": c.id, "cluster_folder": str(c.folder)}
     paths = [str(f.path) for f in c.files]
-    owners = {r["album_id"] for r in st.index.query(
-        f"SELECT DISTINCT album_id FROM tracks WHERE path IN ({', '.join('?' * len(paths))})", paths)}
+    marks = ", ".join("?" * len(paths))
+    owners = {r["album_id"] for r in st.index.query(f"SELECT DISTINCT album_id FROM tracks WHERE path IN ({marks})",
+                                                     paths)}
     with st.index.tx() as conn:
-        conn.execute(f"DELETE FROM tracks WHERE path IN ({', '.join('?' * len(paths))})", paths)
+        conn.execute(f"DELETE FROM tracks WHERE path IN ({marks})", paths)
+        conn.execute(f"DELETE FROM cluster_moves WHERE path IN ({marks})", paths)  # membership is the row now
         for owner in owners:
             conn.execute("UPDATE albums SET track_count = (SELECT COUNT(*) FROM tracks WHERE album_id = ?)"
                          " WHERE id = ?", (owner, owner))
@@ -485,21 +580,120 @@ def adopt_cluster(cluster_id: str) -> AlbumRow:
             (str(c.folder / f"{CLUSTER_KEY}{c.id}"), str(root), c.artist, c.title, guess["year"], guess["catno"],
              c.artist, len(c.files), MatchStatus.UNMATCHED.value, iso(now_utc()), json.dumps(guess)))
         aid = cur.lastrowid
-        rows = []
-        for seq, f in enumerate(c.files):
-            try:
-                stat = f.path.stat()
-                size, mtime = stat.st_size, stat.st_mtime_ns
-            except OSError:
-                size = mtime = None
-            rows.append((aid, seq, str(f.path), f.disc, f.number, f.title, f.duration_s, size, mtime))
         conn.executemany("INSERT INTO tracks(album_id, seq, path, disc, number, title, duration, size, mtime_ns)"
-                         " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+                         " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                         [(aid, seq, str(f.path), f.disc, f.number, f.title, f.duration_s, *_stat(f.path))
+                          for seq, f in enumerate(c.files)])
         st.index.update_fts(conn, aid, c.artist, c.title, " ".join(f.title for f in c.files))
     for owner in owners:
         events.album_changed.emit(owner)
     events.album_changed.emit(aid)
+    events.clusters_changed.emit([c.id])
     return row_to_album_row(st.index.one("SELECT * FROM albums WHERE id = ?", (aid,)))
 
 
-__all__ = ["adopt_cluster", "album", "albums", "cluster", "clusters", "scan", "search", "status_counts"]
+def unadopt_cluster(album_id: int) -> Cluster:
+    """Back out adopt_cluster before any apply: the album is deleted (with its candidates, choice and
+    pins) and its files go back to their folder's loose-tracks row. Index only. Returns the cluster
+    they form again. MMError if the album was ever applied (undo that in History instead);
+    ValidationError if it is not an adopted cluster.
+    """
+    st = state()
+    row = st.index.one("SELECT * FROM albums WHERE id = ?", (int(album_id),))
+    if row is None:
+        raise NotFound(f"album {album_id}")
+    applied = st.index.one("SELECT oa.op_id FROM operation_albums oa JOIN operations o ON o.id = oa.op_id"
+                           " WHERE oa.album_id = ? AND o.kind = 'apply' ORDER BY oa.op_id DESC", (int(album_id),))
+    if applied is not None:
+        raise MMError(f"album {album_id} was applied (operation {applied['op_id']}): undo that in History instead")
+    cg = cluster_guess(row)
+    if not cg:
+        raise ValidationError(f"album {album_id} is not an adopted cluster", field="album_id")
+    folder = Path(cg["cluster_folder"])
+    paths = [t.path for t in local_tracks(int(album_id), st)]
+    with st.index.tx() as conn:
+        conn.execute("DELETE FROM albums WHERE id = ?", (int(album_id),))
+        st.index.delete_fts(conn, int(album_id))
+    events.album_changed.emit(int(album_id))
+    _refresh_loose(st, folder)
+    found = _in_folder(st, folder)
+    back = next((c for c in found if paths and any(f.path == paths[0] for f in c.files)), None)
+    if back is None:
+        raise NotFound(f"the files of album {album_id} are gone")
+    events.clusters_changed.emit([back.id])
+    return back
+
+
+def _holding(found: list[Cluster], path: Path) -> Cluster | None:
+    return next((c for c in found if any(f.path == path for f in c.files)), None)
+
+
+def move_to_cluster(file: Path, cluster_id: str | None) -> Cluster:
+    """Move one loose file into another cluster of its folder, or out of every cluster (None). Index only.
+
+    Cluster ids are hashes of their files, so both clusters get new ids: returns the cluster the
+    file is in now, and emits cluster_changed(old id, new id) for it, then for the cluster it left
+    (new id "" when that one is now empty). Into an adopted cluster, the file joins that album;
+    out of one, it goes back to the folder's loose-tracks row (an adopted cluster left empty is
+    un-adopted). The move is kept across scans. ValidationError: not a loose or cluster file, or
+    the target is in another folder.
+    """
+    st = state()
+    path = Path(file)
+    owner = st.index.one("SELECT a.* FROM tracks t JOIN albums a ON a.id = t.album_id WHERE t.path = ?", (str(path),))
+    if owner is None:
+        raise ValidationError(f"not a file of the library index: {path}", field="file")
+    cg = cluster_guess(owner)
+    if not cg and not json.loads(owner["guess"] or "{}").get("loose_tracks"):
+        raise ValidationError(f"{path.name} belongs to the album folder {owner['folder']}: only loose files move "
+                              "between clusters", field="file")
+    folder = Path(cg["cluster_folder"]) if cg else Path(owner["folder"])
+    before = _in_folder(st, folder)
+    source = _holding(before, path)
+    target = None
+    if cluster_id is not None:
+        target = next((c for c in before if c.id == cluster_id), None)
+        if target is None:
+            cluster(cluster_id)  # NotFound for an unknown id
+            raise ValidationError(f"cluster {cluster_id} is in another folder than {path.name}", field="cluster_id")
+    if target is not None and source is not None and target.id == source.id:
+        return source
+    old_target = target.id if target is not None else next((c.id for c in before if c.kind == "unclustered"), "")
+    others = [f.path for f in source.files if f.path != path] if source is not None else []
+    with st.index.tx() as conn:
+        if cg:  # out of an adopted cluster
+            conn.execute("DELETE FROM tracks WHERE path = ?", (str(path),))
+            if conn.execute("SELECT COUNT(*) AS n FROM tracks WHERE album_id = ?", (owner["id"],)).fetchone()["n"]:
+                _rekey(conn, owner["id"])
+            else:
+                conn.execute("DELETE FROM albums WHERE id = ?", (owner["id"],))
+                st.index.delete_fts(conn, owner["id"])
+        if target is not None and target.album_id is not None:  # into an adopted cluster
+            conn.execute("DELETE FROM tracks WHERE path = ?", (str(path),))
+            conn.execute("DELETE FROM cluster_moves WHERE path = ?", (str(path),))
+            conn.execute("INSERT INTO tracks(album_id, seq, path, disc, number, title, duration, size, mtime_ns)"
+                         " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)", _track_row(target.album_id, 10**6, path, folder))
+            _rekey(conn, target.album_id)
+            if not cg:
+                conn.execute("UPDATE albums SET track_count = (SELECT COUNT(*) FROM tracks WHERE album_id = ?)"
+                             " WHERE id = ?", (owner["id"], owner["id"]))
+        else:
+            key = "" if target is None or target.kind == "unclustered" else st.cluster_keys.get(target.id, "")
+            conn.execute("INSERT OR REPLACE INTO cluster_moves(path, key) VALUES(?, ?)", (str(path), key))
+    if cg and (target is None or target.album_id is None):
+        _refresh_loose(st, folder)
+    for aid in {owner["id"], target.album_id if target is not None else None} - {None}:
+        events.album_changed.emit(aid)
+    after = _in_folder(st, folder)
+    now = _holding(after, path)
+    if now is None:
+        raise NotFound(f"{path} is gone")
+    left = next((c.id for c in after if others and any(f.path == others[0] for f in c.files)), "")
+    events.cluster_changed.emit(old_target, now.id)
+    if source is not None:
+        events.cluster_changed.emit(source.id, left)
+    return now
+
+
+__all__ = ["adopt_cluster", "album", "albums", "cluster", "clusters", "move_to_cluster", "scan", "scan_clusters",
+           "search", "status_counts", "unadopt_cluster"]

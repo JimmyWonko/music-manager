@@ -84,6 +84,20 @@ CREATE TABLE IF NOT EXISTS operation_albums(
     release_id INTEGER,
     PRIMARY KEY(op_id, album_id)
 );
+CREATE TABLE IF NOT EXISTS pins(
+    album_id INTEGER NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    release_id INTEGER NOT NULL,
+    position TEXT NOT NULL,
+    override_hold INTEGER NOT NULL DEFAULT 0,
+    size INTEGER,
+    mtime_ns INTEGER,
+    PRIMARY KEY(album_id, path)
+);
+CREATE TABLE IF NOT EXISTS cluster_moves(
+    path TEXT PRIMARY KEY,
+    key TEXT NOT NULL
+);
 """
 
 

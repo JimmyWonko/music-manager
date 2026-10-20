@@ -34,6 +34,7 @@ from ._common import (
     root_for,
     title_match_min,
 )
+from ._pins import resolve as resolve_pins
 from ._releases import (
     album_tracks,
     candidate_row,
@@ -194,11 +195,13 @@ def album_target(album_id: int, release_id: int | None, template: CompiledTempla
             continue  # a cluster moves only its own files, so its target may be a subfolder of theirs
         result.problems.append(Problem(LAYOUT_KIND[kind], message, list(paths)))
     if fetched:
+        pins, pin_problems, overrides = resolve_pins(st, album_id, int(release_id), album, dtracks, title_match_min())
         layout = layout_album(album, root, release, dtracks, original_year, target_dir=target, file_name=namer,
                               check=False, log=lambda _line: None, disc_folders=not template_sets_disc_path(template),
-                              title_match_min=title_match_min())
+                              title_match_min=title_match_min(), pins=pins)
+        layout.pin_overrides = overrides
         result.layout = layout
-        result.problems += _album_problems(result, row["track_count"])
+        result.problems += _album_problems(result, row["track_count"]) + pin_problems
     result.problems += _occupied(result, st)
     return result
 

@@ -55,6 +55,7 @@ class JobKind(Enum):
     FETCH_CANDIDATES = "fetch_candidates"
     APPLY = "apply"
     UNDO = "undo"
+    CLUSTER = "cluster"  # library.scan_clusters
 
 
 class JobState(Enum):
@@ -109,6 +110,7 @@ class ProblemKind(StrEnum):
     LAYOUT_AMBIGUOUS = "layout_ambiguous"  # loose audio next to disc folders / other albums; never overridden
     DISC_FOLDER_MISMATCH = "disc_folder_mismatch"  # destination puts tracks in another disc's CD folder
     DISC_TRACK_COUNT = "disc_track_count"  # a disc's file and track counts differ, titles don't settle it (paths)
+    PIN_CONFLICT = "pin_conflict"  # a manual pin (match.pin) can't be used as it is (paths: its files)
 
 
 # --- jobs ---------------------------------------------------------------------
@@ -223,7 +225,7 @@ class RemoteTrack:
 
 @dataclass(frozen=True)
 class TrackPair:
-    method: Literal["number", "side", "title", "position", "unmatched"]
+    method: Literal["number", "side", "title", "position", "manual", "unmatched"]  # manual: match.pin
     local: LocalTrack | None  # None: Discogs track with no local file
     remote: RemoteTrack | None  # None: local file with no Discogs track
     title_similarity: float
@@ -292,6 +294,40 @@ class Cluster:
     files: list[ClusterFile]  # path order
     disc_count: int  # distinct disc numbers
     album_id: int | None = None  # the album row once adopted (library.adopt_cluster), else None
+    kind: str = "tag_cluster"  # or "unclustered": files moved out of every cluster (move_to_cluster None)
+
+
+@dataclass(frozen=True)
+class ClusterRow:
+    """One line of match.clusters: a folder album, a tag cluster (adopted or not), or unclustered files."""
+    id: str  # "album-<album id>" for a folder album, else the Cluster id ("cl-..." / "un-...")
+    kind: Literal["folder", "tag_cluster", "unclustered"]
+    artist: str
+    title: str
+    file_count: int
+    status: MatchStatus | None  # None for a cluster that is not adopted yet
+    album_id: int | None
+    loose_tracks: bool  # its files are loose files of a folder that also holds albums
+    folder: Path
+
+
+@dataclass(frozen=True)
+class Pin:
+    """A manual pair (drag-and-drop): this file is this release track."""
+    path: Path
+    position: str  # the release track's position as Discogs lists it ("4", "B2", "2-3")
+    release_id: int  # pins apply to this release only
+    override_hold: bool  # the user accepted overriding a disc hold for this file
+    stale: bool  # the file changed since it was pinned: ignored (a PIN_CONFLICT) until pinned again
+
+
+@dataclass(frozen=True)
+class ManualPair:
+    """A manual pair recorded in an apply journal (journal.manual_pairs)."""
+    album_id: int
+    path: Path  # the file before the apply
+    position: str
+    override_hold: bool
 
 
 @dataclass(frozen=True)
@@ -305,6 +341,7 @@ class MatchView:
     unmatched_files: list[LocalTrack]  # local files no release track was paired with
     unmatched_tracks: list[RemoteTrack]  # release tracks with no local file
     problems: list[Problem]  # what plan.build would hold this album for with this release
+    pins: list[Pin] = field(default_factory=list)  # the album's pins for this release
 
 
 # --- plans ----------------------------------------------------------------------
@@ -323,6 +360,7 @@ class FileChange:
     path_after: Path
     tags: list[TagChange]
     skip_reason: str | None = None  # None means the step runs
+    pinned: bool = False  # a track paired by the user (match.pin)
 
 
 @dataclass(frozen=True)

@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from ..match import AUTO_MIN_MARGIN, AUTO_MIN_SCORE, TITLE_MATCH_MIN, score_result
-from ._common import album_record, cluster_guess, local_tracks, set_status
+from ._common import (
+    album_record,
+    cluster_guess,
+    local_tracks,
+    row_to_album_row,
+    set_status,
+)
+from ._pins import pin_rows, to_pin
 from ._planning import album_target, chosen_release_id, resolve_template
 from ._releases import (
     build_candidates,
@@ -16,15 +24,20 @@ from ._releases import (
 )
 from ._state import events, state
 from ._types import (
+    AlbumFilter,
     AutoRules,
     Candidate,
+    ClusterRow,
     Destination,
     Job,
     JobKind,
     LocalTrack,
     MatchStatus,
     MatchView,
+    MMError,
     NotFound,
+    Page,
+    Pin,
     ProviderError,
     ValidationError,
 )
@@ -226,28 +239,34 @@ def destination(album_id: int, release_id: int, template: str | None = None) -> 
     return Destination(target.root, target.target, target.files, target.problems)
 
 
+def _resolve_id(ident: int | str) -> tuple[int | None, str | None, list[LocalTrack]]:
+    """(album id, cluster id, files of a cluster not adopted yet) for an album id, "album-<id>" or a cluster id."""
+    from .library import cluster as find_cluster
+
+    if isinstance(ident, str) and ident.startswith("album-") and ident[6:].isdigit():
+        ident = int(ident[6:])
+    if isinstance(ident, str) and not ident.isdigit():
+        c = find_cluster(ident)
+        if c.album_id is None:
+            return None, c.id, [LocalTrack(0, f.path, f.disc, f.number, f.title, f.duration_s) for f in c.files]
+        return c.album_id, c.id, []
+    return int(ident), None, []
+
+
 def view(album_or_cluster_id: int | str, release_id: int | None = None) -> MatchView:
     """The album-match view: candidates and file -> release-track pairing for one release. Read-only.
 
-    album_or_cluster_id: an album id, or a cluster id (library.clusters). A cluster that is not
-    adopted yet has no candidates: every file is unmatched (adopt it, then match.find). release_id
-    None: the chosen release, else the best candidate. Never calls Discogs: until the release is
-    fetched, fetched is False and pairs, unmatched_* and problems are those known (folder only).
-    problems are what plan.build would report (TRACK_MISMATCH before any override).
+    album_or_cluster_id: an album id, "album-<id>" (ClusterRow.id) or a cluster id. A cluster that
+    is not adopted yet has no candidates: every file is unmatched (adopt it, then match.find).
+    release_id None: the chosen release, else the best candidate. Never calls Discogs: until the
+    release is fetched, fetched is False and every file is in unmatched_files. problems are what
+    plan.build would report (TRACK_MISMATCH before any override, PIN_CONFLICT for unusable pins);
+    pairs the user made have method "manual" (pins lists them).
     """
-    from .library import cluster as find_cluster
-
     st = state()
-    cluster_id = None
-    if isinstance(album_or_cluster_id, str) and not album_or_cluster_id.isdigit():
-        c = find_cluster(album_or_cluster_id)
-        cluster_id = c.id
-        if c.album_id is None:
-            files = [LocalTrack(0, f.path, f.disc, f.number, f.title, f.duration_s) for f in c.files]
-            return MatchView(None, c.id, None, False, [], [], files, [], [])
-        album_id = c.album_id
-    else:
-        album_id = int(album_or_cluster_id)
+    album_id, cluster_id, files = _resolve_id(album_or_cluster_id)
+    if album_id is None:
+        return MatchView(None, cluster_id, None, False, [], [], files, [], [])
     row = album_record(album_id, st)
     cg = cluster_guess(row)
     cluster_id = cluster_id or (cg["cluster"] if cg else None)
@@ -258,13 +277,114 @@ def view(album_or_cluster_id: int | str, release_id: int | None = None) -> Match
         return MatchView(album_id, cluster_id, None, False, cands, [], locals_, [], [])
     candidate_row(album_id, rid, st)  # NotFound for a release that is not a candidate
     target = album_target(album_id, rid, resolve_template(None), st=st, fetch=False)
+    pin_list = [to_pin(r) for r in pin_rows(st, album_id, rid)]
     cand = next((c for c in cands if c.release_id == rid), None)
     pairs = list(cand.alignment or []) if cand is not None else []
     if not target.fetched:
-        return MatchView(album_id, cluster_id, rid, False, cands, [], locals_, [], list(target.problems))
+        return MatchView(album_id, cluster_id, rid, False, cands, [], locals_, [], list(target.problems), pin_list)
     return MatchView(album_id, cluster_id, rid, True, cands, pairs,
                      [p.local for p in pairs if p.remote is None and p.local is not None],
-                     [p.remote for p in pairs if p.local is None and p.remote is not None], list(target.problems))
+                     [p.remote for p in pairs if p.local is None and p.remote is not None], list(target.problems),
+                     pin_list)
+
+
+# --- manual pairs ------------------------------------------------------------------
+
+def pin(album_id: int, file: Path, position: str, override_hold: bool = False,
+        release_id: int | None = None) -> Pin:
+    """Pair one file with one release track by hand (drag-and-drop). Index only; replaces the file's pin.
+
+    release_id None: the chosen release, else the best candidate (pins apply to that release only).
+    position: the track's position as Discogs lists it, or "<disc>-<number>". Only bad input raises
+    (NotFound album, ValidationError for a file that is not the album's or an empty position);
+    everything else (unknown position, two files on one track, a disc hold) is a PIN_CONFLICT in
+    view / plan.build. A pin that overrides a disc hold needs override_hold=True. Emits
+    match_view_changed(album_id).
+    """
+    st = state()
+    album_record(album_id, st)
+    path = Path(file)
+    if path not in {t.path for t in local_tracks(album_id, st)}:
+        raise ValidationError(f"{path} is not a file of album {album_id}", field="file")
+    if not str(position or "").strip():
+        raise ValidationError("position is empty", field="position")
+    rid = int(release_id) if release_id is not None else chosen_release_id(album_id, st)
+    if rid is None:
+        raise MMError(f"album {album_id} has no candidates: run match.find first")
+    candidate_row(album_id, rid, st)
+    try:
+        s = path.stat()
+        size, mtime = s.st_size, s.st_mtime_ns
+    except OSError:
+        size = mtime = None
+    with st.index.tx() as conn:
+        conn.execute("INSERT OR REPLACE INTO pins(album_id, path, release_id, position, override_hold, size, mtime_ns)"
+                     " VALUES(?, ?, ?, ?, ?, ?, ?)",
+                     (album_id, str(path), rid, str(position).strip(), int(bool(override_hold)), size, mtime))
+    events.match_view_changed.emit(album_id)
+    return to_pin(st.index.one("SELECT * FROM pins WHERE album_id = ? AND path = ?", (album_id, str(path))))
+
+
+def unpin(album_id: int, file: Path | None = None) -> None:
+    """Drop one file's pin, or every pin of the album (file None). Emits match_view_changed(album_id)."""
+    st = state()
+    album_record(album_id, st)
+    with st.index.tx() as conn:
+        if file is None:
+            conn.execute("DELETE FROM pins WHERE album_id = ?", (album_id,))
+        else:
+            conn.execute("DELETE FROM pins WHERE album_id = ? AND path = ?", (album_id, str(Path(file))))
+    events.match_view_changed.emit(album_id)
+
+
+def pins(album_id: int) -> list[Pin]:
+    """The album's pins for every release, by path. plan.apply uses them up (journal.manual_pairs keeps them)."""
+    st = state()
+    album_record(album_id, st)
+    return [to_pin(r) for r in pin_rows(st, album_id)]
+
+
+# --- one list for the Match window -------------------------------------------------
+
+def clusters(filter: AlbumFilter | None = None, offset: int = 0, limit: int = 200) -> Page[ClusterRow]:
+    """Folder albums and clusters in one paged list (like library.albums): ClusterRow per item.
+
+    Folder albums (kind "folder", id "album-<id>"), adopted and not-adopted tag clusters and
+    unclustered files (library.clusters). Loose-tracks rows themselves are not listed: their files
+    are in clusters. filter.status / max_confidence match albums only (a cluster not adopted has no
+    status, so it is left out by either); filter.text matches artist, title and file titles.
+    Order: artist, title, folder (case-insensitive), then id. Computed in memory.
+    """
+    from .library import clusters as all_clusters
+
+    st = state()
+    f = filter or AlbumFilter()
+    text = (f.text or "").strip().casefold()
+    rows: list[ClusterRow] = []
+    for row in st.index.query("SELECT * FROM albums"):
+        ar = row_to_album_row(row)
+        if ar.loose_tracks:
+            continue
+        if f.status is not None and ar.status not in {MatchStatus(s) for s in f.status}:
+            continue
+        if f.max_confidence is not None and (ar.confidence is None or ar.confidence >= f.max_confidence):
+            continue
+        titles = " ".join(t.title for t in local_tracks(ar.id, st)) if text else ""
+        if text and text not in f"{ar.artist} {ar.title} {titles}".casefold():
+            continue
+        kind = "tag_cluster" if ar.cluster_id else "folder"
+        rows.append(ClusterRow(ar.cluster_id or f"album-{ar.id}", kind, ar.artist, ar.title, ar.track_count,
+                               ar.status, ar.id, bool(ar.cluster_id), ar.folder))
+    if f.status is None and f.max_confidence is None:
+        for c in all_clusters():
+            if c.album_id is not None:
+                continue
+            if text and text not in " ".join([c.artist, c.title, *(x.title for x in c.files)]).casefold():
+                continue
+            rows.append(ClusterRow(c.id, c.kind, c.artist, c.title, len(c.files), None, None, True, c.folder))
+    rows.sort(key=lambda r: (r.kind == "unclustered", r.artist.casefold(), r.title.casefold(), str(r.folder), r.id))
+    offset, limit = max(0, int(offset)), max(0, int(limit))
+    return Page(rows[offset:offset + limit], len(rows), offset)
 
 
 __all__ = ["auto_accept", "auto_rules", "candidates", "choose", "destination", "find", "manual", "skip", "view"]

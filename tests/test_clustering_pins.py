@@ -8,8 +8,6 @@ from test_clustering import HAM_ID, _loose, _tagged, lib  # noqa: F401  (fixture
 from music_manager import service
 from music_manager.service import JobState
 
-XF = pytest.mark.xfail(strict=True, reason="cluster paging, moves and pins not implemented yet")
-
 
 def _record(signal):
     got = []
@@ -21,7 +19,6 @@ def _scan():
     assert service.jobs.wait(service.library.scan().id).state is JobState.DONE
 
 
-@XF
 def test_cluster_rows_page_folder_albums_and_clusters(lib):  # noqa: F811
     _root, artist, _files = lib
     page = service.match.clusters()
@@ -40,7 +37,6 @@ def test_cluster_rows_page_folder_albums_and_clusters(lib):  # noqa: F811
     assert service.library.clusters() == service.library.clusters()  # existing call unchanged
 
 
-@XF
 def test_cluster_scan_job_reports_progress_and_clusters_changed(lib):  # noqa: F811
     changed = _record(service.events.clusters_changed)
     job = service.library.scan_clusters()
@@ -50,7 +46,6 @@ def test_cluster_scan_job_reports_progress_and_clusters_changed(lib):  # noqa: F
     assert changed and set(changed[-1]) == {c.id for c in service.library.clusters()}
 
 
-@XF
 def test_move_files_between_clusters_and_back(lib):  # noqa: F811
     _root, artist, files = lib
     ham, life = service.library.clusters()
@@ -75,7 +70,6 @@ def test_move_files_between_clusters_and_back(lib):  # noqa: F811
     assert _loose().track_count == 0
 
 
-@XF
 def test_unadopt_restores_the_loose_row_and_refuses_after_apply(lib):  # noqa: F811
     ham = service.library.clusters()[0]
     row = service.library.adopt_cluster(ham.id)
@@ -96,7 +90,7 @@ def test_unadopt_restores_the_loose_row_and_refuses_after_apply(lib):  # noqa: F
         service.library.unadopt_cluster(row.id)
 
 
-def _adopted_with_mystery(lib):
+def _adopted_with_mystery(lib):  # noqa: F811
     _root, artist, files = lib
     extra = [_tagged(artist / "04 Mystery.flac", 244, albumartist="Henry Rollins", album="Hot Animal Machine",
                      title="Mystery"),
@@ -109,7 +103,6 @@ def _adopted_with_mystery(lib):
     return row, files[:3] + extra
 
 
-@XF
 def test_pin_reassigns_a_file_and_flows_into_plan_journal_and_history(lib):  # noqa: F811
     _root, _artist, files = lib
     row = service.library.adopt_cluster(service.library.clusters()[0].id)
@@ -140,7 +133,6 @@ def test_pin_reassigns_a_file_and_flows_into_plan_journal_and_history(lib):  # n
     assert all(f.exists() for f in files)
 
 
-@XF
 def test_bad_pins_are_problems_not_errors(lib):  # noqa: F811
     _root, _artist, files = lib
     row = service.library.adopt_cluster(service.library.clusters()[0].id)
@@ -149,7 +141,7 @@ def test_bad_pins_are_problems_not_errors(lib):  # noqa: F811
     service.match.pin(row.id, files[1], "2")
     service.match.pin(row.id, files[2], "9")
     kinds = [p.kind for p in service.match.view(row.id).problems]
-    assert kinds.count("pin_conflict") == 2 and "track_mismatch" in kinds
+    assert kinds.count("pin_conflict") == 3  # one per file: two on track 2, one on no track and "track_mismatch" in kinds
     service.match.choose(row.id, HAM_ID)
     assert "pin_conflict" in [p.kind for p in service.plan.build([row.id]).albums[0].problems]
     service.match.unpin(row.id, files[0])
@@ -158,7 +150,6 @@ def test_bad_pins_are_problems_not_errors(lib):  # noqa: F811
     assert service.match.pins(row.id) == [] and service.ProblemKind("pin_conflict") is list(service.ProblemKind)[-1]
 
 
-@XF
 def test_a_pin_overrides_a_held_disc_only_when_asked(lib):  # noqa: F811
     row, files = _adopted_with_mystery(lib)
     assert "disc_track_count" in [p.kind for p in service.match.view(row.id).problems]

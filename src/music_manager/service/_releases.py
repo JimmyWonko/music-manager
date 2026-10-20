@@ -5,9 +5,16 @@ from __future__ import annotations
 import json
 import re
 import time
+from pathlib import Path
 
 from ..fs import AlbumFolder
-from ..match import TITLE_MATCH_MIN, align_tracks, score_components, score_result, similar
+from ..match import (
+    TITLE_MATCH_MIN,
+    align_tracks_detailed,
+    score_components,
+    score_result,
+    similar,
+)
 from ..naming import year4
 from ..providers.discogs import (
     CACHE_MAX_AGE,
@@ -22,6 +29,7 @@ from ..providers.discogs import (
 )
 from ._common import album_folder, album_record, local_tracks
 from ._common import title_match_min as rules_title_match_min
+from ._pins import resolve as resolve_pins
 from ._state import State, events, state
 from ._types import (
     DISCOGS_CREDIT,
@@ -161,12 +169,12 @@ def _remote(dt: DiscogsTrack) -> RemoteTrack:
 
 
 def alignment(album: AlbumFolder, locals_: list[LocalTrack], dtracks: list[DiscogsTrack],
-              title_match_min: float | None = None) -> list[TrackPair]:
+              title_match_min: float | None = None, pins: dict[Path, int] | None = None) -> list[TrackPair]:
     """The engine's pairing, as TrackPairs. title_match_min: None = match.auto_rules().title_match_min."""
     if title_match_min is None:
         title_match_min = rules_title_match_min()
     by_path = {t.path: t for t in locals_}
-    triples, _legacy = align_tracks(album, dtracks, title_match_min)
+    triples = align_tracks_detailed(album, dtracks, title_match_min, pins)[0]
     used: set[int] = set()
     pairs: list[TrackPair] = []
     for path, dt, method in triples:
@@ -180,6 +188,7 @@ def alignment(album: AlbumFolder, locals_: list[LocalTrack], dtracks: list[Disco
         if local.duration_s is not None and dt.duration_s is not None:
             delta = round(local.duration_s - dt.duration_s, 3)
         ok = sim >= title_match_min or (delta is not None and abs(delta) <= DURATION_TOLERANCE_S)
+        ok = ok or method == "manual"  # the user paired it
         pairs.append(TrackPair(method, local, _remote(dt), round(sim, 4), delta, ok))
     for dt in dtracks:
         if id(dt) not in used:
@@ -284,7 +293,8 @@ def build_candidates(album_id: int, st: State | None = None) -> list[Candidate]:
             if folder is None:
                 folder = album_folder(album_id, st)
             dtracks = album_tracks(release)
-            pairs = alignment(folder, locals_, dtracks)
+            pins = resolve_pins(st, album_id, int(crow["release_id"]), folder, dtracks, rules_title_match_min())[0]
+            pairs = alignment(folder, locals_, dtracks, pins=pins)
             remote_count = len(dtracks)
         auto = score_result(search, guess)  # exactly the --auto score
         score = service_score(auto, pairs, len(locals_), remote_count)
