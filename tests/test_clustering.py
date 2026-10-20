@@ -63,11 +63,12 @@ def lib(tmp_path):
     service.reset()
 
 
-def _rows():
-    return {r.folder: r for r in service.library.albums(service.AlbumFilter(), service.AlbumSort.FOLDER, 0, 100).items}
+def _loose():
+    [row] = [r for r in service.library.albums(service.AlbumFilter(), service.AlbumSort.FOLDER, 0, 100).items
+             if r.loose_tracks]
+    return row
 
 
-@pytest.mark.xfail(strict=True, reason="clustering not implemented yet")
 def test_loose_files_cluster_by_album_tags_and_nothing_moves(lib):
     root, artist, files = lib
     before = tree(root)
@@ -83,7 +84,6 @@ def test_loose_files_cluster_by_album_tags_and_nothing_moves(lib):
     assert tree(root) == before
 
 
-@pytest.mark.xfail(strict=True, reason="clustering not implemented yet")
 def test_clusters_of_chosen_paths(lib, tmp_path):
     root, artist, files = lib
     [c] = service.library.clusters(paths=[files[1], files[0]])
@@ -94,7 +94,6 @@ def test_clusters_of_chosen_paths(lib, tmp_path):
         service.library.clusters(paths=[artist])  # a folder, not an audio file
 
 
-@pytest.mark.xfail(strict=True, reason="clustering not implemented yet")
 def test_view_of_a_cluster_not_yet_adopted(lib):
     _root, _artist, files = lib
     ham = service.library.clusters()[0]
@@ -106,7 +105,6 @@ def test_view_of_a_cluster_not_yet_adopted(lib):
         service.match.view("cl-nope")
 
 
-@pytest.mark.xfail(strict=True, reason="clustering not implemented yet")
 def test_adopted_cluster_matches_plans_applies_and_undoes(lib):
     root, artist, files = lib
     before = tree(root)
@@ -117,7 +115,7 @@ def test_adopted_cluster_matches_plans_applies_and_undoes(lib):
     assert service.library.adopt_cluster(ham.id).id == row.id  # idempotent
     assert tree(root) == before
     assert service.jobs.wait(service.library.scan().id).state is JobState.DONE  # rescan keeps the split
-    loose = next(r for r in _rows().values() if r.loose_tracks)
+    loose = _loose()
     assert loose.track_count == 1 and service.library.album(row.id).track_count == 3
     assert service.library.clusters()[0].album_id == row.id
 
@@ -146,10 +144,9 @@ def test_adopted_cluster_matches_plans_applies_and_undoes(lib):
     assert service.jobs.wait(service.journal.undo(op.id, undo.id).id).state is JobState.DONE
     assert all(f.exists() for f in files)
     assert service.jobs.wait(service.library.scan().id).state is JobState.DONE
-    assert next(r for r in _rows().values() if r.loose_tracks).track_count == 4
+    assert _loose().track_count == 4
 
 
-@pytest.mark.xfail(strict=True, reason="clustering not implemented yet")
 def test_cluster_holds_still_apply(lib):
     _root, _artist, files = lib
     row = service.library.adopt_cluster(service.library.clusters()[0].id)

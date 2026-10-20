@@ -27,7 +27,13 @@ from ..naming.templates import (
     compile_template,
 )
 from ..providers.discogs import DiscogsRelease, DiscogsTrack
-from ._common import album_folder, album_record, root_for, title_match_min
+from ._common import (
+    album_folder,
+    album_record,
+    cluster_guess,
+    root_for,
+    title_match_min,
+)
 from ._releases import (
     album_tracks,
     candidate_row,
@@ -184,6 +190,8 @@ def album_target(album_id: int, release_id: int | None, template: CompiledTempla
                                        blocking_subdirs=list(lc.subfolders) if lc else [],
                                        loose_files=list(lc.loose_files) if lc else []))
     for kind, message, paths in check_layout(album, root, target):
+        if kind == "dest_inside_source" and paths == [target] and cluster_guess(row):
+            continue  # a cluster moves only its own files, so its target may be a subfolder of theirs
         result.problems.append(Problem(LAYOUT_KIND[kind], message, list(paths)))
     if fetched:
         layout = layout_album(album, root, release, dtracks, original_year, target_dir=target, file_name=namer,

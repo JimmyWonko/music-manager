@@ -33,6 +33,7 @@ class State:
     # plan.build's background release fetches: (album id, release id) -> job id, and recent failures
     fetching: dict[tuple[int, int], int] = field(default_factory=dict)
     fetch_failures: dict[tuple[int, int], tuple[float, str]] = field(default_factory=dict)
+    clusters: dict[str, Any] = field(default_factory=dict)  # cluster id -> Cluster (last library.clusters)
     lock: threading.RLock = field(default_factory=threading.RLock)
     ids: Any = field(default_factory=lambda: itertools.count(1))
     _config: config_mod.Config | None = None

@@ -1,0 +1,15 @@
+Matrixwell
+Copyright (C) 2026 James Boucher
+Licensed under the GNU General Public License, version 3 or later (see LICENSE).
+
+Third-party code
+================
+
+Some files are derived from MusicBrainz Picard (https://picard.musicbrainz.org/),
+licensed under the GNU General Public License, version 2 or (at your option) any
+later version, which permits its use under GPL-3.0-or-later here. Each such file
+keeps Picard's copyright header.
+
+- src/music_manager/clustering.py
+  from picard/cluster.py: Cluster.cluster (grouping files by album tag),
+  FileCluster (artist/title voting) and tokenize. Adapted; no MusicBrainz IDs.

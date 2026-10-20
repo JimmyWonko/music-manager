@@ -107,10 +107,17 @@ def problems_from_json(text: str | None) -> list[Problem]:
     return out
 
 
+def cluster_guess(row: sqlite3.Row) -> dict | None:
+    """The guess of an adopted cluster row (keys cluster, cluster_folder), else None."""
+    guess = json.loads(row["guess"] or "{}")
+    return guess if guess.get("cluster") else None
+
+
 def row_to_album_row(row: sqlite3.Row) -> AlbumRow:
+    cg = cluster_guess(row)
     return AlbumRow(
         id=row["id"],
-        folder=Path(row["folder"]),
+        folder=Path(cg["cluster_folder"]) if cg else Path(row["folder"]),
         artist=row["artist"],
         title=row["title"],
         year=row["year"],
@@ -123,6 +130,7 @@ def row_to_album_row(row: sqlite3.Row) -> AlbumRow:
         added_at=from_iso(row["added_at"]),
         held_for=problems_from_json(row["held_for"]),
         loose_tracks=bool(json.loads(row["guess"] or "{}").get("loose_tracks")),
+        cluster_id=cg["cluster"] if cg else None,
     )
 
 
@@ -158,6 +166,9 @@ def album_folder(album_id: int, st: State | None = None) -> AlbumFolder:
     """The album as the engine sees it now: re-collected from disk when the folder exists."""
     st = st or state()
     row = album_record(album_id, st)
+    cg = cluster_guess(row)
+    if cg:  # an adopted cluster: exactly its files, no sidecars or extra folders (they stay put)
+        return AlbumFolder(Path(cg["cluster_folder"]), [t.path for t in local_tracks(album_id, st)])
     folder = Path(row["folder"])
     from ..fs import collect_albums
 

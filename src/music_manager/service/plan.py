@@ -348,6 +348,16 @@ def _reindex(st: State, album_id: int, root: Path, folder: Path, status: MatchSt
     from .library import index_album
 
     found = next((a for a in collect_albums(folder) if a.path == folder), None) if folder.is_dir() else None
+    other = st.index.one("SELECT id FROM albums WHERE folder = ? AND id != ?", (str(folder), album_id))
+    if other is not None:  # an adopted cluster went back to its folder (undo): the folder's own row takes its files
+        with st.index.tx() as conn:
+            conn.execute("DELETE FROM albums WHERE id = ?", (album_id,))
+            st.index.delete_fts(conn, album_id)
+        if found is not None:
+            index_album(st, root, found, album_id=other["id"])
+        events.album_changed.emit(album_id)
+        events.album_changed.emit(other["id"])
+        return
     if found is not None:
         index_album(st, root, found, status=status, album_id=album_id)
     set_status(album_id, status, **columns)

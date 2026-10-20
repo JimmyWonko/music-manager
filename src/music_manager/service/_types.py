@@ -190,6 +190,7 @@ class AlbumRow:
     added_at: datetime  # when a scan first saw this folder (timezone-aware UTC)
     held_for: list[Problem] = field(default_factory=list)  # empty unless status is HELD
     loose_tracks: bool = False  # loose files next to subfolders with audio: artist = folder name, title ""
+    cluster_id: str | None = None  # set when this album is an adopted cluster (library.adopt_cluster)
 
 
 @dataclass(frozen=True)
@@ -267,6 +268,43 @@ class Destination:
     folder: Path  # absolute; always inside library_root
     files: list[tuple[Path, Path]]  # before, after (empty until fetched)
     problems: list[Problem]
+
+
+# --- clusters and the album-match view -------------------------------------------
+
+@dataclass(frozen=True)
+class ClusterFile:
+    path: Path
+    disc: int  # DISCNUMBER tag, else CD folder / "2-01" name, else 1
+    number: int | None
+    title: str
+    duration_s: float | None
+    album: str  # the file's own album tag ("" if none); what it was clustered by
+    artist: str  # its albumartist tag, else artist tag
+
+
+@dataclass(frozen=True)
+class Cluster:
+    id: str  # "cl-" + hash of its files: stable while the set of files is the same
+    artist: str  # most common (album)artist of its files
+    title: str  # most common album tag (folder name for files without one)
+    folder: Path  # the folder holding the files (their common parent)
+    files: list[ClusterFile]  # path order
+    disc_count: int  # distinct disc numbers
+    album_id: int | None = None  # the album row once adopted (library.adopt_cluster), else None
+
+
+@dataclass(frozen=True)
+class MatchView:
+    album_id: int | None  # None: a cluster not adopted yet (no candidates, every file unmatched)
+    cluster_id: str | None
+    release_id: int | None  # the release shown: asked for, else chosen, else best candidate
+    fetched: bool  # its full tracklist is known (pairs are empty until then)
+    candidates: list[Candidate]  # best first, as match.candidates
+    pairs: list[TrackPair]  # every pairing, as Candidate.alignment (local file -> release track)
+    unmatched_files: list[LocalTrack]  # local files no release track was paired with
+    unmatched_tracks: list[RemoteTrack]  # release tracks with no local file
+    problems: list[Problem]  # what plan.build would hold this album for with this release
 
 
 # --- plans ----------------------------------------------------------------------

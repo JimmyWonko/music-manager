@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 
 from ..match import AUTO_MIN_MARGIN, AUTO_MIN_SCORE, TITLE_MATCH_MIN, score_result
-from ._common import album_record, set_status
-from ._planning import album_target, resolve_template
+from ._common import album_record, cluster_guess, local_tracks, set_status
+from ._planning import album_target, chosen_release_id, resolve_template
 from ._releases import (
     build_candidates,
     candidate_row,
@@ -21,7 +21,9 @@ from ._types import (
     Destination,
     Job,
     JobKind,
+    LocalTrack,
     MatchStatus,
+    MatchView,
     NotFound,
     ProviderError,
     ValidationError,
@@ -224,4 +226,45 @@ def destination(album_id: int, release_id: int, template: str | None = None) -> 
     return Destination(target.root, target.target, target.files, target.problems)
 
 
-__all__ = ["auto_accept", "auto_rules", "candidates", "choose", "destination", "find", "manual", "skip"]
+def view(album_or_cluster_id: int | str, release_id: int | None = None) -> MatchView:
+    """The album-match view: candidates and file -> release-track pairing for one release. Read-only.
+
+    album_or_cluster_id: an album id, or a cluster id (library.clusters). A cluster that is not
+    adopted yet has no candidates: every file is unmatched (adopt it, then match.find). release_id
+    None: the chosen release, else the best candidate. Never calls Discogs: until the release is
+    fetched, fetched is False and pairs, unmatched_* and problems are those known (folder only).
+    problems are what plan.build would report (TRACK_MISMATCH before any override).
+    """
+    from .library import cluster as find_cluster
+
+    st = state()
+    cluster_id = None
+    if isinstance(album_or_cluster_id, str) and not album_or_cluster_id.isdigit():
+        c = find_cluster(album_or_cluster_id)
+        cluster_id = c.id
+        if c.album_id is None:
+            files = [LocalTrack(0, f.path, f.disc, f.number, f.title, f.duration_s) for f in c.files]
+            return MatchView(None, c.id, None, False, [], [], files, [], [])
+        album_id = c.album_id
+    else:
+        album_id = int(album_or_cluster_id)
+    row = album_record(album_id, st)
+    cg = cluster_guess(row)
+    cluster_id = cluster_id or (cg["cluster"] if cg else None)
+    cands = build_candidates(album_id, st)
+    rid = int(release_id) if release_id is not None else chosen_release_id(album_id, st)
+    locals_ = local_tracks(album_id, st)
+    if rid is None:
+        return MatchView(album_id, cluster_id, None, False, cands, [], locals_, [], [])
+    candidate_row(album_id, rid, st)  # NotFound for a release that is not a candidate
+    target = album_target(album_id, rid, resolve_template(None), st=st, fetch=False)
+    cand = next((c for c in cands if c.release_id == rid), None)
+    pairs = list(cand.alignment or []) if cand is not None else []
+    if not target.fetched:
+        return MatchView(album_id, cluster_id, rid, False, cands, [], locals_, [], list(target.problems))
+    return MatchView(album_id, cluster_id, rid, True, cands, pairs,
+                     [p.local for p in pairs if p.remote is None and p.local is not None],
+                     [p.remote for p in pairs if p.local is None and p.remote is not None], list(target.problems))
+
+
+__all__ = ["auto_accept", "auto_rules", "candidates", "choose", "destination", "find", "manual", "skip", "view"]

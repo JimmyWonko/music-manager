@@ -2,16 +2,30 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
-from ..fs import AlbumFolder, collect_albums
+from ..clustering import Item
+from ..clustering import cluster as cluster_items
+from ..fs import AlbumFolder, collect_albums, is_audio
 from ..match import _disc_from_folder, _title_from_stem, guess_from_album_dir
 from ..naming import year4
 from ..tags.read import _read_tag_file, album_release_ids
-from ._common import is_loose_tracks, iso, load_album, now_utc, row_to_album_row
+from ._common import (
+    cluster_guess,
+    is_loose_tracks,
+    iso,
+    load_album,
+    local_tracks,
+    now_utc,
+    root_for,
+    row_to_album_row,
+)
 from ._state import State, events, state
 from ._types import (
     STATUS_ORDER,
@@ -19,10 +33,13 @@ from ._types import (
     AlbumFilter,
     AlbumRow,
     AlbumSort,
+    Cluster,
+    ClusterFile,
     ConfigError,
     Job,
     JobKind,
     MatchStatus,
+    NotFound,
     Page,
     ValidationError,
 )
@@ -66,9 +83,16 @@ def scan(roots: list[Path] | None = None) -> Job:
     return st.runner.submit(JobKind.SCAN, work, message="scanning")
 
 
+def _vanished(st: State, row) -> bool:
+    if cluster_guess(row):  # an adopted cluster lives as long as one of its files does
+        return not any(Path(t["path"]).is_file()
+                       for t in st.index.query("SELECT path FROM tracks WHERE album_id = ?", (row["id"],)))
+    return not Path(row["folder"]).is_dir()
+
+
 def _drop_vanished(st: State, root: Path, seen: set[str]) -> int:
-    gone = [r["id"] for r in st.index.query("SELECT id, folder FROM albums WHERE root = ?", (str(root),))
-            if r["folder"] not in seen and not Path(r["folder"]).is_dir()]
+    gone = [r["id"] for r in st.index.query("SELECT id, folder, guess FROM albums WHERE root = ?", (str(root),))
+            if r["folder"] not in seen and _vanished(st, r)]
     with st.index.tx() as conn:
         for album_id in gone:
             conn.execute("DELETE FROM albums WHERE id = ?", (album_id,))
@@ -139,6 +163,9 @@ def index_album(st: State, root: Path, album: AlbumFolder, status: MatchStatus |
         old_tracks = {r["path"]: r
                       for r in st.index.query("SELECT * FROM tracks WHERE album_id = ?", (existing["id"],))}
 
+    claimed = _claimed(st, existing["id"] if existing is not None else album_id)
+    if claimed and not (existing is not None and cluster_guess(existing)):
+        album = replace(album, tracks=[p for p in album.tracks if str(p) not in claimed])
     rows = []
     changed = existing is None or existing["folder"] != folder
     for seq, path in enumerate(album.tracks):
@@ -321,4 +348,158 @@ def search(query: str, limit: int = 200) -> list[AlbumRow]:
     return list(albums(AlbumFilter(text=query), AlbumSort.ARTIST, 0, limit).items)
 
 
-__all__ = ["album", "albums", "scan", "search", "status_counts"]
+# --- clusters ---------------------------------------------------------------------
+
+CLUSTER_KEY = ".matrixwell-cluster-"  # albums.folder of an adopted cluster: <folder>/<CLUSTER_KEY><id> (never on disk)
+
+
+def _claimed(st: State, album_id: int | None) -> set[str]:
+    """Paths owned by adopted clusters (other than album_id): a folder's own row leaves them out."""
+    rows = st.index.query("SELECT t.path FROM tracks t JOIN albums a ON a.id = t.album_id"
+                          " WHERE a.id IS NOT ? AND a.folder LIKE ?", (album_id, f"%{CLUSTER_KEY}%"))
+    return {r["path"] for r in rows}
+
+
+def _cluster_id(paths: list[Path]) -> str:
+    return "cl-" + hashlib.sha1("\n".join(sorted(str(p) for p in paths)).encode()).hexdigest()[:12]
+
+
+def _cluster_file(path: Path, folder: Path) -> tuple[ClusterFile, Item]:
+    try:
+        tags = _read_tag_file(path, easy=True)[1]
+    except Exception:  # noqa: BLE001 - an unreadable file still clusters by folder name
+        tags = None
+    info = _track_info(path, folder)
+    album, albumartist, artist = _first(tags, "album"), _first(tags, "albumartist"), _first(tags, "artist")
+    cf = ClusterFile(path, info["disc"], info["number"], info["title"], info["duration"], album,
+                     albumartist or artist)
+    return cf, Item(cf, album, albumartist, artist, path.parent.name)
+
+
+def _group(paths: list[Path], folder: Path) -> list[Cluster]:
+    files = [_cluster_file(p, folder) for p in sorted(paths)]
+    out = []
+    for fc in cluster_items([item for _cf, item in files]):
+        members = sorted((item.key for item in fc.items), key=lambda f: str(f.path))
+        out.append(Cluster(_cluster_id([f.path for f in members]), fc.artist, fc.title, folder, members,
+                           len({f.disc for f in members})))
+    return out
+
+
+def _adopted(st: State) -> list[Cluster]:
+    out = []
+    for row in st.index.query("SELECT * FROM albums WHERE folder LIKE ?", (f"%{CLUSTER_KEY}%",)):
+        cg = cluster_guess(row)
+        if not cg:
+            continue
+        folder = Path(cg["cluster_folder"])
+        files = [f for f, _item in (_cluster_file(t.path, folder) for t in local_tracks(row["id"], st)
+                                    if t.path.is_file())]
+        out.append(Cluster(cg["cluster"], row["artist"], row["title"], folder, files, len({f.disc for f in files}),
+                           album_id=row["id"]))
+    return out
+
+
+def clusters(paths: list[Path] | None = None) -> list[Cluster]:
+    """Group loose files into album clusters by their album-level tags (Picard-style). Read-only.
+
+    paths None: the files of every loose-tracks album (AlbumRow.loose_tracks), clustered folder
+    by folder, plus every adopted cluster (album_id set). paths: exactly these audio files
+    (absolute, inside a library root), clustered together. Sorted by folder, then first file.
+    """
+    st = state()
+    if paths is None:
+        found: list[Cluster] = []
+        for row in st.index.query("SELECT * FROM albums WHERE folder NOT LIKE ?", (f"%{CLUSTER_KEY}%",)):
+            if not json.loads(row["guess"] or "{}").get("loose_tracks"):
+                continue
+            files = [t.path for t in local_tracks(row["id"], st) if t.path.is_file()]
+            found += _group(files, Path(row["folder"]))
+        found += _adopted(st)
+    else:
+        files = [Path(p) for p in paths]
+        if not files:
+            raise ValidationError("no files given", field="paths")
+        for p in files:
+            if not p.is_absolute() or not p.is_file() or not is_audio(p):
+                raise ValidationError(f"not an audio file: {p}", field="paths")
+            if root_for(p, st) is None:
+                raise ValidationError(f"not inside a library root: {p}", field="paths")
+        folder = Path(os.path.commonpath([str(p.parent) for p in files]))
+        adopted = {c.id: c for c in _adopted(st)}
+        found = [adopted.get(c.id, c) for c in _group(files, folder)]
+    found.sort(key=lambda c: (str(c.folder), str(c.files[0].path) if c.files else ""))
+    with st.lock:
+        st.clusters.update({c.id: c for c in found})
+    return found
+
+
+def cluster(cluster_id: str) -> Cluster:
+    """A cluster from the last clusters() call (or adopted). NotFound otherwise."""
+    st = state()
+    for c in _adopted(st):
+        if c.id == cluster_id:
+            return c
+    with st.lock:
+        found = st.clusters.get(cluster_id)
+    if found is None:
+        raise NotFound(f"cluster {cluster_id}")
+    return found
+
+
+def adopt_cluster(cluster_id: str) -> AlbumRow:
+    """Make a cluster an album (index only; nothing on disk changes) so match / plan / apply take it.
+
+    Its files leave their folder's own row; the album holds exactly them (no sidecars or extra
+    folders: they stay put). Status UNMATCHED; artist and title are the cluster's, the Discogs
+    search uses them. Idempotent: adopting again returns the same album.
+    """
+    st = state()
+    c = cluster(cluster_id)
+    if c.album_id is not None:
+        return row_to_album_row(st.index.one("SELECT * FROM albums WHERE id = ?", (c.album_id,)))
+    if not c.files:
+        raise ValidationError(f"cluster {cluster_id} has no files", field="cluster_id")
+    root = root_for(c.folder, st) or root_for(c.files[0].path, st)
+    if root is None:
+        raise ValidationError(f"not inside a library root: {c.folder}", field="cluster_id")
+    years = []
+    try:
+        guess = guess_from_album_dir(c.folder, [f.path for f in c.files])
+        years = [y for y in (guess.get("originalyear", ""), guess.get("year", "")) if y]
+    except Exception:  # noqa: BLE001
+        guess = {}
+    guess = {"artist": c.artist, "album": c.title, "year": min(years) if years else "",
+             "catno": guess.get("catno", ""), "cluster": c.id, "cluster_folder": str(c.folder)}
+    paths = [str(f.path) for f in c.files]
+    owners = {r["album_id"] for r in st.index.query(
+        f"SELECT DISTINCT album_id FROM tracks WHERE path IN ({', '.join('?' * len(paths))})", paths)}
+    with st.index.tx() as conn:
+        conn.execute(f"DELETE FROM tracks WHERE path IN ({', '.join('?' * len(paths))})", paths)
+        for owner in owners:
+            conn.execute("UPDATE albums SET track_count = (SELECT COUNT(*) FROM tracks WHERE album_id = ?)"
+                         " WHERE id = ?", (owner, owner))
+        cur = conn.execute(
+            "INSERT INTO albums(folder, root, artist, title, year, catno, artist_sort, track_count, status, added_at,"
+            " guess) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (str(c.folder / f"{CLUSTER_KEY}{c.id}"), str(root), c.artist, c.title, guess["year"], guess["catno"],
+             c.artist, len(c.files), MatchStatus.UNMATCHED.value, iso(now_utc()), json.dumps(guess)))
+        aid = cur.lastrowid
+        rows = []
+        for seq, f in enumerate(c.files):
+            try:
+                stat = f.path.stat()
+                size, mtime = stat.st_size, stat.st_mtime_ns
+            except OSError:
+                size = mtime = None
+            rows.append((aid, seq, str(f.path), f.disc, f.number, f.title, f.duration_s, size, mtime))
+        conn.executemany("INSERT INTO tracks(album_id, seq, path, disc, number, title, duration, size, mtime_ns)"
+                         " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+        st.index.update_fts(conn, aid, c.artist, c.title, " ".join(f.title for f in c.files))
+    for owner in owners:
+        events.album_changed.emit(owner)
+    events.album_changed.emit(aid)
+    return row_to_album_row(st.index.one("SELECT * FROM albums WHERE id = ?", (aid,)))
+
+
+__all__ = ["adopt_cluster", "album", "albums", "cluster", "clusters", "scan", "search", "status_counts"]
