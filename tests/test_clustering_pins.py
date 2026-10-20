@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from service_fixtures import direct
 from test_clustering import HAM_ID, _loose, _tagged, lib  # noqa: F401  (fixture)
 
 from music_manager import service
@@ -10,8 +11,9 @@ from music_manager.service import JobState
 
 
 def _record(signal):
+    """Slots run on the emitting thread (the job worker too), so jobs.wait() returns after delivery."""
     got = []
-    signal.connect(lambda *a: got.append(a if len(a) != 1 else a[0]))
+    direct(signal, lambda *a: got.append(a if len(a) != 1 else a[0]))
     return got
 
 
