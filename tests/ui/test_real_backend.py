@@ -645,7 +645,7 @@ def test_real_layout_ambiguous_is_held_and_not_overridable(real, qtbot):
         lps = [p for p in by[ids[k]].problems if P.kind_of(p) == P.LAYOUT_AMBIGUOUS]
         assert len(lps) == 1 and lps[0].paths == [f["art" if k == "stray" else k]], (k, by[ids[k]].problems)
         assert P.held(by[ids[k]]) and not P.overridable(by[ids[k]])
-        assert P.label(lps[0]) == "Loose tracks next to album folders"
+        assert P.label(lps[0]) == "Loose tracks next to subfolders with audio"
     assert P.layout_shape(P.layout_problem(by[ids["mixed"]].problems)) == "discs"
     assert P.layout_dirs(P.layout_problem(by[ids["mixed"]].problems)) == ["CD1", "CD2"]
     assert P.layout_dirs(P.layout_problem(by[ids["stray"]].problems)) == ["[1984]  My War [SST023]"]
@@ -664,7 +664,7 @@ def test_real_layout_ambiguous_is_held_and_not_overridable(real, qtbot):
     items = {(dlg.problem_list.item(i).data(Qt.UserRole), dlg.problem_list.item(i).data(Qt.UserRole + 1)):
              dlg.problem_list.item(i).text() for i in range(dlg.problem_list.count())}
     st = items[(ids["stray"], "layout_ambiguous")]
-    assert st.startswith("⚠ Black Flag: loose tracks next to subfolders with audio (held) · [1984]  My War [SST023]/ — Loose tracks next to album folders"), st
+    assert st.startswith("⚠ Black Flag: loose tracks next to subfolders with audio (held) · [1984]  My War [SST023]/\n"), st
     assert (by[ids["stray"]].artist, by[ids["stray"]].title) == ("Black Flag", "")      # AlbumPlan (d6ac2f3)
     assert "Loose files (1):\n      stray.mp3" in st and "[1984]  My War [SST023]/" in st
     mx = items[(ids["mixed"], "layout_ambiguous")]
@@ -712,7 +712,7 @@ def test_real_lists_name_held_loose_folder_and_subfolder_albums(real, qtbot):
     row = next(i for i, t in enumerate(texts) if t.startswith("Black Flag: loose tracks next to subfolders with audio (held) · [1984]  My War [SST023]/"))
     assert texts[row].endswith("⚠ Needs a look")
     w.list.setCurrentIndex(w.model.index(row))
-    assert "Loose tracks next to album folders" in w.preview.text() and "stray.mp3" in w.preview.text()
+    assert "Loose tracks next to subfolders with audio" in w.preview.text() and "stray.mp3" in w.preview.text()
 
 
 # ---------------------------------------------------------------- structured problem detail (ccfa4a8 / 2b82859)
@@ -902,3 +902,11 @@ def test_real_review_header_counts_accepted(real, qtbot):
     assert c.get("ACCEPTED")
     w = ReviewWindow(svc); qtbot.addWidget(w)
     assert f"{c['ACCEPTED']} accepted" in w.counts.text() and P.status_summary(c) in w.counts.text()
+
+
+def test_real_layout_messages_match_the_mock(real):
+    """The mock quotes the engine's layout messages (0a3fad1: STRAY_AUDIO worded neutrally); keep them equal."""
+    from mm_ui import fake_service as FS
+    fs = sys.modules["music_manager.fs"]
+    assert (FS.STRAY_AUDIO, FS.MIXED_DISCS) == (fs.STRAY_AUDIO, fs.MIXED_DISCS)
+    assert "not an album" not in fs.STRAY_AUDIO

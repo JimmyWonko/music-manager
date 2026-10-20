@@ -1,6 +1,6 @@
 """ProblemKind.LAYOUT_AMBIGUOUS (68cf4d7, API-CONTRACT "Album folders with loose audio and subfolders") on the
-fake backend: loose audio next to disc folders / other album folders holds the album ("Loose tracks next to
-album folders"), lists the files involved, is never overridable, and the lists name the loose-files "album"
+fake backend: loose audio next to disc folders / other subfolders with audio holds the album ("Loose tracks next to
+subfolders with audio"), lists the files involved, is never overridable, and the lists name the loose-files "album"
 by its folder with a hint while its subfolders are listed as albums of their own. Real backend: in
 test_real_backend.py."""
 from pathlib import Path
@@ -41,7 +41,7 @@ def _apply(fake, qtbot, ids):
 
 def test_layout_ambiguous_kind_label_and_helpers():
     assert FS.ProblemKind.LAYOUT_AMBIGUOUS.value == "layout_ambiguous"
-    assert P.LABELS["layout_ambiguous"] == "Loose tracks next to album folders"
+    assert P.LABELS["layout_ambiguous"] == "Loose tracks next to subfolders with audio"
     assert len(set(P.LABELS.values())) == len(P.LABELS)
     bf = Path("/m/Black Flag")
     stray = FS.Problem(FS.ProblemKind.LAYOUT_AMBIGUOUS, FS.STRAY_AUDIO.format(folders="whatever/"), [bf],
@@ -96,7 +96,7 @@ def test_layout_fallback_when_fields_are_empty():
     assert P.layout_dirs(old_stray) == [] and P.layout_shape(old_stray, [Path("/m/Black Flag/stray.mp3")]) == "folders"
     import inspect
     src = inspect.getsource(P)
-    assert "other album folders (" not in src and "disc folders with audio (" not in src   # no message parsing
+    assert "subfolders that also hold audio (" not in src and "disc folders with audio (" not in src   # no parsing
 
 
 def test_mock_scan_lists_subfolders_as_their_own_albums(fake, lay):
@@ -108,7 +108,7 @@ def test_mock_scan_lists_subfolders_as_their_own_albums(fake, lay):
     assert [t.path.relative_to(a["mixed"].folder).as_posix() for t in a["mixed"].tracks] == [
         "01 Split Myself in Two.mp3", "CD1/02 Magic Toy Missing.mp3", "CD2/01 Lost.mp3"]   # loose first, then discs
     assert a["bonus_dir"].folder.parent == a["bonus"].folder and a["bonus_dir"].title == "Bonus"
-    assert core.layout_problem(lay["buzz"]) == "" and "other album folders" in core.layout_problem(lay["stray"])
+    assert core.layout_problem(lay["buzz"]) == "" and "subfolders that also hold audio" in core.layout_problem(lay["stray"])
 
 
 def test_mock_plan_holds_layout_ambiguous_and_never_overrides(fake, qtbot, lay):
@@ -145,10 +145,10 @@ def test_apply_dialog_lists_loose_files_without_apply_anyway(fake, qtbot, lay):
     st = items[(lay["stray"], "layout_ambiguous")]
     dirs = P.short_subdirs(P.layout_problem(next(ap for ap in plan.albums if ap.album_id == lay["stray"]).problems))
     assert dirs.startswith("[1983]  Buzz") and "…" in dirs and dirs.endswith("[SST058]/")
-    assert st.startswith(f"⚠ Minutemen: loose tracks next to subfolders with audio (held) · {dirs} — Loose tracks next to album folders"), st
-    assert "not an album" not in st.split("\n")[0]
+    assert st.startswith(f"⚠ Minutemen: loose tracks next to subfolders with audio (held) · {dirs}\n"), st
+    assert "not an album" not in st and "album folders" not in st     # 0a3fad1: the message is neutral too
     assert "Loose files (1):\n      demo take.mp3" in st
-    assert "Next to album folders (2):" in st and "[1985]  3-Way Tie (For Last) [SST058]/" in st
+    assert "Next to subfolders with audio (2):" in st and "[1985]  3-Way Tie (For Last) [SST058]/" in st
     mx = items[(lay["mixed"], "layout_ambiguous")]
     assert "Meat Puppets – Meat Puppets II · loose tracks next to disc folders" in mx
     assert "In the subfolders (2):" in mx and "CD2/01 Lost.mp3" in mx and "Next to disc folders (2):" in mx
@@ -187,8 +187,8 @@ def test_lists_name_held_loose_folder_and_its_subfolder_albums(fake, qtbot, lay)
     assert any(t.startswith("Minutemen: loose tracks next to subfolders with audio (held) · [1983]  Buzz") and t.endswith("⚠ Needs a look") for t in texts)
     row = next(i for i, t in enumerate(texts) if t.startswith("Minutemen: loose tracks next to subfolders with audio (held)"))
     w.list.setCurrentIndex(w.model.index(row))
-    assert "Loose tracks next to album folders" in w.preview.text() and "demo take.mp3" in w.preview.text()
-    assert "Loose tracks next to album folders" in w.model.index(row).data(Qt.ToolTipRole)
+    assert "Loose tracks next to subfolders with audio" in w.preview.text() and "demo take.mp3" in w.preview.text()
+    assert "Loose tracks next to subfolders with audio" in w.model.index(row).data(Qt.ToolTipRole)
     w.filter_box.setCurrentText("All")
     texts = [w.model.index(i).data() for i in range(w.model.rowCount())]
     assert any(t.startswith("[1984]  Zen Arcade [SST027]/Bonus") for t in texts)
@@ -222,7 +222,7 @@ def test_review_preview_names_files_before_apply(fake, qtbot, lay):
     row = next(i for i in range(w.model.rowCount()) if "Meat Puppets II" in w.model.index(i).data())
     w.list.setCurrentIndex(w.model.index(row))
     t = w.preview.text()
-    assert "Loose tracks next to album folders" in t and "CD1/02 Magic Toy Missing.mp3" in t and "CD1/" in t
+    assert "Loose tracks next to subfolders with audio" in t and "CD1/02 Magic Toy Missing.mp3" in t and "CD1/" in t
 
 
 def test_ui_apply_holds_layout_album_and_applies_the_rest(fake, qtbot, monkeypatch, lay):

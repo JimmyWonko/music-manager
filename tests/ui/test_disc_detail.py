@@ -214,7 +214,7 @@ def test_mock_layout_problems_carry_structured_fields(fake, qtbot, monkeypatch):
     plan = built(fake, [ids["stray"]])
     d = ApplyDialog(plan, album_name=w.album_name, album_row=w.album_row); qtbot.addWidget(d)
     t = d.problem_list.item(0).text()
-    assert "reworded message" in t and "Next to album folders (2):" in t and "[1983]  Buzz or Howl" in t
+    assert "reworded message" in t and "Next to subfolders with audio (2):" in t and "[1983]  Buzz or Howl" in t
 
 
 # ---------------------------------------------------------------- disc_folder_mismatch

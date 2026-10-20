@@ -22,7 +22,7 @@ LABELS = {
     "legacy_journal": "Older journal format: tag restore needs confirmation",
     "release_not_fetched": "Fetching from Discogs…",   # not an error, never holds an album
     "disc_ambiguous": "Can't work out the disc layout",   # multi-disc: paths = the files; never overridable
-    "layout_ambiguous": "Loose tracks next to album folders",   # paths = [album folder]; never overridable
+    "layout_ambiguous": "Loose tracks next to subfolders with audio",   # paths = [album folder]; never overridable
     "disc_folder_mismatch": "Tracks would go into another disc's folder",   # template issue; never overridable
 }
 NOT_FETCHED = "release_not_fetched"   # not held: apply leaves the album out and its status stays as it was
@@ -259,7 +259,7 @@ def layout_shape(problem, files=None) -> str:
 
 def layout_hint(problem, files=None) -> str:
     return ("loose tracks next to disc folders" if layout_shape(problem, files) == "discs"
-            else "loose tracks next to album folders")
+            else "loose tracks next to subfolders with audio")
 
 
 def layout_dirs(problem) -> list[str]:
@@ -375,7 +375,7 @@ def layout_files(problem, folder, files) -> list[str]:
     if inside:          # disc_folders: the disc folders' files are part of this album too
         lines += [f"In the subfolders ({len(inside)}):"] + [f"  {r}" for r in inside]
     if dirs:
-        lines += [f"Next to {'disc folders' if shape == 'discs' else 'album folders'} ({len(dirs)}):"] + [
+        lines += [f"Next to {'disc folders' if shape == 'discs' else 'subfolders with audio'} ({len(dirs)}):"] + [
             f"  {d}/" for d in dirs]
     return lines
 

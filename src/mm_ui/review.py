@@ -899,8 +899,10 @@ class ApplyDialog(QDialog):
                 if undo else f"<b style='color:#a33'>{len(self.held_aps)} album(s) held back for a look</b> "
                 "(they stay where they are; the rest apply now):")
             for ap, p in shown:
-                n = name(ap)       # "Black Flag: loose tracks … (held)" already has its colon
-                text = f"⚠ {n}{' —' if P.LOOSE_TEXT in n else ':'} {P.label(p)}\n    {p.message}"
+                n = name(ap)       # "Black Flag: loose tracks … (held)" already says what the problem is
+                loose_named = P.LOOSE_TEXT in n and P.kind_of(p) == P.LAYOUT_AMBIGUOUS
+                text = (f"⚠ {n}" if loose_named else
+                        f"⚠ {n}{' —' if P.LOOSE_TEXT in n else ':'} {P.label(p)}") + f"\n    {p.message}"
                 if P.kind_of(p) == P.DISC_AMBIGUOUS:     # per file: why, and the disc/track choices
                     text += "".join(f"\n    {x}" for x in P.disc_conflict_lines(p, ap.folder_before))
                 elif P.kind_of(p) == P.DISC_FOLDER_MISMATCH:   # "13 Mason Jar.flac → CD2/ (disc tag 1)"
