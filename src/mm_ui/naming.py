@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QPlainTextEdit, QVBoxLayout,
 )
 
+from . import problems as P
 from .backend import Backend, as_backend
 
 CATNO_BITS = (" [%catno%]", "%catno% • ", "[%catno%] ")
@@ -188,7 +189,7 @@ class NamingDialog(QDialog):
     def _album_name(self, album_id):
         try:
             a = self.svc.library.album(album_id)
-            return f"{a.artist} – {a.title}"
+            return P.row_label(a.artist, a.title, P.is_loose_tracks(a))
         except Exception:
             return f"album {album_id}"
 

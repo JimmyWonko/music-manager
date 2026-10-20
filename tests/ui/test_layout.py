@@ -55,14 +55,18 @@ def test_layout_ambiguous_kind_label_and_helpers():
     assert P.layout_dirs(mixed) == ["CD1", "CD2"] and P.layout_shape(mixed) == "discs"
     assert P.loose_files(stray) == [bf / "stray.mp3"]
     assert not P.overridable(NS(problems=[stray])) and P.blocking_reasons(NS(problems=[stray])) == [P.label(stray)]
-    # names: the loose-files "album" in an artist folder vs a real album with a Bonus/ folder
-    row = NS(folder=bf, artist="m", title="Black Flag")
-    assert P.display_names(row, stray) == ("Black Flag", "Loose tracks, not an album")
-    zen = NS(folder=Path("/m/HD/[1984]  Zen Arcade [SST027]"), artist="HD", title="Zen Arcade")
-    assert P.display_names(zen, stray) == ("HD", "Zen Arcade · loose tracks next to album folders")
-    bonus = NS(folder=zen.folder / "Bonus", artist="", title="Bonus")
+    # names (d6ac2f3): keyed on AlbumRow.loose_tracks, never on the folder's names or the held state
+    row = NS(folder=bf, artist="Black Flag", title="", loose_tracks=True)
+    assert P.display_names(row) == P.display_names(row, stray) == ("Black Flag", "Loose tracks, not an album")
+    assert P.row_label(*P.display_names(row), loose=True) == "Black Flag: Loose tracks, not an album"
+    old_shape = NS(folder=bf, artist="m", title="Black Flag")          # pre-d6ac2f3 names, no field: no guessing
+    assert P.display_names(old_shape, stray) == ("m", "Black Flag")
+    real_album = NS(folder=Path("/m/HD/[1984]  Zen Arcade [SST027]"), artist="HD", title="", loose_tracks=False)
+    assert P.display_names(real_album) == ("HD", "")                   # an empty title alone means nothing
+    assert P.display_names(NS(folder=x, artist="X", title="Y", loose_tracks=False), mixed) == (
+        "X", "Y · loose tracks next to disc folders")
+    bonus = NS(folder=Path("/m/HD/[1984]  Zen Arcade [SST027]/Bonus"), artist="", title="Bonus")
     assert P.display_names(bonus) == ("", "[1984]  Zen Arcade [SST027]/Bonus")
-    assert P.display_names(bonus, parent=(zen, stray)) == ("HD", "Zen Arcade / Bonus")
     files = [x / "01 One.flac", x / "CD1/02 Two.flac"]
     assert P.layout_files(mixed, x, files) == ["Loose files (1):", "  01 One.flac", "In the subfolders (1):",
                                                "  CD1/02 Two.flac", "Next to disc folders (2):", "  CD1/", "  CD2/"]
@@ -130,18 +134,20 @@ def test_apply_dialog_lists_loose_files_without_apply_anyway(fake, qtbot, lay):
     items = {(d.problem_list.item(i).data(Qt.UserRole), d.problem_list.item(i).data(Qt.UserRole + 1)):
              d.problem_list.item(i).text() for i in range(d.problem_list.count())}
     st = items[(lay["stray"], "layout_ambiguous")]
-    assert st.startswith("⚠ Minutemen – Loose tracks, not an album: Loose tracks next to album folders")
+    assert st.startswith("⚠ Minutemen: Loose tracks, not an album — Loose tracks next to album folders"), st
     assert "Loose files (1):\n      demo take.mp3" in st
     assert "Next to album folders (2):" in st and "[1985]  3-Way Tie (For Last) [SST058]/" in st
     mx = items[(lay["mixed"], "layout_ambiguous")]
     assert "Meat Puppets – Meat Puppets II · loose tracks next to disc folders" in mx
     assert "In the subfolders (2):" in mx and "CD2/01 Lost.mp3" in mx and "Next to disc folders (2):" in mx
     rows = {d.tree.topLevelItem(i).data(0, Qt.UserRole): d.tree.topLevelItem(i) for i in range(d.tree.topLevelItemCount())}
-    assert rows[lay["stray"]].text(0) == "Held back: Minutemen – Loose tracks, not an album"
+    assert rows[lay["stray"]].text(0) == "Held back: Minutemen: Loose tracks, not an album"
     assert rows[lay["stray"]].childCount() == 0 and "demo take.mp3" in rows[lay["stray"]].toolTip(0)
-    # no library lookup (e.g. an undo-style caller): folder name + hint
+    # no library lookup: AlbumPlan.artist (the folder's name, title "") + the plan's album_folders reason
+    ap = next(ap for ap in plan.albums if ap.album_id == lay["stray"])
+    assert (ap.artist, ap.title) == ("Minutemen", "")
     d2 = ApplyDialog(plan); qtbot.addWidget(d2)
-    assert any(d2.tree.topLevelItem(i).text(0) == "Held back: Minutemen/ (loose tracks next to album folders)"
+    assert any(d2.tree.topLevelItem(i).text(0) == "Held back: Minutemen: Loose tracks, not an album"
                for i in range(d2.tree.topLevelItemCount()))
 
 
@@ -149,7 +155,7 @@ def test_lists_name_held_loose_folder_and_its_subfolder_albums(fake, qtbot, lay)
     _apply(fake, qtbot, [lay["stray"], lay["bonus"]])
     assert fake.library.album(lay["stray"]).status.name == "HELD"
     idx = LayoutIndex(fake)
-    assert set(idx.held) == {fake.library.album(lay["stray"]).folder, fake.library.album(lay["bonus"]).folder}
+    assert set(idx.loose) == {fake.library.album(lay["stray"]).folder, fake.library.album(lay["bonus"]).folder}
     lib = LibraryWindow(fake); qtbot.addWidget(lib)
     m = lib.model
     shown = {m.rows[i].id: (m.index(i, 0).data(), m.index(i, 1).data(), m.index(i, 1).data(Qt.ToolTipRole))
@@ -158,22 +164,41 @@ def test_lists_name_held_loose_folder_and_its_subfolder_albums(fake, qtbot, lay)
     assert "Next to: [1983]  Buzz or Howl" in shown[lay["stray"]][2]
     assert shown[lay["buzz"]][:2] == ("Minutemen", "Buzz or Howl Under the Influence of Heat")
     assert "Listed as its own album" in shown[lay["buzz"]][2] and "Minutemen/" in shown[lay["buzz"]][2]
-    assert shown[lay["bonus"]][:2] == ("Hüsker Dü", "Zen Arcade · loose tracks next to album folders")
-    assert shown[lay["bonus_dir"]][:2] == ("Hüsker Dü", "Zen Arcade / Bonus")
+    assert shown[lay["bonus"]][:2] == ("[1984]  Zen Arcade [SST027]", "Loose tracks, not an album")
+    assert shown[lay["bonus_dir"]][:2] == ("", "[1984]  Zen Arcade [SST027]/Bonus")
     assert shown[lay["mixed"]][:2] == ("Meat Puppets", "Meat Puppets II")         # not held yet: as scanned
-    # review list: "Needs a look" shows the folder name + hint
+    # review list: "Needs a look"
     w = ReviewWindow(fake); qtbot.addWidget(w)
     w.filter_box.setCurrentText("Needs a look")
     texts = [w.model.index(i).data() for i in range(w.model.rowCount())]
-    assert any(t.startswith("Minutemen – Loose tracks, not an album") and t.endswith("⚠ Needs a look") for t in texts)
-    row = next(i for i, t in enumerate(texts) if t.startswith("Minutemen – Loose"))
+    assert any(t.startswith("Minutemen: Loose tracks, not an album") and t.endswith("⚠ Needs a look") for t in texts)
+    row = next(i for i, t in enumerate(texts) if t.startswith("Minutemen: Loose"))
     w.list.setCurrentIndex(w.model.index(row))
     assert "Loose tracks next to album folders" in w.preview.text() and "demo take.mp3" in w.preview.text()
     assert "Loose tracks next to album folders" in w.model.index(row).data(Qt.ToolTipRole)
     w.filter_box.setCurrentText("All")
     texts = [w.model.index(i).data() for i in range(w.model.rowCount())]
-    assert any(t.startswith("Hüsker Dü – Zen Arcade / Bonus") for t in texts)
-    assert w.album_name(lay["stray"]) == "Minutemen – Loose tracks, not an album"
+    assert any(t.startswith("[1984]  Zen Arcade [SST027]/Bonus") for t in texts)
+
+
+def test_loose_tracks_named_before_any_plan(fake, qtbot, lay):
+    """d6ac2f3: the scan already says loose_tracks, so every screen names it before a plan exists or it's held."""
+    a = fake.library.album(lay["stray"])
+    assert a.loose_tracks and (a.artist, a.title, a.year, a.catno) == ("Minutemen", "", "", "")
+    assert a.status.name != "HELD" and not a.held_for
+    assert not fake.library.album(lay["mixed"]).loose_tracks and not fake.library.album(lay["buzz"]).loose_tracks
+    lib = LibraryWindow(fake); qtbot.addWidget(lib)
+    m = lib.model
+    i = next(i for i in range(m.rowCount()) if m.rows[i].id == lay["stray"])
+    assert (m.index(i, 0).data(), m.index(i, 1).data()) == ("Minutemen", "Loose tracks, not an album")
+    assert m.index(i, 2).data() in ("", None) and m.index(i, 3).data() in ("", None)      # no year / catno
+    w = ReviewWindow(fake); qtbot.addWidget(w)
+    w.filter_box.setCurrentText("All")
+    texts = [w.model.index(j).data() for j in range(w.model.rowCount())]
+    t = next(t for t in texts if t.startswith("Minutemen: Loose tracks, not an album"))
+    assert "Needs a look" not in t
+    assert w.album_name(lay["stray"]) == "Minutemen: Loose tracks, not an album"
+    assert w.album_name(lay["buzz"]) == "Minutemen – Buzz or Howl Under the Influence of Heat"
 
 
 def test_review_preview_names_files_before_apply(fake, qtbot, lay):

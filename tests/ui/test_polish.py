@@ -343,3 +343,31 @@ def test_long_after_apply_text_never_widens_the_review_window(fake, qtbot):
     w.preview.setText("⚠ " + "a long sentence from the engine " * 40 + "\n    Files (1):\n      " + "x" * 300)
     assert w.minimumSizeHint().width() < 1280
     assert 0 < w.preview_scroll.sizeHint().height() <= w.preview_scroll.MAX_H
+
+
+def test_status_summary_counts_every_status_in_review_order():
+    import mm_ui.fake_service as FS
+    S = FS.MatchStatus
+    c = {S.APPLIED: 1, S.ACCEPTED: 6, S.UNMATCHED: 1, S.HELD: 1, S.MATCHED: 0, S.NEEDS_REVIEW: 0}
+    assert P.status_summary(c) == "1 held · 1 unmatched · 6 accepted · 1 applied"
+    assert P.status_summary({"NEEDS_REVIEW": 2, "NO_MATCH": 1, "SKIPPED": 3}) == "2 need review · 3 skipped · 1 no match"
+    assert P.status_summary({"SOMETHING_NEW": 2}) == "2 something new"       # a status this UI doesn't know yet
+    assert P.status_summary({}) == ""
+
+
+def test_review_header_counts_accepted_held_and_applied(fake, qtbot, monkeypatch):
+    """It used to read "0 matched · 0 need review · 0 no match" with every album Accepted."""
+    import mm_ui.fake_service as FS
+    S = FS.MatchStatus
+    monkeypatch.setattr(fake.library, "status_counts",
+                        lambda f=None: {S.ACCEPTED: 6, S.HELD: 1, S.APPLIED: 1, S.UNMATCHED: 1, S.MATCHED: 0})
+    w = ReviewWindow(fake); qtbot.addWidget(w)
+    t = w.counts.text()
+    assert t == "<b>9 albums</b> · 1 held · 1 unmatched · 6 accepted · 1 applied", t
+    assert "0 matched" not in t
+
+
+def test_library_footer_uses_the_same_status_words(fake, qtbot):
+    lib = LibraryWindow(fake); qtbot.addWidget(lib)
+    c = {s.name: n for s, n in fake.library.status_counts(fake.album_filter(None, "")).items()}
+    assert lib.counts.text() == P.status_summary(c) and "need review" in lib.counts.text()

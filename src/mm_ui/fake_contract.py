@@ -555,7 +555,15 @@ class FakeContract:
 
     def _album_label(self, album_id: int) -> str:
         a = self._album(album_id)
-        return f"{a.artist} – {a.title}"
+        return f"{a.artist} – {a.title}" if a.title else a.artist
+
+    @staticmethod
+    def _plan_names(album, cand) -> tuple[str, str]:
+        """AlbumPlan.artist / title: the release's; loose tracks (d6ac2f3) get the folder's name and "" (held,
+        never tagged as that release)."""
+        if getattr(album, "loose_tracks", False):
+            return album.folder.name, ""
+        return cand.artist, cand.title
 
     def _collisions(self, layouts: dict[int, tuple[Path, list]]) -> list[Collision]:
         out, by_folder = [], {}
@@ -722,7 +730,7 @@ class FakeContract:
                 err = self._fetch_errors.get(key)
                 if not (err and self.clock() - err[0] < FETCH_ERROR_HOLD_S):
                     self._fetch_errors.pop(key, None); err = None
-                not_fetched.append((AlbumPlan(aid, cand.release_id, album.folder, folder, [], [], cand.artist, cand.title), err))
+                not_fetched.append((AlbumPlan(aid, cand.release_id, album.folder, folder, [], [], *self._plan_names(album, cand)), err))
                 continue
             layouts[aid] = (album, cand) + self._layout(album, cand, text)
         targets = {aid: v[2] for aid, v in layouts.items()}
@@ -762,7 +770,7 @@ class FakeContract:
                 fcs.append(FileChange("track", before, after, tc))
                 tags += len(tc)
             moves += len(fcs)
-            aps.append(AlbumPlan(aid, cand.release_id, album.folder, folder, fcs, problems, cand.artist, cand.title))
+            aps.append(AlbumPlan(aid, cand.release_id, album.folder, folder, fcs, problems, *self._plan_names(album, cand)))
         wanted = [(ap.album_id, ap.release_id) for ap, err in not_fetched if err is None]
         fetch_job = self._fetch_job(wanted) if wanted else None
         pending = []

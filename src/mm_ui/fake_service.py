@@ -96,6 +96,7 @@ class AlbumRow:
     artist_sort: str        # ALBUMARTISTSORT tag if present, else artist; what ARTIST sorts by
     added_at: datetime      # when a scan first saw this folder (timezone-aware UTC); ADDED sorts by it
     held_for: list          # list[Problem]; empty unless status is HELD
+    loose_tracks: bool = False   # d6ac2f3: loose files in an artist folder, not an album (artist = folder name, title "")
 
 
 @dataclass(frozen=True)
@@ -586,7 +587,7 @@ class FakeService(QObject):
                 status = MatchStatus.NEEDS_REVIEW
             self._albums[aid] = Album(aid, folder, artist, title, year, catno, len(lt), status, top,
                                       None, artist, SCANNED_AT + timedelta(minutes=aid), [],
-                                      lt, [folder / "cover.jpg"])
+                                      tracks=lt, extras=[folder / "cover.jpg"])
             self._cands[aid] = clist
             self._fetch_queue += [(aid, c.release_id) for c in clist[:4]]
         self._layout_problems: dict[int, tuple] = {}       # MOCK: (layout_problem, reason, subfolders) (68cf4d7)
@@ -621,7 +622,7 @@ class FakeService(QObject):
         cand = Candidate(rid, None, artist, title, year, "US", "Mock Label", catno, [f"{len({d for d, *_ in tracks})}xCD"],
                          1.0, None, parts, None, None, None, None, False, DISCOGS, auto_score=1.0)
         self._albums[aid] = Album(aid, folder, artist, title, year, catno, len(lt), MatchStatus.MATCHED, 1.0,
-                                  None, artist, SCANNED_AT + timedelta(minutes=aid), [], lt, [])
+                                  None, artist, SCANNED_AT + timedelta(minutes=aid), [], tracks=lt, extras=[])
         self._cands[aid] = [cand]
         self._sidecars[aid] = {folder / f"{rel}.flac": (folder / side, disc)
                                for side, disc, rels in sidecars for rel in rels}
@@ -649,8 +650,12 @@ class FakeService(QObject):
             clist = [Candidate(next(self._rid), None, artist, title, year, "US", "Mock Label", catno or "X-1", ["CD"],
                                score, None, parts, None, None, None, None, False, DISCOGS, auto_score=score)]
         status = MatchStatus.NEEDS_REVIEW if clist else MatchStatus.UNMATCHED
+        loose = layout_reason == "album_folders"       # d6ac2f3: named after its own folder, not an album
+        if loose:
+            artist, title, year, catno = folder.name, "", "", ""
         self._albums[aid] = Album(aid, folder, artist, title, year, catno, len(lt), status, score if clist else None,
-                                  None, artist, SCANNED_AT + timedelta(minutes=aid), [], lt, [])
+                                  None, artist, SCANNED_AT + timedelta(minutes=aid), [], loose_tracks=loose,
+                                  tracks=lt, extras=[])
         self._cands[aid] = clist
         if layout_problem:
             self._layout_problems[aid] = (layout_problem, layout_reason, [folder / d for d in blocking_subdirs])
@@ -658,11 +663,12 @@ class FakeService(QObject):
 
     def add_loose_layouts(self) -> dict[str, int]:
         """MOCK of the three layouts in the contract section, as the 68cf4d7 scan sees them:
-        - "stray": Minutemen/ with a loose demo next to two album folders -> the artist folder is an "album" of
-          just the loose file (artist = its parent folder's name, title = folder name, like the real scan),
-          held; "buzz" and "tie" are listed as albums of their own;
+        - "stray": Minutemen/ with a loose demo next to two album folders -> loose tracks (d6ac2f3): just the
+          loose file, artist "Minutemen" (the folder's name), title "", loose_tracks=True, held when applied;
+          "buzz" and "tie" are listed as albums of their own;
         - "mixed": an album with loose audio next to CD1/ and CD2/ -> one album with every file, held;
-        - "bonus": an album with an audio Bonus/ folder -> held, and "bonus_dir" is its own (untagged) album."""
+        - "bonus": an album with an audio Bonus/ folder -> also loose tracks (layout_reason "album_folders", named
+          after its folder), held; "bonus_dir" is its own (untagged) album."""
         ids = {}
         art = LIBRARY_ROOT / "Minutemen"
         buzz, tie = "[1983]  Buzz or Howl Under the Influence of Heat [SST016]", "[1985]  3-Way Tie (For Last) [SST058]"

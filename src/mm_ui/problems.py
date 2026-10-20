@@ -153,21 +153,27 @@ def album_label(ap, fallback=None, undo: bool = False, row=None) -> str:
     1. AlbumPlan.artist / title (e1eca5e: the release's, from plan.build or the apply's journal)
     2. the library index, via fallback(album_id), when album_id is set and found
     3. the album folder's name (+ "Discogs release N" when release_id is known)
-    A layout_ambiguous album is named from the library row (row(album_id), see display_names) or its folder.
+    Loose tracks (AlbumRow.loose_tracks via row(album_id), d6ac2f3) read "Black Flag: Loose tracks, not an album";
+    without the row, a plan's layout_ambiguous problem with layout_reason "album_folders" means the same thing.
     Older services have no artist/title fields; older journals give album_id/release_id 0 and "" names."""
     lp = None if undo else layout_problem(getattr(ap, "problems", None))
-    if lp is not None:      # layout_ambiguous: the release's names would mislead; name the folder (+ hint)
-        r = None
-        if row is not None and getattr(ap, "album_id", 0):
-            try:
-                r = row(ap.album_id)
-            except Exception:
-                r = None
+    r = None
+    if row is not None and getattr(ap, "album_id", 0) and not undo:
+        try:
+            r = row(ap.album_id)
+        except Exception:
+            r = None
+    if is_loose_tracks(r) or (r is None and lp is not None and layout_shape(lp) == "folders"):
+        # loose tracks in an artist folder (d6ac2f3): AlbumPlan.artist is the folder's name, title ""
+        name = (str(getattr(ap, "artist", "") or "").strip() or str(getattr(r, "artist", "") or "").strip()
+                or getattr(getattr(ap, "folder_before", None), "name", "") or "Folder")
+        return loose_label(name)
+    if lp is not None:      # disc_folders: a real album with its usual names, plus the hint
         if r is not None:
-            a, t = display_names(r, lp)
-            return f"{a} – {t}" if a else t
-        fname = getattr(getattr(ap, "folder_before", None), "name", "") or "Album"
-        return f"{fname}/ ({layout_hint(lp)})"
+            return row_label(*display_names(r, lp))
+        name = " – ".join(x for x in (str(getattr(ap, "artist", "") or "").strip(),
+                                       str(getattr(ap, "title", "") or "").strip()) if x)
+        return f"{name or getattr(getattr(ap, 'folder_before', None), 'name', '') or 'Album'} · {layout_hint(lp)}"
     artist = str(getattr(ap, "artist", "") or "").strip()
     title = str(getattr(ap, "title", "") or "").strip()
     if artist and title:
@@ -273,35 +279,37 @@ def loose_files(problem, files=None) -> list[Path]:
     return [Path(str(f)) for f in files or [] if folder is None or Path(str(f)).parent == folder]
 
 
-def is_loose_container(row, problem) -> bool:
-    """The scan made a not-an-album folder into an "album" of its loose files (an artist folder with a stray
-    track): folder-shaped layout problem, and the scan's names are just the folder's and its parent's."""
-    if problem is None or layout_shape(problem) != "folders":
-        return False
-    folder = Path(str(getattr(row, "folder", "") or ""))
-    title = str(getattr(row, "title", "") or "").strip()
-    artist = str(getattr(row, "artist", "") or "").strip()
-    return title in ("", folder.name) and artist in ("", folder.parent.name)
+def is_loose_tracks(row) -> bool:
+    """AlbumRow.loose_tracks (d6ac2f3): loose files in an artist folder, not an album. The scan names it
+    after that folder (artist = folder name, title/year/catno ""); keyed on the field, never on empty names."""
+    return bool(getattr(row, "loose_tracks", False))
 
 
-def display_names(row, problem=None, parent=None) -> tuple[str, str]:
+def loose_label(artist: str) -> str:
+    return f"{artist}: {LOOSE_TITLE}" if artist else LOOSE_TITLE
+
+
+def row_label(artist: str, title: str, loose: bool = False) -> str:
+    """One-line name for the review list and dialogs: "Artist – Title", or "Black Flag: Loose tracks, not an album"."""
+    if loose or title == LOOSE_TITLE:
+        return loose_label(artist)
+    return f"{artist} – {title}" if artist and title else (artist or title)
+
+
+def display_names(row, problem=None) -> tuple[str, str]:
     """(artist, album) for the library and review lists.
-    - held loose-files "album" in an artist folder: (folder name, "Loose tracks, not an album")
-    - other layout_ambiguous albums: their names + " · loose tracks next to … folders"
-    - a folder with no names of its own (e.g. Bonus/ listed as its own album): "<parent album> / Bonus" with
-      the parent's artist when the parent is known (parent = (row, problem) of a held folder above it)."""
+    - loose tracks (AlbumRow.loose_tracks): (folder name as the scan gives it, "Loose tracks, not an album"),
+      before and after a plan exists
+    - a disc_folders layout_ambiguous album (problem known): its names + " · loose tracks next to disc folders"
+    - a folder with no names of its own (e.g. Bonus/ listed as its own album): <parent folder>/Bonus."""
     folder = Path(str(getattr(row, "folder", "") or ""))
     artist = str(getattr(row, "artist", "") or "").strip()
     title = str(getattr(row, "title", "") or "").strip()
-    if problem is not None:
-        if is_loose_container(row, problem):
-            return folder.name, LOOSE_TITLE
+    if is_loose_tracks(row):
+        return artist or folder.name, LOOSE_TITLE
+    if problem is not None and layout_shape(problem) == "discs":
         return artist, f"{title} · {layout_hint(problem)}"
     if not artist and title in ("", folder.name):
-        if parent is not None and not is_loose_container(*parent):
-            prow = parent[0]
-            return (str(getattr(prow, "artist", "") or ""),
-                    f"{str(getattr(prow, 'title', '') or folder.parent.name)} / {folder.name}")
         return "", f"{folder.parent.name}/{folder.name}"
     return artist, title
 
@@ -310,8 +318,8 @@ def layout_note(row, parent) -> str:
     """Tooltip line for an album listed on its own because the folder above it has loose tracks."""
     if parent is None:
         return ""
-    return (f"Listed as its own album: the folder above it, {Path(str(parent[0].folder)).name}/, has loose tracks "
-            "next to album folders and is held (move the files on disk and rescan)")
+    return (f"Listed as its own album: the folder above it, {Path(str(parent.folder)).name}/, has loose tracks "
+            "next to album folders (move the files on disk and rescan)")
 
 
 def layout_files(problem, folder, files) -> list[str]:
@@ -446,3 +454,22 @@ def folder_mismatch_lines(problem, folder) -> list[str]:
         files = shown_paths(problem, folder)
         return [f"Files ({len(files)}):"] + [f"  {x}" for x in files] + [NAMING_HINT]
     return [f"Files ({len(ms)}):"] + [f"  {folder_mismatch_text(m, folder)}" for m in ms] + [NAMING_HINT]
+
+
+# ---------------------------------------------------------------- status counts (review header, library footer)
+STATUS_WORDS = {   # review order (service STATUS_ORDER); keyed by MatchStatus name, so the enum's order doesn't matter
+    "NEEDS_REVIEW": "need review", "HELD": "held", "UNMATCHED": "unmatched", "QUEUED": "queued",
+    "MATCHED": "matched", "ACCEPTED": "accepted", "SKIPPED": "skipped", "NO_MATCH": "no match", "APPLIED": "applied",
+}
+
+
+def status_summary(counts: dict) -> str:
+    """"6 accepted · 1 held · 1 applied" from status_counts() (keys: MatchStatus or its name). Every non-zero status
+    is listed, in review order; a status this UI doesn't know yet is listed last under its own name."""
+    c = {}
+    for k, n in (counts or {}).items():
+        name = getattr(k, "name", str(k))
+        c[name] = c.get(name, 0) + int(n or 0)
+    known = [(STATUS_WORDS[k], c[k]) for k in STATUS_WORDS if c.get(k)]
+    other = [(k.replace("_", " ").lower(), n) for k, n in c.items() if k not in STATUS_WORDS and n]
+    return " · ".join(f"{n:,} {w}" for w, n in known + other)

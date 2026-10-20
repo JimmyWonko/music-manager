@@ -622,12 +622,15 @@ def test_real_scan_lists_subfolders_and_keeps_loose_files_apart(real):
     ids, f = _layout_library(real)
     a = {k: svc.library.album(v) for k, v in ids.items()}
     assert [t.path.name for t in a["stray"].tracks] == ["stray.mp3"]          # just the loose file
-    assert a["stray"].title == "Black Flag"                                    # the scan's name: the folder's
+    assert (a["stray"].artist, a["stray"].title, a["stray"].loose_tracks) == ("Black Flag", "", True)   # d6ac2f3
     assert [t.path.name for t in a["war"].tracks] == ["01 My War.flac", "02 Can't Decide.flac"]
     assert [t.path.relative_to(f["mixed"]).as_posix() for t in a["mixed"].tracks] == [
         "01 One.flac", "CD1/02 Two.flac", "CD2/01 Four.flac"]                  # one album: loose first, then discs
     assert [t.path.name for t in a["bonus"].tracks] == ["01 Extra.flac"] and a["bonus"].title == "Bonus"
     assert [t.path.name for t in a["main"].tracks] == ["01 Main.flac"]
+    assert a["main"].loose_tracks and a["main"].artist == f["main"].name          # album_folders: loose tracks too
+    assert not a["mixed"].loose_tracks and a["mixed"].title == "Mixed Up"           # disc_folders: a real album
+    assert not a["war"].loose_tracks and not a["bonus"].loose_tracks
 
 
 def test_real_layout_ambiguous_is_held_and_not_overridable(real, qtbot):
@@ -661,7 +664,8 @@ def test_real_layout_ambiguous_is_held_and_not_overridable(real, qtbot):
     items = {(dlg.problem_list.item(i).data(Qt.UserRole), dlg.problem_list.item(i).data(Qt.UserRole + 1)):
              dlg.problem_list.item(i).text() for i in range(dlg.problem_list.count())}
     st = items[(ids["stray"], "layout_ambiguous")]
-    assert st.startswith("⚠ Black Flag – Loose tracks, not an album: Loose tracks next to album folders"), st
+    assert st.startswith("⚠ Black Flag: Loose tracks, not an album — Loose tracks next to album folders"), st
+    assert (by[ids["stray"]].artist, by[ids["stray"]].title) == ("Black Flag", "")      # AlbumPlan (d6ac2f3)
     assert "Loose files (1):\n      stray.mp3" in st and "[1984]  My War [SST023]/" in st
     mx = items[(ids["mixed"], "layout_ambiguous")]
     assert "Mix Band – Mixed Up · loose tracks next to disc folders" in mx and "CD2/01 Four.flac" in mx
@@ -698,13 +702,13 @@ def test_real_lists_name_held_loose_folder_and_subfolder_albums(real, qtbot):
              for i in range(m.rowCount())}
     assert shown[ids["stray"]][:2] == ("Black Flag", "Loose tracks, not an album")
     assert "Next to: [1984]  My War [SST023]/" in shown[ids["stray"]][2]
-    assert shown[ids["main"]][:2] == ("Bonus Band", "Main Thing · loose tracks next to album folders")
-    assert shown[ids["bonus"]][:2] == ("Bonus Band", "Main Thing / Bonus")
+    assert shown[ids["main"]][:2] == ("[2002]  Main Thing [BON001]", "Loose tracks, not an album")
+    assert shown[ids["bonus"]][:2] == ("", "[2002]  Main Thing [BON001]/Bonus")
     assert "Listed as its own album" in shown[ids["bonus"]][2]
     w = ReviewWindow(svc); qtbot.addWidget(w)
     w.filter_box.setCurrentText("Needs a look")
     texts = [w.model.index(i).data() for i in range(w.model.rowCount())]
-    row = next(i for i, t in enumerate(texts) if t.startswith("Black Flag – Loose tracks, not an album"))
+    row = next(i for i, t in enumerate(texts) if t.startswith("Black Flag: Loose tracks, not an album"))
     assert texts[row].endswith("⚠ Needs a look")
     w.list.setCurrentIndex(w.model.index(row))
     assert "Loose tracks next to album folders" in w.preview.text() and "stray.mp3" in w.preview.text()
@@ -854,3 +858,45 @@ def test_real_disc_folder_mismatch_held_with_naming_button(real, qtbot, monkeypa
     assert [m.folder.name for m in held.folder_mismatches] == ["CD2"] * 3     # survives the index round trip
     svc.settings.set(active_template="archivist")
     assert not P.has_folder_mismatch(svc.plan.build([aid]).albums[0].problems)
+
+
+def test_real_loose_tracks_named_before_any_plan(real, qtbot):
+    """d6ac2f3: AlbumRow.loose_tracks from the scan names it in every screen before a plan exists or it's held."""
+    from mm_ui.library import LibraryWindow
+    from mm_ui.review import ApplyDialog, ReviewWindow
+    svc = real["svc"]
+    ids, f = _layout_library(real)
+    a = svc.library.album(ids["stray"])
+    assert a.loose_tracks and (a.artist, a.title, a.year, a.catno) == ("Black Flag", "", "", "")
+    assert a.status.name != "HELD" and not a.held_for
+    row = next(r for r in svc.albums(None, limit=50).items if r.id == ids["stray"])
+    assert row.loose_tracks
+    lib = LibraryWindow(svc); qtbot.addWidget(lib)
+    m = lib.model
+    i = next(i for i in range(m.rowCount()) if m.rows[i].id == ids["stray"])
+    assert (m.index(i, 0).data(), m.index(i, 1).data()) == ("Black Flag", "Loose tracks, not an album")
+    w = ReviewWindow(svc); qtbot.addWidget(w)
+    w.filter_box.setCurrentText("All")
+    texts = [w.model.index(j).data() for j in range(w.model.rowCount())]
+    t = next(t for t in texts if t.startswith("Black Flag: Loose tracks, not an album"))
+    assert "Needs a look" not in t
+    assert not any(t.startswith("lib – ") for t in texts)          # never the grandparent's name again
+    assert w.album_name(ids["stray"]) == "Black Flag: Loose tracks, not an album"
+    plan = svc.plan.build([ids["stray"], ids["war"]])
+    d = ApplyDialog(plan, album_name=w.album_name, album_row=w.album_row); qtbot.addWidget(d)
+    held = [d.tree.topLevelItem(k).text(0) for k in range(d.tree.topLevelItemCount())]
+    assert "Held back: Black Flag: Loose tracks, not an album" in held, held
+    d2 = ApplyDialog(plan); qtbot.addWidget(d2)                      # no library lookup: AlbumPlan names
+    assert "Held back: Black Flag: Loose tracks, not an album" in [
+        d2.tree.topLevelItem(k).text(0) for k in range(d2.tree.topLevelItemCount())]
+
+
+def test_real_review_header_counts_accepted(real, qtbot):
+    from mm_ui import problems as P
+    from mm_ui.review import ReviewWindow
+    svc = real["svc"]
+    svc.match.choose(real["ids"]["Test Album"].id, 501)
+    c = {s.name: n for s, n in svc.library.status_counts().items()}
+    assert c.get("ACCEPTED")
+    w = ReviewWindow(svc); qtbot.addWidget(w)
+    assert f"{c['ACCEPTED']} accepted" in w.counts.text() and P.status_summary(c) in w.counts.text()

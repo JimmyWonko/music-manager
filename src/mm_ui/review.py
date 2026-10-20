@@ -51,49 +51,54 @@ def held_for(album) -> list:
 
 
 class LayoutIndex:
-    """Held layout_ambiguous folders (HELD rows whose held_for has one), for naming rows in the lists:
-    the loose-files "album" itself, and the albums listed on their own below it. One small HELD query."""
+    """Names for the lists. Loose tracks come from AlbumRow.loose_tracks (d6ac2f3) on the row itself; this index
+    only remembers which folders hold loose tracks (rows seen so far, plus one small HELD query) so an album
+    listed on its own below one gets a tooltip, and finds the layout problem of a held disc_folders album."""
 
     LIMIT = 2000
 
     def __init__(self, svc=None):
-        self.held: dict[Path, tuple] = {}
+        self.loose: dict[Path, object] = {}
         if svc is None:
             return
         try:
             rows = svc.albums({"HELD"}, limit=self.LIMIT).items
         except Exception:
             rows = []
+        self.add(rows)
+
+    def add(self, rows):
         for r in rows:
-            lp = P.layout_problem(held_for(r))
-            if lp is not None:
-                self.held[Path(str(r.folder))] = (r, lp)
+            if P.is_loose_tracks(r):
+                self.loose[Path(str(r.folder))] = r
 
     def problem(self, row):
-        lp = P.layout_problem(held_for(row))
-        if lp is None and Path(str(row.folder)) in self.held:
-            lp = self.held[Path(str(row.folder))][1]
-        return lp
+        return P.layout_problem(held_for(row))
 
     def parent(self, row):
-        """(row, problem) of the nearest held layout folder above this album, or None."""
+        """Row of the nearest folder above this album that holds loose tracks, or None."""
         for anc in Path(str(row.folder)).parents:
-            if anc in self.held:
-                return self.held[anc]
+            if anc in self.loose:
+                return self.loose[anc]
         return None
 
     def names(self, row) -> tuple[str, str]:
-        lp = self.problem(row)
-        return P.display_names(row, lp, None if lp is not None else self.parent(row))
+        return P.display_names(row, self.problem(row))
+
+    def label(self, row) -> str:
+        return P.row_label(*self.names(row), loose=P.is_loose_tracks(row))
 
     def tooltip(self, row) -> str:
         lp = self.problem(row)
+        if P.is_loose_tracks(row):
+            out = (f"\n{P.LOOSE_TITLE}: loose files in {Path(str(row.folder)).name}/, which also holds album folders. "
+                   "It is held and never applied; move the files into their album folders and rescan.")
+            dirs = P.layout_dirs(lp) if lp is not None else []
+            return out + ("\nNext to: " + ", ".join(f"{d}/" for d in dirs) if dirs else "")
         if lp is not None:
             out = f"\n{P.label(lp)}: {P.layout_hint(lp)}"
             dirs = P.layout_dirs(lp)
-            if dirs:
-                out += "\nNext to: " + ", ".join(f"{d}/" for d in dirs)
-            return out
+            return out + ("\nNext to: " + ", ".join(f"{d}/" for d in dirs) if dirs else "")
         note = P.layout_note(row, self.parent(row))
         return f"\n{note}" if note else ""
 
@@ -126,7 +131,7 @@ class AlbumListModel(QAbstractListModel):
         self.filter = f
         page = self.svc.library.albums(f, self.svc.types.AlbumSort.ARTIST, 0, self.PAGE)
         self.rows, self.total = list(page.items), page.total
-        self.layout = LayoutIndex(self.svc)
+        self.layout = LayoutIndex(self.svc); self.layout.add(self.rows)
         self.endResetModel()
 
     def rowCount(self, parent=QModelIndex()):
@@ -139,14 +144,14 @@ class AlbumListModel(QAbstractListModel):
         page = self.svc.library.albums(self.filter, self.svc.types.AlbumSort.ARTIST, len(self.rows), self.PAGE)
         self.beginInsertRows(QModelIndex(), len(self.rows), len(self.rows) + len(page.items) - 1)
         self.rows += page.items
+        self.layout.add(page.items)
         self.endInsertRows()
 
     def data(self, idx, role=Qt.DisplayRole):
         a = self.rows[idx.row()]
         if role == Qt.DisplayRole:
             conf = f"{a.confidence:.0%}" if a.confidence is not None else "—"
-            artist, title = self.layout.names(a)
-            return (f"{artist} – {title}" if artist else title) + f"   {conf}" + ("   ⚠ Needs a look" if is_held(a) else "")
+            return self.layout.label(a) + f"   {conf}" + ("   ⚠ Needs a look" if is_held(a) else "")
         if role == Qt.ForegroundRole:
             return QBrush(QColor(STATUS_COLOR.get(a.status.name, "#000")))
         if role == Qt.ToolTipRole:
@@ -339,9 +344,8 @@ class ReviewWindow(QMainWindow):
 
     def update_counts(self):
         c = {s.name: n for s, n in self.svc.library.status_counts().items()}; total = sum(c.values())
-        self.counts.setText(
-            f"<b>{total:,} albums</b> · {c.get('MATCHED', 0)} matched · "
-            f"{c.get('NEEDS_REVIEW', 0)} need review · {c.get('NO_MATCH', 0)} no match")
+        summary = P.status_summary(c)          # every non-zero status, Accepted / Held / Applied included
+        self.counts.setText(f"<b>{total:,} albums</b>" + (f" · {summary}" if summary else ""))
         q, held = c.get("ACCEPTED", 0), c.get("HELD", 0)
         look = f" · <b style='color:#c98a00'>{held} need a look</b>" if held else ""
         if getattr(self, "build_progress", None) is not None:
@@ -377,11 +381,13 @@ class ReviewWindow(QMainWindow):
             return
         album = self.svc.library.album(self.album_id)
         if not cands:
+            name = P.row_label(*P.display_names(album), loose=P.is_loose_tracks(album))
+            name += " ·" if P.is_loose_tracks(album) else ":"      # "Black Flag: Loose tracks, not an album · …"
             if album.status.name in ("UNMATCHED", "QUEUED"):
-                self.cand_title.setText(f"{album.artist} – {album.title}: not matched yet")
+                self.cand_title.setText(f"{name} not matched yet")
                 self.release_info.setText("Run “Find Discogs matches” from the library first.")
             else:
-                self.cand_title.setText(f"{album.artist} – {album.title}: no Discogs match")
+                self.cand_title.setText(f"{name} no Discogs match")
                 self.release_info.setText("Try “Other release…” with a Discogs URL, or submit this release to Discogs.")
             self.breakdown.clear(); self.preview.setStyleSheet(self._preview_css); self.preview.setToolTip("")
             self.preview.setText(str(album.folder)); self.loading.hide()
@@ -748,8 +754,7 @@ class ReviewWindow(QMainWindow):
             a = self.svc.library.album(album_id)
         except Exception:
             return f"Album {album_id}"
-        artist, title = LayoutIndex(self.svc).names(a) if is_held(a) or not a.artist else (a.artist, a.title)
-        return f"{artist} – {title}" if artist else title
+        return LayoutIndex().label(a)
 
     def album_row(self, album_id):
         """Library row for ApplyDialog's layout_ambiguous names (None when not in the index)."""
@@ -892,7 +897,8 @@ class ApplyDialog(QDialog):
                 if undo else f"<b style='color:#a33'>{len(self.held_aps)} album(s) held back for a look</b> "
                 "(they stay where they are; the rest apply now):")
             for ap, p in shown:
-                text = f"⚠ {name(ap)}: {P.label(p)}\n    {p.message}"
+                n = name(ap)       # "Black Flag: Loose tracks, not an album" already has its colon
+                text = f"⚠ {n}{' —' if n.endswith(P.LOOSE_TITLE) else ':'} {P.label(p)}\n    {p.message}"
                 if P.kind_of(p) == P.DISC_AMBIGUOUS:     # per file: why, and the disc/track choices
                     text += "".join(f"\n    {x}" for x in P.disc_conflict_lines(p, ap.folder_before))
                 elif P.kind_of(p) == P.DISC_FOLDER_MISMATCH:   # "13 Mason Jar.flac → CD2/ (disc tag 1)"

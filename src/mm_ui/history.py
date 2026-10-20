@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QTableWidgetItem, QVBoxLayout,
 )
 
+from . import problems as P
 from .backend import Backend, as_backend
 
 
@@ -99,7 +100,7 @@ class HistoryDialog(QDialog):
         if not album_id:
             return "Album not in the library index"     # discogs-tag journals list album_id 0
         try:
-            a = self.svc.library.album(album_id); return f"{a.artist} – {a.title}"
+            a = self.svc.library.album(album_id); return P.row_label(a.artist, a.title, P.is_loose_tracks(a))
         except Exception:
             return f"Album {album_id}"
 

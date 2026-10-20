@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from ._meta import DISPLAY_NAME
 from .backend import Backend, as_backend
+from . import problems as P
 from .review import STATUS_COLOR, LayoutIndex
 
 # (header, AlbumSort value or None = not sortable)
@@ -59,7 +60,8 @@ class LibraryModel(QAbstractTableModel):
         self.beginResetModel()
         self.filter = f
         self.rows, self.total = self._page(0)
-        self.layout = LayoutIndex(self.svc)      # held layout_ambiguous folders: names + hints
+        self.layout = LayoutIndex(self.svc)      # folders holding loose tracks (for the tooltip of albums below)
+        self.layout.add(self.rows)
         self.endResetModel()
 
     def sort(self, column, order=Qt.AscendingOrder):
@@ -91,6 +93,7 @@ class LibraryModel(QAbstractTableModel):
             return
         self.beginInsertRows(QModelIndex(), len(self.rows), len(self.rows) + len(more) - 1)
         self.rows += more
+        self.layout.add(more)
         self.endInsertRows()
 
     @staticmethod
@@ -106,7 +109,7 @@ class LibraryModel(QAbstractTableModel):
             if role == Qt.DisplayRole:
                 return artist if c == 0 else title
             tip = self.layout.tooltip(r)
-            return f"{r.artist} – {r.title} (as scanned){tip}" if tip else None
+            return tip.lstrip("\n") or None
         if role == Qt.DisplayRole:
             if c == STATUS_COL:
                 return t[c].name.replace("_", " ").capitalize()
@@ -216,7 +219,7 @@ class LibraryWindow(QMainWindow):
         for i, (label, names) in enumerate(STATUS_FILTERS.items()):
             n = sum(c.values()) if names is None else sum(c.get(x, 0) for x in names)
             self.status.setItemText(i, f"{label} ({n:,})")
-        self.counts.setText(" · ".join(f"{n:,} {k.replace('_', ' ').lower()}" for k, n in c.items() if n))
+        self.counts.setText(P.status_summary(c))
         self.update_hint(c)
 
     def on_job_finished(self, job):

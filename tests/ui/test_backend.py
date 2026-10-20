@@ -521,7 +521,7 @@ def _contract_classes(code, with_partial=False):
                 out[name] = ("enum", prev + adds); partial.add(name)
             else:
                 old = out[name][1]
-                new = old + re.findall(r"(\w+)\s*:", text)
+                new = old + [f for f in re.findall(r"(\w+)\s*:", text) if f not in old]   # restated: no dup
                 out[name] = ("fields", new)
                 for other, (k, m) in list(out.items()):      # subclasses (Album(AlbumRow)) inherit it
                     if other != name and k == "fields" and m[:len(old)] == old and len(m) > len(old):
@@ -542,7 +542,8 @@ def test_mock_types_match_contract_exactly():
     import mm_ui.fake_service as T
     classes, partial = _contract_classes(_contract_code(), with_partial=True)
     assert {"AlbumSort", "Destination", "Template", "TemplatePreview", "Collision", "Settings"} <= set(classes)
-    assert classes["AlbumRow"][1][-3:] == ["artist_sort", "added_at", "held_for"]
+    assert classes["AlbumRow"][1][-4:] == ["artist_sort", "added_at", "held_for", "loose_tracks"]   # d6ac2f3
+    assert classes["Album"][1][-3:] == ["loose_tracks", "tracks", "extras"]
     assert classes["FileChange"][1][-1] == "skip_reason" and classes["Plan"][1][-2:] == ["skipped", "fetch_job"]
     assert "RELEASE_NOT_FETCHED" in classes["ProblemKind"][1]
     assert T.MatchStatus.HELD.value == "held"
