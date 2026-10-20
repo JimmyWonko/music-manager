@@ -96,7 +96,7 @@ class AlbumRow:
     artist_sort: str        # ALBUMARTISTSORT tag if present, else artist; what ARTIST sorts by
     added_at: datetime      # when a scan first saw this folder (timezone-aware UTC); ADDED sorts by it
     held_for: list          # list[Problem]; empty unless status is HELD
-    loose_tracks: bool = False   # d6ac2f3: loose files in an artist folder, not an album (artist = folder name, title "")
+    loose_tracks: bool = False   # d6ac2f3: loose audio next to subfolders with audio (artist = folder name, title "")
 
 
 @dataclass(frozen=True)
@@ -650,7 +650,7 @@ class FakeService(QObject):
             clist = [Candidate(next(self._rid), None, artist, title, year, "US", "Mock Label", catno or "X-1", ["CD"],
                                score, None, parts, None, None, None, None, False, DISCOGS, auto_score=score)]
         status = MatchStatus.NEEDS_REVIEW if clist else MatchStatus.UNMATCHED
-        loose = layout_reason == "album_folders"       # d6ac2f3: named after its own folder, not an album
+        loose = layout_reason == "album_folders"       # d6ac2f3: loose tracks, named after its own folder
         if loose:
             artist, title, year, catno = folder.name, "", "", ""
         self._albums[aid] = Album(aid, folder, artist, title, year, catno, len(lt), status, score if clist else None,

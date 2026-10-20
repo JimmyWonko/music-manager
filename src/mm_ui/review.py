@@ -91,8 +91,10 @@ class LayoutIndex:
     def tooltip(self, row) -> str:
         lp = self.problem(row)
         if P.is_loose_tracks(row):
-            out = (f"\n{P.LOOSE_TITLE}: loose files in {Path(str(row.folder)).name}/, which also holds album folders. "
-                   "It is held and never applied; move the files into their album folders and rescan.")
+            folder = Path(str(row.folder)).name
+            out = (f"\n{P.loose_label(self.names(row)[0])}. {folder}/ has loose audio files and subfolders with audio; "
+                   "the engine can't tell an artist folder from an album with extra folders, so nothing in it is "
+                   "applied. Move the loose files (or the subfolders) and rescan.")
             dirs = P.layout_dirs(lp) if lp is not None else []
             return out + ("\nNext to: " + ", ".join(f"{d}/" for d in dirs) if dirs else "")
         if lp is not None:
@@ -381,8 +383,8 @@ class ReviewWindow(QMainWindow):
             return
         album = self.svc.library.album(self.album_id)
         if not cands:
-            name = P.row_label(*P.display_names(album), loose=P.is_loose_tracks(album))
-            name += " ·" if P.is_loose_tracks(album) else ":"      # "Black Flag: Loose tracks, not an album · …"
+            name = P.row_label(*P.display_names(album, P.layout_problem(held_for(album))), loose=P.is_loose_tracks(album))
+            name += " ·" if P.is_loose_tracks(album) else ":"      # "Black Flag: loose tracks … (held) · …"
             if album.status.name in ("UNMATCHED", "QUEUED"):
                 self.cand_title.setText(f"{name} not matched yet")
                 self.release_info.setText("Run “Find Discogs matches” from the library first.")
@@ -897,8 +899,8 @@ class ApplyDialog(QDialog):
                 if undo else f"<b style='color:#a33'>{len(self.held_aps)} album(s) held back for a look</b> "
                 "(they stay where they are; the rest apply now):")
             for ap, p in shown:
-                n = name(ap)       # "Black Flag: Loose tracks, not an album" already has its colon
-                text = f"⚠ {n}{' —' if n.endswith(P.LOOSE_TITLE) else ':'} {P.label(p)}\n    {p.message}"
+                n = name(ap)       # "Black Flag: loose tracks … (held)" already has its colon
+                text = f"⚠ {n}{' —' if P.LOOSE_TEXT in n else ':'} {P.label(p)}\n    {p.message}"
                 if P.kind_of(p) == P.DISC_AMBIGUOUS:     # per file: why, and the disc/track choices
                     text += "".join(f"\n    {x}" for x in P.disc_conflict_lines(p, ap.folder_before))
                 elif P.kind_of(p) == P.DISC_FOLDER_MISMATCH:   # "13 Mason Jar.flac → CD2/ (disc tag 1)"

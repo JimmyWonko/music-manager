@@ -664,7 +664,7 @@ def test_real_layout_ambiguous_is_held_and_not_overridable(real, qtbot):
     items = {(dlg.problem_list.item(i).data(Qt.UserRole), dlg.problem_list.item(i).data(Qt.UserRole + 1)):
              dlg.problem_list.item(i).text() for i in range(dlg.problem_list.count())}
     st = items[(ids["stray"], "layout_ambiguous")]
-    assert st.startswith("⚠ Black Flag: Loose tracks, not an album — Loose tracks next to album folders"), st
+    assert st.startswith("⚠ Black Flag: loose tracks next to subfolders with audio (held) · [1984]  My War [SST023]/ — Loose tracks next to album folders"), st
     assert (by[ids["stray"]].artist, by[ids["stray"]].title) == ("Black Flag", "")      # AlbumPlan (d6ac2f3)
     assert "Loose files (1):\n      stray.mp3" in st and "[1984]  My War [SST023]/" in st
     mx = items[(ids["mixed"], "layout_ambiguous")]
@@ -700,15 +700,16 @@ def test_real_lists_name_held_loose_folder_and_subfolder_albums(real, qtbot):
     m = lib.model
     shown = {m.rows[i].id: (m.index(i, 0).data(), m.index(i, 1).data(), m.index(i, 1).data(Qt.ToolTipRole))
              for i in range(m.rowCount())}
-    assert shown[ids["stray"]][:2] == ("Black Flag", "Loose tracks, not an album")
+    assert shown[ids["stray"]][:2] == ("Black Flag", "loose tracks next to subfolders with audio (held) · [1984]  My War [SST023]/")
     assert "Next to: [1984]  My War [SST023]/" in shown[ids["stray"]][2]
-    assert shown[ids["main"]][:2] == ("[2002]  Main Thing [BON001]", "Loose tracks, not an album")
+    assert shown[ids["main"]][:2] == ("[2002]  Main Thing [BON001]", "loose tracks next to subfolders with audio (held) · Bonus/")
+    assert all("not an album" not in (v[1] or "") for v in shown.values())
     assert shown[ids["bonus"]][:2] == ("", "[2002]  Main Thing [BON001]/Bonus")
     assert "Listed as its own album" in shown[ids["bonus"]][2]
     w = ReviewWindow(svc); qtbot.addWidget(w)
     w.filter_box.setCurrentText("Needs a look")
     texts = [w.model.index(i).data() for i in range(w.model.rowCount())]
-    row = next(i for i, t in enumerate(texts) if t.startswith("Black Flag: Loose tracks, not an album"))
+    row = next(i for i, t in enumerate(texts) if t.startswith("Black Flag: loose tracks next to subfolders with audio (held) · [1984]  My War [SST023]/"))
     assert texts[row].endswith("⚠ Needs a look")
     w.list.setCurrentIndex(w.model.index(row))
     assert "Loose tracks next to album folders" in w.preview.text() and "stray.mp3" in w.preview.text()
@@ -874,20 +875,21 @@ def test_real_loose_tracks_named_before_any_plan(real, qtbot):
     lib = LibraryWindow(svc); qtbot.addWidget(lib)
     m = lib.model
     i = next(i for i in range(m.rowCount()) if m.rows[i].id == ids["stray"])
-    assert (m.index(i, 0).data(), m.index(i, 1).data()) == ("Black Flag", "Loose tracks, not an album")
+    assert (m.index(i, 0).data(), m.index(i, 1).data()) == ("Black Flag", "loose tracks next to subfolders with audio (held)")     # no plan yet: no subfolders
     w = ReviewWindow(svc); qtbot.addWidget(w)
     w.filter_box.setCurrentText("All")
     texts = [w.model.index(j).data() for j in range(w.model.rowCount())]
-    t = next(t for t in texts if t.startswith("Black Flag: Loose tracks, not an album"))
+    t = next(t for t in texts if t.startswith("Black Flag: loose tracks next to subfolders with audio (held)"))
+    assert "My War" not in t
     assert "Needs a look" not in t
     assert not any(t.startswith("lib – ") for t in texts)          # never the grandparent's name again
-    assert w.album_name(ids["stray"]) == "Black Flag: Loose tracks, not an album"
+    assert w.album_name(ids["stray"]) == "Black Flag: loose tracks next to subfolders with audio (held)"
     plan = svc.plan.build([ids["stray"], ids["war"]])
     d = ApplyDialog(plan, album_name=w.album_name, album_row=w.album_row); qtbot.addWidget(d)
     held = [d.tree.topLevelItem(k).text(0) for k in range(d.tree.topLevelItemCount())]
-    assert "Held back: Black Flag: Loose tracks, not an album" in held, held
+    assert "Held back: Black Flag: loose tracks next to subfolders with audio (held) · [1984]  My War [SST023]/" in held, held      # the plan names them
     d2 = ApplyDialog(plan); qtbot.addWidget(d2)                      # no library lookup: AlbumPlan names
-    assert "Held back: Black Flag: Loose tracks, not an album" in [
+    assert "Held back: Black Flag: loose tracks next to subfolders with audio (held) · [1984]  My War [SST023]/" in [
         d2.tree.topLevelItem(k).text(0) for k in range(d2.tree.topLevelItemCount())]
 
 

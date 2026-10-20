@@ -153,7 +153,8 @@ def album_label(ap, fallback=None, undo: bool = False, row=None) -> str:
     1. AlbumPlan.artist / title (e1eca5e: the release's, from plan.build or the apply's journal)
     2. the library index, via fallback(album_id), when album_id is set and found
     3. the album folder's name (+ "Discogs release N" when release_id is known)
-    Loose tracks (AlbumRow.loose_tracks via row(album_id), d6ac2f3) read "Black Flag: Loose tracks, not an album";
+    Loose tracks (AlbumRow.loose_tracks via row(album_id), d6ac2f3) read "Black Flag: loose tracks next to
+    subfolders with audio (held) · [1984]  My War [SST023]/" (subfolders from the plan's blocking_subdirs);
     without the row, a plan's layout_ambiguous problem with layout_reason "album_folders" means the same thing.
     Older services have no artist/title fields; older journals give album_id/release_id 0 and "" names."""
     lp = None if undo else layout_problem(getattr(ap, "problems", None))
@@ -167,7 +168,7 @@ def album_label(ap, fallback=None, undo: bool = False, row=None) -> str:
         # loose tracks in an artist folder (d6ac2f3): AlbumPlan.artist is the folder's name, title ""
         name = (str(getattr(ap, "artist", "") or "").strip() or str(getattr(r, "artist", "") or "").strip()
                 or getattr(getattr(ap, "folder_before", None), "name", "") or "Folder")
-        return loose_label(name)
+        return loose_label(name, lp)
     if lp is not None:      # disc_folders: a real album with its usual names, plus the hint
         if r is not None:
             return row_label(*display_names(r, lp))
@@ -223,7 +224,11 @@ def shown_paths(problem, folder) -> list[str]:
 # structured: layout_reason ("disc_folders" | "album_folders"), blocking_subdirs and loose_files. The message is
 # shown as text only; nothing is read out of it. An older service leaves the fields empty: then the shape and
 # the loose files come from the album's own files, and the subfolders are only named by the message itself.
-LOOSE_TITLE = "Loose tracks, not an album"
+# Neutral on purpose (Maestro, 2026-10-18): the engine can't tell an artist folder from an album folder with
+# extras, so a loose_tracks group is never called "not an album" -- only what it is and that it's held.
+LOOSE_TEXT = "loose tracks next to subfolders with audio (held)"
+SUBDIR_NAME_MAX = 28        # each subfolder name, elided in the middle
+SUBDIRS_SHOWN = 2           # then "+N more"
 
 
 def _plist(value) -> list[Path]:
@@ -280,33 +285,60 @@ def loose_files(problem, files=None) -> list[Path]:
 
 
 def is_loose_tracks(row) -> bool:
-    """AlbumRow.loose_tracks (d6ac2f3): loose files in an artist folder, not an album. The scan names it
-    after that folder (artist = folder name, title/year/catno ""); keyed on the field, never on empty names."""
+    """AlbumRow.loose_tracks (d6ac2f3): loose audio in a folder that also has subfolders with audio. The scan
+    names it after that folder (artist = folder name, title/year/catno ""); keyed on the field, never on names."""
     return bool(getattr(row, "loose_tracks", False))
 
 
-def loose_label(artist: str) -> str:
-    return f"{artist}: {LOOSE_TITLE}" if artist else LOOSE_TITLE
+def _short(name: str, n: int = SUBDIR_NAME_MAX) -> str:
+    return name if len(name) <= n else name[: (n - 1) // 2 + (n - 1) % 2] + "…" + name[len(name) - (n - 1) // 2:]
+
+
+def short_subdirs(problem) -> str:
+    """Problem.blocking_subdirs as short folder names: "[1984]  My War [SST023]/, Live (85)/ +1 more"; ""
+    when there's no problem yet (before a plan exists) or the service doesn't send them."""
+    names = [Path(str(d)).name for d in _plist(getattr(problem, "blocking_subdirs", None))] if problem is not None else []
+    if not names:
+        return ""
+    shown = ", ".join(f"{_short(x)}/" for x in names[:SUBDIRS_SHOWN])
+    return shown + (f" +{len(names) - SUBDIRS_SHOWN} more" if len(names) > SUBDIRS_SHOWN else "")
+
+
+def loose_title(problem=None) -> str:
+    """The album-column text for a loose_tracks group; the subfolders only once a problem names them."""
+    dirs = short_subdirs(problem)
+    return f"{LOOSE_TEXT} · {dirs}" if dirs else LOOSE_TEXT
+
+
+def loose_label(artist: str, problem=None) -> str:
+    """"Black Flag: loose tracks next to subfolders with audio (held)[ · My War/, Live/]"."""
+    return f"{artist}: {loose_title(problem)}" if artist else loose_title(problem)
+
+
+def is_loose_title(title: str) -> bool:
+    return str(title or "").startswith(LOOSE_TEXT)
 
 
 def row_label(artist: str, title: str, loose: bool = False) -> str:
-    """One-line name for the review list and dialogs: "Artist – Title", or "Black Flag: Loose tracks, not an album"."""
-    if loose or title == LOOSE_TITLE:
-        return loose_label(artist)
+    """One-line name for the review list and dialogs: "Artist – Title", or for loose tracks
+    "Black Flag: loose tracks next to subfolders with audio (held)" (title from display_names / loose_title)."""
+    if loose or is_loose_title(title):
+        t = title if is_loose_title(title) else LOOSE_TEXT
+        return f"{artist}: {t}" if artist else t
     return f"{artist} – {title}" if artist and title else (artist or title)
 
 
 def display_names(row, problem=None) -> tuple[str, str]:
     """(artist, album) for the library and review lists.
-    - loose tracks (AlbumRow.loose_tracks): (folder name as the scan gives it, "Loose tracks, not an album"),
-      before and after a plan exists
+    - loose tracks (AlbumRow.loose_tracks): (folder name as the scan gives it, loose_title(problem)), before and
+      after a plan exists; the subfolders appear once a problem (held_for, or the plan's) names them
     - a disc_folders layout_ambiguous album (problem known): its names + " · loose tracks next to disc folders"
     - a folder with no names of its own (e.g. Bonus/ listed as its own album): <parent folder>/Bonus."""
     folder = Path(str(getattr(row, "folder", "") or ""))
     artist = str(getattr(row, "artist", "") or "").strip()
     title = str(getattr(row, "title", "") or "").strip()
     if is_loose_tracks(row):
-        return artist or folder.name, LOOSE_TITLE
+        return artist or folder.name, loose_title(problem)
     if problem is not None and layout_shape(problem) == "discs":
         return artist, f"{title} · {layout_hint(problem)}"
     if not artist and title in ("", folder.name):
@@ -319,7 +351,7 @@ def layout_note(row, parent) -> str:
     if parent is None:
         return ""
     return (f"Listed as its own album: the folder above it, {Path(str(parent.folder)).name}/, has loose tracks "
-            "next to album folders (move the files on disk and rescan)")
+            "next to subfolders with audio, which are held (move the files on disk and rescan)")
 
 
 def layout_files(problem, folder, files) -> list[str]:

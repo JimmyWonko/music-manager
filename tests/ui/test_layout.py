@@ -57,8 +57,17 @@ def test_layout_ambiguous_kind_label_and_helpers():
     assert not P.overridable(NS(problems=[stray])) and P.blocking_reasons(NS(problems=[stray])) == [P.label(stray)]
     # names (d6ac2f3): keyed on AlbumRow.loose_tracks, never on the folder's names or the held state
     row = NS(folder=bf, artist="Black Flag", title="", loose_tracks=True)
-    assert P.display_names(row) == P.display_names(row, stray) == ("Black Flag", "Loose tracks, not an album")
-    assert P.row_label(*P.display_names(row), loose=True) == "Black Flag: Loose tracks, not an album"
+    # neutral wording (Maestro): never "not an album"; subfolders (short names) only once a problem names them
+    assert P.display_names(row) == ("Black Flag", "loose tracks next to subfolders with audio (held)")
+    assert P.display_names(row, stray) == ("Black Flag", "loose tracks next to subfolders with audio (held) · [1984]  My War [SST023]/, Live (85)/")
+    assert P.row_label(*P.display_names(row), loose=True) == "Black Flag: loose tracks next to subfolders with audio (held)"
+    assert P.row_label(*P.display_names(row, stray), loose=True) == (
+        "Black Flag: loose tracks next to subfolders with audio (held) · [1984]  My War [SST023]/, Live (85)/")
+    many = FS.Problem(FS.ProblemKind.LAYOUT_AMBIGUOUS, "m", [bf], layout_reason="album_folders",
+                      blocking_subdirs=[bf / "[1983]  Buzz or Howl Under the Influence of Heat [SST016]", bf / "B", bf / "C"])
+    assert P.short_subdirs(many) == "[1983]  Buzz o…Heat [SST016]/, B/ +1 more"
+    assert all(len(x.rstrip("/")) <= P.SUBDIR_NAME_MAX for x in P.short_subdirs(many).split(" +")[0].split(", "))
+    assert P.short_subdirs(None) == "" and P.short_subdirs(FS.Problem(FS.ProblemKind.LAYOUT_AMBIGUOUS, "m", [bf])) == ""
     old_shape = NS(folder=bf, artist="m", title="Black Flag")          # pre-d6ac2f3 names, no field: no guessing
     assert P.display_names(old_shape, stray) == ("m", "Black Flag")
     real_album = NS(folder=Path("/m/HD/[1984]  Zen Arcade [SST027]"), artist="HD", title="", loose_tracks=False)
@@ -134,20 +143,23 @@ def test_apply_dialog_lists_loose_files_without_apply_anyway(fake, qtbot, lay):
     items = {(d.problem_list.item(i).data(Qt.UserRole), d.problem_list.item(i).data(Qt.UserRole + 1)):
              d.problem_list.item(i).text() for i in range(d.problem_list.count())}
     st = items[(lay["stray"], "layout_ambiguous")]
-    assert st.startswith("⚠ Minutemen: Loose tracks, not an album — Loose tracks next to album folders"), st
+    dirs = P.short_subdirs(P.layout_problem(next(ap for ap in plan.albums if ap.album_id == lay["stray"]).problems))
+    assert dirs.startswith("[1983]  Buzz") and "…" in dirs and dirs.endswith("[SST058]/")
+    assert st.startswith(f"⚠ Minutemen: loose tracks next to subfolders with audio (held) · {dirs} — Loose tracks next to album folders"), st
+    assert "not an album" not in st.split("\n")[0]
     assert "Loose files (1):\n      demo take.mp3" in st
     assert "Next to album folders (2):" in st and "[1985]  3-Way Tie (For Last) [SST058]/" in st
     mx = items[(lay["mixed"], "layout_ambiguous")]
     assert "Meat Puppets – Meat Puppets II · loose tracks next to disc folders" in mx
     assert "In the subfolders (2):" in mx and "CD2/01 Lost.mp3" in mx and "Next to disc folders (2):" in mx
     rows = {d.tree.topLevelItem(i).data(0, Qt.UserRole): d.tree.topLevelItem(i) for i in range(d.tree.topLevelItemCount())}
-    assert rows[lay["stray"]].text(0) == "Held back: Minutemen: Loose tracks, not an album"
+    assert rows[lay["stray"]].text(0) == f"Held back: Minutemen: loose tracks next to subfolders with audio (held) · {dirs}"
     assert rows[lay["stray"]].childCount() == 0 and "demo take.mp3" in rows[lay["stray"]].toolTip(0)
     # no library lookup: AlbumPlan.artist (the folder's name, title "") + the plan's album_folders reason
     ap = next(ap for ap in plan.albums if ap.album_id == lay["stray"])
     assert (ap.artist, ap.title) == ("Minutemen", "")
     d2 = ApplyDialog(plan); qtbot.addWidget(d2)
-    assert any(d2.tree.topLevelItem(i).text(0) == "Held back: Minutemen: Loose tracks, not an album"
+    assert any(d2.tree.topLevelItem(i).text(0) == f"Held back: Minutemen: loose tracks next to subfolders with audio (held) · {dirs}"
                for i in range(d2.tree.topLevelItemCount()))
 
 
@@ -160,19 +172,20 @@ def test_lists_name_held_loose_folder_and_its_subfolder_albums(fake, qtbot, lay)
     m = lib.model
     shown = {m.rows[i].id: (m.index(i, 0).data(), m.index(i, 1).data(), m.index(i, 1).data(Qt.ToolTipRole))
              for i in range(m.rowCount())}
-    assert shown[lay["stray"]][:2] == ("Minutemen", "Loose tracks, not an album")
+    assert shown[lay["stray"]][0] == "Minutemen" and shown[lay["stray"]][1].startswith("loose tracks next to subfolders with audio (held) · [1983]  Buzz")
+    assert "not an album" not in shown[lay["stray"]][2] and "loose tracks next to subfolders with audio (held)" in shown[lay["stray"]][2]
     assert "Next to: [1983]  Buzz or Howl" in shown[lay["stray"]][2]
     assert shown[lay["buzz"]][:2] == ("Minutemen", "Buzz or Howl Under the Influence of Heat")
     assert "Listed as its own album" in shown[lay["buzz"]][2] and "Minutemen/" in shown[lay["buzz"]][2]
-    assert shown[lay["bonus"]][:2] == ("[1984]  Zen Arcade [SST027]", "Loose tracks, not an album")
+    assert shown[lay["bonus"]][:2] == ("[1984]  Zen Arcade [SST027]", "loose tracks next to subfolders with audio (held) · Bonus/")
     assert shown[lay["bonus_dir"]][:2] == ("", "[1984]  Zen Arcade [SST027]/Bonus")
     assert shown[lay["mixed"]][:2] == ("Meat Puppets", "Meat Puppets II")         # not held yet: as scanned
     # review list: "Needs a look"
     w = ReviewWindow(fake); qtbot.addWidget(w)
     w.filter_box.setCurrentText("Needs a look")
     texts = [w.model.index(i).data() for i in range(w.model.rowCount())]
-    assert any(t.startswith("Minutemen: Loose tracks, not an album") and t.endswith("⚠ Needs a look") for t in texts)
-    row = next(i for i, t in enumerate(texts) if t.startswith("Minutemen: Loose"))
+    assert any(t.startswith("Minutemen: loose tracks next to subfolders with audio (held) · [1983]  Buzz") and t.endswith("⚠ Needs a look") for t in texts)
+    row = next(i for i, t in enumerate(texts) if t.startswith("Minutemen: loose tracks next to subfolders with audio (held)"))
     w.list.setCurrentIndex(w.model.index(row))
     assert "Loose tracks next to album folders" in w.preview.text() and "demo take.mp3" in w.preview.text()
     assert "Loose tracks next to album folders" in w.model.index(row).data(Qt.ToolTipRole)
@@ -190,14 +203,16 @@ def test_loose_tracks_named_before_any_plan(fake, qtbot, lay):
     lib = LibraryWindow(fake); qtbot.addWidget(lib)
     m = lib.model
     i = next(i for i in range(m.rowCount()) if m.rows[i].id == lay["stray"])
-    assert (m.index(i, 0).data(), m.index(i, 1).data()) == ("Minutemen", "Loose tracks, not an album")
+    assert (m.index(i, 0).data(), m.index(i, 1).data()) == ("Minutemen", "loose tracks next to subfolders with audio (held)")      # no plan yet: no subfolders
     assert m.index(i, 2).data() in ("", None) and m.index(i, 3).data() in ("", None)      # no year / catno
     w = ReviewWindow(fake); qtbot.addWidget(w)
     w.filter_box.setCurrentText("All")
     texts = [w.model.index(j).data() for j in range(w.model.rowCount())]
-    t = next(t for t in texts if t.startswith("Minutemen: Loose tracks, not an album"))
+    t = next(t for t in texts if t.startswith("Minutemen: loose tracks next to subfolders with audio (held)"))
+    assert t.startswith("Minutemen: loose tracks next to subfolders with audio (held)   ")                                   # nothing between: no names yet
     assert "Needs a look" not in t
-    assert w.album_name(lay["stray"]) == "Minutemen: Loose tracks, not an album"
+    assert w.album_name(lay["stray"]) == "Minutemen: loose tracks next to subfolders with audio (held)"
+    assert "not an album" not in w.model.index(texts.index(t)).data(Qt.ToolTipRole)
     assert w.album_name(lay["buzz"]) == "Minutemen – Buzz or Howl Under the Influence of Heat"
 
 
