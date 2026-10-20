@@ -17,7 +17,12 @@ from .conflicts import (
 )
 from .fs import DISC_DIR, AlbumFolder, file_sha256
 from .journal import Journal
-from .match import TITLE_MATCH_MIN, align_tracks_explained, ambiguous_disc_files
+from .match import (
+    TITLE_MATCH_MIN,
+    TrackCountHold,
+    align_tracks_detailed,
+    ambiguous_disc_files,
+)
 from .moves import (
     PlannedFile,
     _mkdirs_logged,
@@ -300,6 +305,7 @@ class AlbumLayout:
     title: str = ""
     ambiguous: list[Path] = field(default_factory=list)  # refused: disc unknown (also in unmatched)
     disc_conflicts: list[DiscConflict] = field(default_factory=list)  # why each of ambiguous was refused
+    count_holds: list[TrackCountHold] = field(default_factory=list)  # refused: discs whose counts differ
 
 
 def layout_album(
@@ -336,7 +342,7 @@ def layout_album(
     if check:
         validate_layout(album, dest_root, target_dir)
 
-    pairs, legacy, conflicts = align_tracks_explained(album, dtracks, title_match_min)
+    pairs, legacy, conflicts, holds = align_tracks_detailed(album, dtracks, title_match_min)
     if legacy:
         log("  note  these files use the old vinyl numbering (B1 = 21); they are renumbered 1..N")
     ambiguous = ambiguous_disc_files(pairs)
@@ -344,6 +350,8 @@ def layout_album(
         log(f"  warning: {disc_warning(album, ambiguous, conflicts)}")
         for conflict in conflicts:
             log(f"    {describe_disc_conflict(conflict, album.path)}")
+    if holds:
+        log(f"  warning: {track_count_message(album, holds)}")
 
     per_disc: dict[int, str] = {}
     try:
@@ -356,7 +364,7 @@ def layout_album(
     plan: list[PlannedFile] = []
     unmatched: list[Path] = []
     for local, dt, method in pairs:
-        if dt is None and method == "ambiguous_disc":
+        if dt is None and method in ("ambiguous_disc", "track_count"):
             unmatched.append(local)
             continue
         if dt is None:
@@ -408,7 +416,7 @@ def layout_album(
                 log(f"  note  hand-made playlist {sidecar.name} is moved as-is; it may list old file names")
     layout = AlbumLayout(album, dest_root, target_dir, pairs, plan, unmatched, moves, old_playlists, legacy, clashes,
                          release_id=int(release.get("id") or 0), artist=info.album_artist, title=info.title,
-                         ambiguous=ambiguous, disc_conflicts=conflicts)
+                         ambiguous=ambiguous, disc_conflicts=conflicts, count_holds=holds)
     if check:
         wrong = disc_folder_mismatches(layout)
         if wrong:
@@ -436,6 +444,24 @@ def disc_warning(album: AlbumFolder, files: list[Path], conflicts: list[DiscConf
                      f"{names(sources)}. Nothing is paired; move each file into its disc's folder (or fix its "
                      "disc tag) so all three agree, then try again")
     return " Also: ".join(parts)
+
+
+def track_count_message(album: AlbumFolder, holds: list[TrackCountHold]) -> str:
+    """The message for discs held because their file and track counts differ (see match.TrackCountHold)."""
+    parts = []
+    for hold in holds:
+        folders = {p.parent for p in hold.paths}
+        where = f"disc {hold.disc}"
+        if len(folders) == 1 and (folder := next(iter(folders))) != album.path:
+            where += f" ({folder.relative_to(album.path) if album.path in folder.parents else folder.name}/)"
+        text = (f"{where} has {hold.file_count} files but the release lists {hold.track_count} tracks, and the "
+                "titles don't pair every file with exactly one track. None of this disc's files is paired: "
+                "pairing by number would shift every title after the difference.")
+        for path, positions in hold.medleys:
+            text += f" {path.name} looks like a medley of {' + '.join(positions)} ripped as one file."
+        parts.append(text)
+    return (" ".join(parts) + " Choose a release that lists the discs as the files have them, or name the files "
+            "after their tracks so their titles pair them")
 
 
 def disc_folder_mismatches(layout: AlbumLayout) -> list[DiscFolderMismatch]:
@@ -491,6 +517,8 @@ def execute_layout(
     """
     album, dest_root, target_dir = layout.album, layout.dest_root, layout.target_dir
     plan = layout.tracks
+    if layout.count_holds:  # the backstop: never apply an album with a held disc, whatever planned it
+        raise AlbumApplyError(f"{album.path}: {track_count_message(album, layout.count_holds)}\n  nothing was written")
     wrong = disc_folder_mismatches(layout)
     if wrong:  # the backstop: never file a track into another disc's folder, whatever planned it
         raise AlbumApplyError(disc_folder_message(album, wrong, "refusing to put tracks into") +
@@ -599,6 +627,8 @@ def apply_album(
     layout = layout_album(album, dest_root, release, dtracks, original_year)
     if layout.ambiguous:
         raise AlbumApplyError(f"{disc_warning(album, layout.ambiguous, layout.disc_conflicts)}\n  nothing was written")
+    if layout.count_holds:
+        raise AlbumApplyError(f"{track_count_message(album, layout.count_holds)}\n  nothing was written")
     return execute_layout(layout, dry_run, clear_other, scan_root, journal_dir)
 
 

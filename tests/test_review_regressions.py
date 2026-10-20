@@ -184,7 +184,9 @@ def test_review4_auto_needs_clear_margin_over_runner_up():
 
 
 def test_review4_allow_track_mismatch_flag_applies(tmp_path):
-    src = make_album(tmp_path / "in" / "Testers" / "[1985]  Side Story [WAX001]", ["01 track.flac", "02 track.flac", "03 track.flac"])
+    # titled files: on a count mismatch the titles must pair the files ("01 track" would be held)
+    src = make_album(tmp_path / "in" / "Testers" / "[1985]  Side Story [WAX001]",
+                     ["01 Opening.flac", "02 Second.flac", "03 Third.flac"])
     album = next(a for a in collect_albums(src) if a.path == src)
     guess = guess_from_album_dir(album.path, album.tracks)
     hit = {"id": 1000001, "title": f"{guess['artist']} - {guess['album']}", "catno": guess.get("catno") or "WAX001", "year": guess.get("year") or "1985"}

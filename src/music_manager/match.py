@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections import Counter
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -291,6 +292,99 @@ def _choice(dt: DiscogsTrack, number: int, title: str) -> DiscChoice:
                       similar(title, dt.title) if title else 0.0)
 
 
+@dataclass(frozen=True)
+class TrackCountHold:
+    """A disc whose file count is not its track count and whose titles don't settle the pairing.
+
+    Every file of that disc (paths) is left unpaired (method "track_count"): pairing by number
+    would shift every title after the missing or merged track. medleys: files whose title is
+    several consecutive tracks of the disc joined (a medley ripped as one file), with those
+    tracks' positions.
+    """
+    disc: int
+    file_count: int
+    track_count: int
+    paths: tuple[Path, ...]
+    medleys: tuple[tuple[Path, tuple[str, ...]], ...] = ()
+
+
+def _file_titles(local: Path) -> list[str]:
+    """The file's title from its name and from its title tag (either may be missing)."""
+    titles = [_title_from_stem(local.stem)]
+    try:
+        tag = (read_easy_tags(local).get("title") or "").strip()
+    except Exception:  # noqa: BLE001 - unreadable: the name is all there is
+        tag = ""
+    if tag:
+        titles.append(tag)
+    return [t for t in titles if t]
+
+
+def _title_score(titles: list[str], title: str) -> float:
+    return max((similar(t, title) for t in titles), default=0.0)
+
+
+def _plain_titles(tracks: list[DiscogsTrack]) -> list[str]:
+    """Titles without the "Work: " prefix index sub-tracks share."""
+    out = [dt.title for dt in tracks]
+    heads = {t.split(": ", 1)[0] for t in out}
+    if len(out) > 1 and len(heads) == 1 and all(": " in t for t in out):
+        out = [t.split(": ", 1)[1] for t in out]
+    return out
+
+
+def _medley(titles: list[str], run: list[DiscogsTrack], title_match_min: float) -> bool:
+    """The file's title is these tracks' titles joined, and fits that better than any one of them."""
+    joined = _title_score(titles, " / ".join(_plain_titles(run)))
+    single = max(_title_score(titles, dt.title) for dt in run)
+    return joined >= max(title_match_min, TITLE_MATCH_MIN) and joined > single
+
+
+def _count_guard(info, chosen: list[int | None], method: list[str], dtracks: list[DiscogsTrack],
+                 title_match_min: float) -> list[TrackCountHold]:
+    """Re-check every disc whose file count differs from its track count (see align_tracks_explained)."""
+    discs = sorted({dt.disc for dt in dtracks})
+    multi = len(discs) > 1
+    holds: list[TrackCountHold] = []
+    for d in discs:
+        tracks_d = [i for i, dt in enumerate(dtracks) if dt.disc == d]
+        files_d = [k for k in range(len(info))
+                   if (chosen[k] is not None and dtracks[chosen[k]].disc == d)
+                   or (chosen[k] is None and (info[k][1] == d or (not multi and info[k][1] is None)))]
+        if not files_d or len(files_d) == len(tracks_d):
+            continue
+        titles = {k: _file_titles(info[k][0]) for k in files_d}
+        # A file whose title is several consecutive tracks joined (a medley ripped as one file)
+        # holds the disc: pairing it with one of them would drop the others' titles.
+        medleys = []
+        for k in files_d:
+            for size in (2, 3, 4):
+                runs = [tracks_d[j:j + size] for j in range(len(tracks_d) - size + 1)]
+                hit = next((r for r in runs if _medley(titles[k], [dtracks[i] for i in r], title_match_min)), None)
+                if hit:
+                    medleys.append((info[k][0], tuple(dtracks[i].position or f"{d}-{dtracks[i].number}"
+                                                      for i in hit)))
+                    break
+        if not medleys:
+            paired = [k for k in files_d if chosen[k] is not None]
+            if all(_title_score(titles[k], dtracks[chosen[k]].title) >= title_match_min for k in paired):
+                continue  # every pair's title agrees: nothing was shifted
+            good = {k: [i for i in tracks_d if _title_score(titles[k], dtracks[i].title) >= title_match_min]
+                    for k in files_d}
+            picks = [g[0] for g in good.values() if len(g) == 1]
+            if len(picks) == len(files_d) and len(set(picks)) == len(picks):
+                for k in files_d:
+                    chosen[k] = good[k][0]
+                    method[k] = "title"
+                continue
+        for k in files_d:
+            chosen[k] = None
+            method[k] = "track_count"
+        holds.append(TrackCountHold(d, len(files_d), len(tracks_d), tuple(info[k][0] for k in files_d),
+                                    tuple(medleys)))
+    return holds
+
+
 def align_tracks(
     album: AlbumFolder, dtracks: list[DiscogsTrack], title_match_min: float = TITLE_MATCH_MIN
 ) -> tuple[list[tuple[Path, DiscogsTrack | None, str]], bool]:
@@ -302,6 +396,14 @@ def align_tracks(
 def align_tracks_explained(
     album: AlbumFolder, dtracks: list[DiscogsTrack], title_match_min: float = TITLE_MATCH_MIN
 ) -> tuple[list[tuple[Path, DiscogsTrack | None, str]], bool, list[DiscConflict]]:
+    """align_tracks_detailed without the track-count holds (their files have method "track_count")."""
+    triples, use_legacy, conflicts, _holds = align_tracks_detailed(album, dtracks, title_match_min)
+    return triples, use_legacy, conflicts
+
+
+def align_tracks_detailed(
+    album: AlbumFolder, dtracks: list[DiscogsTrack], title_match_min: float = TITLE_MATCH_MIN
+) -> tuple[list[tuple[Path, DiscogsTrack | None, str]], bool, list[DiscConflict], list[TrackCountHold]]:
     """Pair local files with Discogs tracks, saying how each pair was made.
 
     1. A file named after a side position the release has ("B2. Title")
@@ -328,12 +430,24 @@ def align_tracks_explained(
        whatever is still left takes the remaining tracks in order. Otherwise
        it stays unmatched (None): reported and not tagged or moved.
 
-    A single-disc release is paired by steps 1-4 as before; no tags are read.
+    5. A disc whose file count is not its track count (a medley ripped as one
+       file, a missing or bonus track) keeps these pairs only when every paired
+       file's title (its name or title tag) matches its track. Otherwise the
+       disc is paired by title alone when that gives every file of the disc
+       exactly one track, no two files the same; else none of its files is
+       paired (method "track_count") and the disc is a TrackCountHold. A file
+       whose title is several consecutive tracks joined (a medley) always holds
+       its disc. Numbers or positions never shift titles onto other files.
+
+    A single-disc release is paired by steps 1-4 as before (no disc tags are
+    read); step 5 applies to it too.
 
     Returns (local file, track or None, method) for every local file, where
     method is "side", "number", "title", "position" (steps 1-4),
-    "ambiguous_disc" or "unmatched", whether the old vinyl numbering was
-    detected, and a DiscConflict for every "ambiguous_disc" file (in file order).
+    "ambiguous_disc", "track_count" or "unmatched", whether the old vinyl
+    numbering was detected, a DiscConflict for every "ambiguous_disc" file (in
+    file order) and a TrackCountHold for every held disc. Step 5 is skipped
+    when any file is "ambiguous_disc" (the album is held for that already).
     """
     discs = {dt.disc for dt in dtracks}
     max_disc = max(discs, default=1)
@@ -479,8 +593,9 @@ def align_tracks_explained(
                 method[k] = "position"
                 used.add(free[0])
 
+    holds = [] if refused else _count_guard(info, chosen, method, dtracks, title_match_min)
     triples = [(info[k][0], dtracks[i] if i is not None else None, method[k]) for k, i in enumerate(chosen)]
-    return triples, use_legacy, [conflicts[k] for k in sorted(conflicts)]
+    return triples, use_legacy, [conflicts[k] for k in sorted(conflicts)], holds
 
 
 def ambiguous_disc_files(triples: list[tuple[Path, DiscogsTrack | None, str]]) -> list[Path]:

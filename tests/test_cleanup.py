@@ -91,9 +91,12 @@ def test_folder_with_hidden_leftover_is_never_removed(tmp_path, fake_api):
 
 
 def test_unmatched_track_keeps_source_folder(tmp_path):
-    src = make_album(tmp_path / "in" / "Testers - Side Story", [f"{n:02d} track.flac" for n in range(1, 12)])
+    # ten titled files and a bonus one: the ten titles pair (so the disc is not held for its count)
+    titles = ["Opening", "Second", "Third", "Fourth", "Fifth", "Flip", "Seventh", "Eighth", "Ninth", "Closing"]
+    names = [f"{n:02d} {t}.flac" for n, t in enumerate(titles, 1)] + ["11 bonus.flac"]
+    src = make_album(tmp_path / "in" / "Testers - Side Story", names)
     run_apply(src, tmp_path / "lib", release("vinyl_lp"), scan_root=tmp_path / "in")
-    assert [p.name for p in src.iterdir()] == ["11 track.flac"]  # left in place on purpose, folder kept
+    assert [p.name for p in src.iterdir()] == ["11 bonus.flac"]  # left in place on purpose, folder kept
 
 
 def test_in_place_rename_removes_old_folder_keeps_artist(tmp_path):

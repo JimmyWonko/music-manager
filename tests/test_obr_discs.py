@@ -38,6 +38,7 @@ from music_manager.apply import (
     layout_album,
     template_paths,
     template_sets_disc_path,
+    track_count_message,
 )
 from music_manager.fs import collect_albums
 from music_manager.journal import undo_journal
@@ -46,7 +47,6 @@ from music_manager.naming.templates import PRESETS, compile_template
 from music_manager.providers.discogs import flatten_tracklist, release_artists
 from music_manager.service import JobState
 
-BUG2 = pytest.mark.xfail(strict=True, reason="a disc with fewer files than tracks is paired by number")
 FOLDER = (ARTIST, f"[2016]  {TITLE} [OBR-040]")
 
 
@@ -164,7 +164,6 @@ def test_apply_and_undo_with_disc_folders(tmp_path):
 
 # --- bug 2: a medley file against two Discogs tracks -------------------------------------------------
 
-@BUG2
 @pytest.mark.parametrize("shape", ["plain", "index"])
 def test_titles_are_never_shifted(tmp_path, shape):
     make_album(tmp_path / "in" / "Album")
@@ -180,23 +179,24 @@ def test_titles_are_never_shifted(tmp_path, shape):
     assert all(dt is not None for local, dt, _m in triples if local.parent.name == "CD1")
 
 
-@BUG2
 @pytest.mark.parametrize("shape", ["plain", "index"])
 def test_layout_and_apply_hold_the_disc_with_a_clear_message(tmp_path, shape):
     layout = plan_layout(tmp_path, release(shape))
     [hold] = layout.count_holds
     assert (hold.disc, hold.file_count, hold.track_count) == (2, 13, 14)
-    assert "09 - Hey Good Lookin',Jambalaya (On the Bayou).flac" in hold.message
-    assert "medley" in hold.message
     [album] = collect_albums(tmp_path / "in")
+    message = track_count_message(album, layout.count_holds)
+    assert "09 - Hey Good Lookin',Jambalaya (On the Bayou).flac looks like a medley of" in message
+    assert "disc 2 (CD2/) has 13 files but the release lists 14 tracks" in message
+    assert [p.name for p, _pos in hold.medleys] == ["09 - Hey Good Lookin',Jambalaya (On the Bayou).flac"]
+    assert hold.medleys[0][1] == (("2-9", "2-10") if shape == "plain" else ("2-9a", "2-9b"))
     before = contents(tmp_path / "in")
-    with pytest.raises(AlbumApplyError, match="CD2.*13 files.*14 tracks"):
+    with pytest.raises(AlbumApplyError, match=r"CD2/\) has 13 files but the release lists 14 tracks"):
         apply_album(album, tmp_path / "lib", release(shape), dtracks(release(shape)), "", dry_run=False,
                     journal_dir=tmp_path / "j")
     assert contents(tmp_path / "in") == before
 
 
-@BUG2
 def test_titles_rescue_a_disc_whose_numbers_are_off(tmp_path):
     """A missing file renumbered the rest: titles pair every file unambiguously, so they win."""
     titles = D2_FILES[:3] + D2_FILES[4:]  # Zinc Bucket missing; files numbered 1..12
@@ -230,7 +230,6 @@ def choose(root):
     return row.id
 
 
-@BUG2
 def test_service_holds_and_allow_track_mismatch_does_not_override(svc):
     root, _discogs = svc
     make_album(root.joinpath(*FOLDER))
@@ -266,7 +265,6 @@ def test_service_apply_with_disc_folders_and_undo(svc):
     assert contents(root) == original and album.is_dir()
 
 
-@BUG2
 @pytest.mark.parametrize("shape", ["plain", "index"])
 def test_cli_skips_the_held_album(tmp_path, monkeypatch, shape):
     src = make_album(tmp_path.joinpath("in", *FOLDER))

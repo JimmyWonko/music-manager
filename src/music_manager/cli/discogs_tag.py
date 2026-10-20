@@ -21,14 +21,14 @@ from mutagen import File as MutagenFile
 from mutagen.id3 import ID3, TIT2, TPE1, TXXX
 
 from .. import naming
-from ..apply import AlbumApplyError, apply_album, disc_warning
+from ..apply import AlbumApplyError, apply_album, disc_warning, track_count_message
 from ..conflicts import describe_disc_conflict
 from ..fs import AlbumFolder, collect_albums, collect_extras
 from ..journal import undo_journal
 from ..match import (
     AUTO_MIN_MARGIN,
     AUTO_MIN_SCORE,
-    align_tracks_explained,
+    align_tracks_detailed,
     ambiguous_disc_files,
     format_score_components,
     guess_from_album_dir,
@@ -51,7 +51,13 @@ from ..naming import (
     year4,
 )
 from ..normalize import normalize_folders, plan_folder_rename
-from ..playlists import GENERATED_MARKER, album_playlist_tracks, encode_lines, is_generated_playlist, render_playlist
+from ..playlists import (
+    GENERATED_MARKER,
+    album_playlist_tracks,
+    encode_lines,
+    is_generated_playlist,
+    render_playlist,
+)
 from ..providers.discogs import (
     RELEASE_URL,
     Discogs,
@@ -269,12 +275,16 @@ def process_album(
             print("  skipped: track count mismatch in --auto mode (use --allow-track-mismatch to apply anyway)")
             return "skipped"
 
-    triples, _legacy, conflicts = align_tracks_explained(album, dtracks)
+    triples, _legacy, conflicts, holds = align_tracks_detailed(album, dtracks)
     unsure = ambiguous_disc_files(triples)
     if unsure:
         print(f"  warning: {disc_warning(album, unsure, conflicts)}")
         for conflict in conflicts:
             print(f"    {describe_disc_conflict(conflict, album.path)}")
+        print("  skipped: nothing written")
+        return "skipped"
+    if holds:
+        print(f"  warning: {track_count_message(album, holds)}")
         print("  skipped: nothing written")
         return "skipped"
 

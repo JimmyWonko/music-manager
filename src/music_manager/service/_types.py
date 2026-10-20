@@ -108,6 +108,7 @@ class ProblemKind(StrEnum):
     DISC_AMBIGUOUS = "disc_ambiguous"  # multi-disc: files whose disc can't be told (paths); never overridden
     LAYOUT_AMBIGUOUS = "layout_ambiguous"  # loose audio next to disc folders / other albums; never overridden
     DISC_FOLDER_MISMATCH = "disc_folder_mismatch"  # destination puts tracks in another disc's CD folder
+    DISC_TRACK_COUNT = "disc_track_count"  # a disc's file and track counts differ, titles don't settle it (paths)
 
 
 # --- jobs ---------------------------------------------------------------------

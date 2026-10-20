@@ -96,4 +96,4 @@ def test_problem_kinds_are_only_ever_appended():
     assert [k.value for k in ProblemKind] == [
         "dest_inside_source", "source_inside_target", "symlink_outside", "collision", "track_mismatch",
         "file_changed", "legacy_journal", "release_not_fetched", "disc_ambiguous", "layout_ambiguous",
-        "disc_folder_mismatch"]
+        "disc_folder_mismatch", "disc_track_count"]

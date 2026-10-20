@@ -16,6 +16,7 @@ from ..apply import (
     release_info,
     template_paths,
     template_sets_disc_path,
+    track_count_message,
 )
 from ..fs import AlbumFolder, is_audio
 from ..naming.templates import (
@@ -204,6 +205,9 @@ def _album_problems(t: AlbumTarget, track_count: int) -> list[Problem]:
     if layout.ambiguous:
         problems.append(Problem(ProblemKind.DISC_AMBIGUOUS, disc_warning(t.album, layout.ambiguous, layout.disc_conflicts),
                                 list(layout.ambiguous), disc_conflicts=list(layout.disc_conflicts)))
+    if layout.count_holds:
+        problems.append(Problem(ProblemKind.DISC_TRACK_COUNT, track_count_message(t.album, layout.count_holds),
+                                [p for hold in layout.count_holds for p in hold.paths]))
     wrong = disc_folder_mismatches(layout)
     if wrong:
         problems.append(Problem(ProblemKind.DISC_FOLDER_MISMATCH,
