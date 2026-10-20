@@ -498,6 +498,14 @@ class FakeContract:
         return [Problem(ProblemKind.DISC_AMBIGUOUS, T.disc_warning(album.folder, amb, conflicts), list(amb),
                         disc_conflicts=list(conflicts))]
 
+    def _disc_track_count(self, album: Album, cand) -> list[Problem]:
+        """1566b36: one DISC_TRACK_COUNT problem (paths = that disc's files) per disc whose file and track counts
+        differ and whose titles don't settle it. Not overridable: allow_track_mismatch never removes it."""
+        if cand is None:
+            return []
+        return [Problem(ProblemKind.DISC_TRACK_COUNT, T.disc_count_message(album.folder, d, paths, m), list(paths))
+                for d, _n, m, paths in self.fake.disc_count_holds(album.id, cand.release_id)]
+
     def _layout_ambiguous(self, album: Album) -> list[Problem]:
         """Contract "Album folders with loose audio and subfolders": one LAYOUT_AMBIGUOUS problem, paths =
         [album folder], first like the real album_target. Not overridable; never applied, moved or renamed."""
@@ -648,7 +656,8 @@ class FakeContract:
                      for c in self._collisions({album_id: (folder, files)}) if c.album_ids == [album_id]]
         root = self._root_for(album.folder)
         problems += self._nesting_problems(album.folder, folder, root) + self.mock_problems.get(album_id, [])
-        problems += self._disc_ambiguous(album, cand) + self._disc_folder_mismatch(album, cand, files)
+        problems += (self._disc_ambiguous(album, cand) + self._disc_track_count(album, cand)
+                     + self._disc_folder_mismatch(album, cand, files))
         return Destination(root, folder, files if cand.fetched else [], problems)
 
     def _queued_folders(self, text: str, exclude: int) -> dict[int, Path]:
@@ -748,6 +757,7 @@ class FakeContract:
                         + [p for p in self.mock_problems.get(aid, [])
                            if not (p.kind == ProblemKind.TRACK_MISMATCH and aid in allow_track_mismatch)]
                         + self._disc_ambiguous(album, cand)            # never overridden
+                        + self._disc_track_count(album, cand)          # never overridden
                         + self._disc_folder_mismatch(album, cand, files))     # never overridden
             multi = self.fake.disc_pairing(aid, cand.release_id)
             if multi is None:

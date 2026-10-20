@@ -140,6 +140,7 @@ class ProblemKind(StrEnum):
     DISC_AMBIGUOUS = "disc_ambiguous"           # multi-disc: files whose disc can't be told (paths); not overridable
     LAYOUT_AMBIGUOUS = "layout_ambiguous"       # loose audio next to disc folders / other albums; never overridden
     DISC_FOLDER_MISMATCH = "disc_folder_mismatch"   # destination puts tracks in another disc's CD folder; never overridden
+    DISC_TRACK_COUNT = "disc_track_count"   # 1566b36: a disc's file/track counts differ, titles don't settle it; never overridden
 # Cross-device moves are not a problem: they are allowed, and every file appears in `files`.
 
 
@@ -535,6 +536,16 @@ def folder_mismatches(root: Path, placed: list[tuple[Path, Path, int]]) -> list:
     return out
 
 
+def disc_count_message(folder: Path, disc: int, files: list[Path], n_tracks: int) -> str:
+    """Wording of the engine's DISC_TRACK_COUNT message (API-CONTRACT 2026-10-19 item 2), shown as text only."""
+    sub = {Path(str(f)).parent for f in files}
+    where = f" ({next(iter(sub)).name}/)" if len(sub) == 1 and next(iter(sub)) != folder else ""
+    return (f"disc {disc}{where} has {len(files)} files but the release lists {n_tracks} tracks, and the titles "
+            "don't pair every file with exactly one track. None of this disc's files is paired: pairing by number "
+            "would shift every title after the difference. Choose a release that lists the discs as the files have "
+            "them, or name the files after their tracks so their titles pair them")
+
+
 def disc_folder_message(folder: Path, mismatches: list, lead: str = "the destination puts tracks into") -> str:
     """Same wording as music_manager.apply.disc_folder_message (2b82859)."""
     detail = "; ".join(f"{m.path.name} -> {m.folder.name}/ (disc tag {m.tag_disc})" for m in mismatches)
@@ -710,11 +721,43 @@ class FakeService(QObject):
         x = self.disc_pairing_explained(album_id, release_id)
         return None if x is None else x[:2]
 
-    def disc_pairing_explained(self, album_id: int, release_id: int):
-        """(pairs, ambiguous files, DiscConflicts) for a multi-disc mock release, None otherwise."""
+    def _raw_pairing(self, album_id: int, release_id: int):
         tl = self._tracklists.get(release_id)
         return None if tl is None else pair_tracks_explained(self._albums[album_id].tracks, tl,
                                                              sidecars=self._sidecars.get(album_id))
+
+    def disc_pairing_explained(self, album_id: int, release_id: int):
+        """(pairs, ambiguous files, DiscConflicts) for a multi-disc mock release, None otherwise. Files on a disc
+        held for disc_track_count (1566b36) are left unpaired (None), never shifted."""
+        raw = self._raw_pairing(album_id, release_id)
+        if raw is None:
+            return None
+        held = {pth for _d, _n, _m, paths in self.disc_count_holds(album_id, release_id) for pth in paths}
+        pairs, amb, conflicts = raw
+        return [None if t.path in held else rt for t, rt in zip(self._albums[album_id].tracks, pairs)], amb, conflicts
+
+    def disc_count_holds(self, album_id: int, release_id: int) -> list[tuple[int, int, int, list[Path]]]:
+        """MOCK of 1566b36: (disc, files, tracks, that disc's files) for each disc whose number of paired files
+        differs from the release's track count for it and whose titles don't pair every file with exactly one
+        of its tracks (a missing file with all titles matching still stands; a medley file holds the disc)."""
+        raw = self._raw_pairing(album_id, release_id)
+        if raw is None or raw[1]:          # files whose disc can't be told: disc_ambiguous already holds it
+            return []
+        tl, tracks = self._tracklists[release_id], self._albums[album_id].tracks
+        by_disc: dict[int, list] = {}
+        for t, rt in zip(tracks, raw[0]):
+            if rt is not None:
+                by_disc.setdefault(rt.disc, []).append(t)
+        out = []
+        for disc, files in sorted(by_disc.items()):
+            rel = [rt for rt in tl if rt.disc == disc]
+            if len(files) == len(rel):
+                continue
+            matches = [[rt for rt in rel if _tsim(t.title, rt.title) >= TITLE_MATCH_MIN] for t in files]
+            one_each = all(len(m) == 1 for m in matches) and len({id(m[0]) for m in matches}) == len(files)
+            if not one_each:
+                out.append((disc, len(files), len(rel), [t.path for t in files]))
+        return out
 
     # -------- background "Discogs" fetch, paced like the real rate limit
     def _fetch_one(self, pace: bool = True):

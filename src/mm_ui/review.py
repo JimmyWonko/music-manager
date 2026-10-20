@@ -419,6 +419,8 @@ class ReviewWindow(QMainWindow):
         dest = self._destination(c)
         amb = {Path(str(x)): p for p in (dest.problems if dest is not None and not isinstance(dest, Exception) else [])
                if P.kind_of(p) == P.DISC_AMBIGUOUS for x in p.paths}     # refused file -> its problem
+        counted = {Path(str(x)) for p in (dest.problems if dest is not None and not isinstance(dest, Exception) else [])
+                   if P.kind_of(p) == P.DISC_TRACK_COUNT for x in p.paths}    # disc_track_count: disc left unpaired
         if c.alignment:
             for pair in c.alignment:
                 r = self.table.rowCount(); self.table.insertRow(r)
@@ -432,6 +434,9 @@ class ReviewWindow(QMainWindow):
                 if refused:
                     vals[7] = "discs disagree" if conflict is not None and conflict.reason == "sources_disagree" \
                         else "disc unknown"
+                count_off = not refused and lt is not None and rt is None and Path(str(lt.path)) in counted
+                if count_off:
+                    vals[7] = "disc count differs"
                 for col, v in enumerate(vals):
                     it = QTableWidgetItem(v)
                     if col == 6:
@@ -439,6 +444,11 @@ class ReviewWindow(QMainWindow):
                     if col == 7 and refused:
                         it.setForeground(QBrush(QColor("#b33")))
                         it.setToolTip(disc_tooltip(conflict))
+                    elif col == 7 and count_off:
+                        it.setForeground(QBrush(QColor("#b33")))
+                        it.setToolTip("This disc has a different number of files than the release lists for it, and "
+                                      "the titles don't pair every file, so none of its files is paired (pairing "
+                                      "by number would shift the titles). " + P.DISC_COUNT_HINT)
                     elif col == 7 and pair.method in METHOD_COLOR:
                         it.setForeground(QBrush(QColor(METHOD_COLOR[pair.method])))
                     self.table.setItem(r, col, it)
@@ -905,6 +915,8 @@ class ApplyDialog(QDialog):
                         f"⚠ {n}{' —' if P.LOOSE_TEXT in n else ':'} {P.label(p)}") + f"\n    {p.message}"
                 if P.kind_of(p) == P.DISC_AMBIGUOUS:     # per file: why, and the disc/track choices
                     text += "".join(f"\n    {x}" for x in P.disc_conflict_lines(p, ap.folder_before))
+                elif P.kind_of(p) == P.DISC_TRACK_COUNT:      # the disc's files, none paired
+                    text += "".join(f"\n    {x}" for x in P.disc_count_lines(p, ap.folder_before))
                 elif P.kind_of(p) == P.DISC_FOLDER_MISMATCH:   # "13 Mason Jar.flac → CD2/ (disc tag 1)"
                     text += "".join(f"\n    {x}" for x in P.folder_mismatch_lines(p, ap.folder_before))
                 elif P.kind_of(p) == P.LAYOUT_AMBIGUOUS:   # loose files + the folders next to them

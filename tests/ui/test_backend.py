@@ -553,7 +553,7 @@ def test_mock_types_match_contract_exactly():
     assert classes["Problem"][1] == ["kind", "message", "paths", "disc_conflicts", "layout_reason",
                                      "blocking_subdirs", "loose_files", "folder_mismatches"]
     assert {"DiscConflict", "DiscChoice", "DiscFolderMismatch"} <= set(classes)
-    assert classes["ProblemKind"][1][-3:] == ["DISC_AMBIGUOUS", "LAYOUT_AMBIGUOUS", "DISC_FOLDER_MISMATCH"]
+    assert classes["ProblemKind"][1][-4:] == ["DISC_AMBIGUOUS", "LAYOUT_AMBIGUOUS", "DISC_FOLDER_MISMATCH", "DISC_TRACK_COUNT"]
     assert all(m.value == m.name.lower() for m in T.ProblemKind)
     for name, (kind, members) in classes.items():
         mine = getattr(T, name)

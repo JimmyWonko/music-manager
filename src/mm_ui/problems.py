@@ -24,6 +24,7 @@ LABELS = {
     "disc_ambiguous": "Can't work out the disc layout",   # multi-disc: paths = the files; never overridable
     "layout_ambiguous": "Loose tracks next to subfolders with audio",   # paths = [album folder]; never overridable
     "disc_folder_mismatch": "Tracks would go into another disc's folder",   # template issue; never overridable
+    "disc_track_count": "A disc's file count doesn't match its tracks",   # 1566b36: paths = that disc's files
 }
 NOT_FETCHED = "release_not_fetched"   # not held: apply leaves the album out and its status stays as it was
 OVERRIDABLE = "track_mismatch"   # per album only, via plan.build(allow_track_mismatch={id}) after a confirm
@@ -31,6 +32,16 @@ LEGACY = "legacy_journal"
 LAYOUT_AMBIGUOUS = "layout_ambiguous"    # 68cf4d7: loose audio next to disc/album folders; held, never overridden
 DISC_FOLDER_MISMATCH = "disc_folder_mismatch"  # 2b82859: the naming template files a track into another disc's CD folder
 DISC_AMBIGUOUS = "disc_ambiguous"    # holds the album; allow_track_mismatch / "Apply anyway…" don't touch it
+DISC_TRACK_COUNT = "disc_track_count"  # 1566b36: a disc's file/track counts differ and titles don't pair every
+# file; none of that disc's files is paired (no title shifting). Not overridable (allow_track_mismatch ignores it)
+DISC_COUNT_HINT = ("Choose a release that lists the discs as the files have them, or name the files after their "
+                   "tracks so their titles pair them.")
+
+
+def disc_count_lines(problem, folder) -> list[str]:
+    """The disc's files (relative to the album folder) and what to do; the message says which disc and why."""
+    files = shown_paths(problem, folder)
+    return [f"Files on that disc, none paired ({len(files)}):"] + [f"  {f}" for f in files] + [DISC_COUNT_HINT]
 
 
 def kind_of(problem) -> str:

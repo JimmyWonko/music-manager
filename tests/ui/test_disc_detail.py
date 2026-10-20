@@ -56,7 +56,8 @@ def test_new_problem_fields_default_empty_and_kinds_appended_last():
                                                                   "title_similarity"]
     assert [f.name for f in dataclasses.fields(FS.DiscFolderMismatch)] == ["path", "destination", "folder",
                                                                           "folder_disc", "tag_disc"]
-    assert [m.value for m in FS.ProblemKind][-3:] == ["disc_ambiguous", "layout_ambiguous", "disc_folder_mismatch"]
+    assert [m.value for m in FS.ProblemKind][-4:] == ["disc_ambiguous", "layout_ambiguous", "disc_folder_mismatch",
+                                                   "disc_track_count"]
     assert P.LABELS["disc_folder_mismatch"] == "Tracks would go into another disc's folder"
     assert len(set(P.LABELS.values())) == len(P.LABELS)
 

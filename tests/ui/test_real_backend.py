@@ -910,3 +910,49 @@ def test_real_layout_messages_match_the_mock(real):
     fs = sys.modules["music_manager.fs"]
     assert (FS.STRAY_AUDIO, FS.MIXED_DISCS) == (fs.STRAY_AUDIO, fs.MIXED_DISCS)
     assert "not an album" not in fs.STRAY_AUDIO
+
+
+def test_real_disc_track_count_medley_held_and_shown(real, qtbot):
+    """1566b36: CD2 has a medley file for 2-1 + 2-2, so 2 files for 3 tracks; held, disc left unpaired."""
+    from mm_ui import problems as P
+    from mm_ui.review import ApplyDialog, ReviewWindow
+    svc = real["svc"]
+    title, rid = "Medley Night", 730
+    folder = real["lib"] / "Disc Band" / f"[1999]  {title} [DSC{rid}]"
+    for rel in ("CD1/01 One", "CD1/02 Two", "CD1/03 Three", "CD2/01 Four,Five", "CD2/02 Six"):
+        tone(folder / f"{rel}.flac")
+    tracks = [("1-1", "One"), ("1-2", "Two"), ("1-3", "Three"), ("2-1", "Four"), ("2-2", "Five"), ("2-3", "Six")]
+    r = release(rid, "Disc Band", title, 1999, f"DSC {rid}", [t for _p, t in tracks])
+    for tr, (pos, _t) in zip(r["tracklist"], tracks):
+        tr["position"] = pos
+    r["formats"] = [{"name": "CD", "qty": "2"}]
+    real["discogs"].releases[rid] = r
+    assert svc._c.jobs.wait(svc.library.scan().id).state.name == "DONE"
+    (row,) = [x for x in svc.albums(None, limit=50).items if x.title == title]
+    assert svc._c.jobs.wait(svc.match.find([row.id]).id).state.name == "DONE"
+    svc.match.choose(row.id, rid)
+    plan = svc.plan.build([row.id])
+    (ap,) = plan.albums
+    (p,) = [p for p in ap.problems if P.kind_of(p) == P.DISC_TRACK_COUNT]
+    assert sorted(x.relative_to(folder).as_posix() for x in p.paths) == ["CD2/01 Four,Five.flac", "CD2/02 Six.flac"]
+    assert P.held(ap) and not P.overridable(ap)
+    assert [q for q in svc.plan.build([row.id], allow_track_mismatch={row.id}).albums[0].problems
+            if P.kind_of(q) == P.DISC_TRACK_COUNT]
+    d = ApplyDialog(plan); qtbot.addWidget(d)
+    t = "\n".join(d.problem_list.item(i).text() for i in range(d.problem_list.count()))
+    assert "A disc's file count doesn't match its tracks" in t and "CD2/01 Four,Five.flac" in t and d.anyway_btn is None
+    w = ReviewWindow(svc); qtbot.addWidget(w)
+    w.filter_box.setCurrentText("All")
+    i = next(i for i in range(w.model.rowCount()) if title in w.model.index(i).data())
+    w.list.setCurrentIndex(w.model.index(i))
+    marks = [w.table.item(r_, 7).text() for r_ in range(w.table.rowCount()) if w.table.item(r_, 7) is not None]
+    assert marks.count("disc count differs") == 2, marks
+    before = _tree(folder)
+    try:
+        job = svc._c.jobs.wait(svc.plan.apply(plan.id).id)
+        assert job.state.name == "FAILED", job.message
+    except svc.types.MMError as e:
+        assert "Nothing to apply" in str(e)
+    a = svc.library.album(row.id)
+    assert a.status.name == "HELD" and "disc_track_count" in {q.kind.value for q in a.held_for}
+    assert _tree(folder) == before
