@@ -102,8 +102,8 @@ def test_service_apply_then_reapply_keeps_every_track_on_its_disc(svc, layout):
     assert first.albums[0].problems == []
     _apply(first)
     target = svc.joinpath(*TARGET)
-    assert sorted(p.name for p in target.glob("*.flac")) == [
-        "1. Four.flac", "1. One.flac", "2. Five.flac", "2. Two.flac", "3. Three.flac"]
+    assert sorted(p.relative_to(target).as_posix() for p in target.rglob("*.flac")) == [
+        "CD1/1. One.flac", "CD1/2. Two.flac", "CD1/3. Three.flac", "CD2/1. Four.flac", "CD2/2. Five.flac"]
     assert swapped_files(svc) == []
 
     service.match.choose(album_id, OVERLAP_ID)
@@ -113,7 +113,7 @@ def test_service_apply_then_reapply_keeps_every_track_on_its_disc(svc, layout):
     assert again.tags_to_write == 0
     _apply(again)
     assert swapped_files(svc) == []
-    for path in target.glob("*.flac"):
+    for path in target.rglob("*.flac"):
         assert tagged(path) == identity(path)
 
 
@@ -160,7 +160,7 @@ def test_cli_apply_then_reapply_keeps_every_track_on_its_disc(tmp_path, fake_cli
         code, out = run_cli(target, "--dest", lib, *pick, "--yes")
         assert code == 0, out
         assert swapped_files(lib) == []
-    assert len(list(target.glob("*.flac"))) == 5
+    assert len(list(target.rglob("*.flac"))) == 5
 
 
 def test_cli_warns_and_skips_restarting_numbers_it_cannot_place(tmp_path, fake_cli):

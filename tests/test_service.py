@@ -171,14 +171,17 @@ def test_template_preview_validates_fields_and_renders(lib):
     pv = service.templates.preview("%label%/%albumartist% - %album%/$num(%tracknumber%,2) %title%", [d])
     assert tree(lib.root) == before
     assert [after.relative_to(lib.root).as_posix() for _b, after in pv.moves] == [
-        "Label Two/Band A & Band B - Double Feature/01 One.flac",
-        "Label Two/Band A & Band B - Double Feature/02 Two.flac",
-        "Label Two/Band A & Band B - Double Feature/01 Three.flac",
-        "Label Two/Band A & Band B - Double Feature/02 Four.flac",
+        "Label Two/Band A & Band B - Double Feature/CD1/01 One.flac",
+        "Label Two/Band A & Band B - Double Feature/CD1/02 Two.flac",
+        "Label Two/Band A & Band B - Double Feature/CD2/01 Three.flac",
+        "Label Two/Band A & Band B - Double Feature/CD2/02 Four.flac",
     ]
     assert pv.collisions == [] and pv.warnings == []
     pv = service.templates.preview("%albumartist%/%album%/%tracknumber%", [d])
-    assert {c.target.name for c in pv.collisions} == {"1.flac", "2.flac"}
+    assert pv.collisions == []  # each disc has its own folder: CD1/1.flac, CD2/1.flac
+    pv = service.templates.preview("%albumartist%/%album%/%album%", [d])
+    assert {c.target.relative_to(c.target.parent.parent).as_posix() for c in pv.collisions} == {
+        "CD1/Double Feature.flac", "CD2/Double Feature.flac"}
     assert all(c.album_ids == [d] for c in pv.collisions)
 
 
@@ -421,7 +424,8 @@ def test_plan_build_is_read_only_and_describes_every_file(lib):
     tags = {t.key: (t.before, t.after) for t in track.tags}
     assert tags["title"] == (None, "One") and tags["discogs_release_id"] == (None, "1000004")
     assert tags["catalognumber"] == (None, "LT-2CD")
-    assert all(f.path_after.parent == double.folder_after for f in double.files if f.kind == "track")
+    assert [f.path_after.parent.relative_to(double.folder_after).as_posix() for f in double.files
+            if f.kind == "track"] == ["CD1", "CD1", "CD2", "CD2"]
     assert side.problems == [] and side.folder_after == lib.root / "Testers, The" / "[1985]  Side Story [WAX001]"
     assert [f.path_after.name for f in side.files][:2] == ["A1. Opening.mp3", "A2. Second.mp3"]
     assert plan.files_to_move == sum(1 for a in plan.albums for f in a.files
@@ -490,13 +494,14 @@ def test_apply_tags_moves_records_and_saves_cover(lib):
     assert finished and finished[-1].id == job.id
     target = plan.albums[0].folder_after
     assert not lib.double.exists()
-    assert sorted(p.name for p in target.iterdir()) == ["1. One.flac", "1. Three.flac", "2. Four.flac", "2. Two.flac",
-                                                       "folder.jpg", "rip.log", "scans"]
+    assert sorted(p.name for p in target.iterdir()) == ["CD1", "CD2", "folder.jpg", "rip.log", "scans"]
+    assert sorted(p.relative_to(target).as_posix() for p in target.rglob("*.flac")) == [
+        "CD1/1. One.flac", "CD1/2. Two.flac", "CD2/1. Three.flac", "CD2/2. Four.flac"]
     assert (target / "folder.jpg").read_bytes() == b"\xff\xd8\xff fake jpeg"
-    assert already_tagged(target / "1. One.flac") == "1000004"
+    assert already_tagged(target / "CD1" / "1. One.flac") == "1000004"
     row = service.library.album(d)
     assert row.status is MatchStatus.APPLIED and row.folder == target
-    assert [t.path.parent for t in row.tracks] == [target] * 4
+    assert [t.path.parent for t in row.tracks] == [target / "CD1"] * 2 + [target / "CD2"] * 2
     (op,) = service.journal.list(0, 10).items
     assert (op.kind, op.albums, op.undoable, op.undone, op.journal_format, op.legacy) == ("apply", 1, True, False, 2,
                                                                                           False)
@@ -658,7 +663,7 @@ def test_undo_restores_files_and_tags(lib):
 
 def test_undo_skips_files_changed_since_the_apply(lib):
     _d, plan, op, _original = applied_double(lib)
-    edited = plan.albums[0].folder_after / "2. Four.flac"
+    edited = plan.albums[0].folder_after / "CD2" / "2. Four.flac"
     with open(edited, "ab") as fh:
         fh.write(b"\0edited")
     undo = service.journal.undo_plan(op.id)
@@ -681,7 +686,7 @@ def test_undo_needs_the_latest_preview_of_the_current_state(lib):
     second = service.journal.undo_plan(op.id)
     with pytest.raises(service.PlanStale):
         service.journal.undo(op.id, first.id)
-    (plan.albums[0].folder_after / "1. One.flac").unlink()
+    (plan.albums[0].folder_after / "CD1" / "1. One.flac").unlink()
     job = wait(service.journal.undo(op.id, second.id))
     assert job.state is JobState.FAILED and "preview again" in job.message
     with pytest.raises(service.NotFound):
@@ -925,5 +930,5 @@ def test_undo_preview_of_a_swap_through_stage_names(lib):
     target = again.albums[0].folder_after
     job = wait(service.journal.undo(op.id, undo.id))
     assert job.state is JobState.DONE, job.message
-    assert read_easy_tags(target / "2. Four.flac").get("title") == "Four"
-    assert read_easy_tags(target / "2. Two.flac").get("title") == "Two"
+    assert read_easy_tags(target / "CD2" / "2. Four.flac").get("title") == "Four"
+    assert read_easy_tags(target / "CD1" / "2. Two.flac").get("title") == "Two"

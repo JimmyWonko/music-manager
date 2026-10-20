@@ -155,7 +155,7 @@ def test_service_apply_then_reapply(svc):
     job = service.jobs.wait(service.plan.apply(plan.id).id)
     assert job.state is JobState.DONE, job.message
     target = root.joinpath(*TARGET)
-    assert len(list(target.glob("*.flac"))) == 39 and swapped(root) == []
+    assert len(list(target.rglob("*.flac"))) == 39 and swapped(root) == []
     assert sorted(p.relative_to(target).as_posix() for p in target.rglob("*") if p.is_file() and p.suffix != ".flac"
                   and p.suffix != ".m3u") == sorted(SIDECARS)
     service.match.choose(album_id, RID)
@@ -219,11 +219,11 @@ def test_cli_apply_then_reapply(tmp_path, monkeypatch, pick):
     code, out = run_cli(monkeypatch, make_release(), src, "--dest", lib, *pick, "--yes")
     assert code == 0 and "applied=1" in out, out
     target = lib.joinpath(*TARGET)
-    assert len(list(target.glob("*.flac"))) == 39 and swapped(lib) == []
+    assert len(list(target.rglob("*.flac"))) == 39 and swapped(lib) == []
     assert (target / "CD1" / "Live At The Other End CD1.cue").is_file()
     code, out = run_cli(monkeypatch, make_release(), target, "--dest", lib, *pick, "--yes")
     assert code == 0, out
-    assert swapped(lib) == [] and len(list(target.glob("*.flac"))) == 39
+    assert swapped(lib) == [] and len(list(target.rglob("*.flac"))) == 39
 
 
 def test_cli_warns_and_skips_the_reviews_contradictory_example(tmp_path, monkeypatch):

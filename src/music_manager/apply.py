@@ -214,6 +214,46 @@ def template_album_fields(release: DiscogsRelease, info: ReleaseInfo) -> dict[st
     )
 
 
+def template_sets_disc_path(template: CompiledTemplate | None) -> bool:
+    """True when a template places discs itself (%discnumber% anywhere): no per-disc folder is added."""
+    return template is not None and template.uses("discnumber")
+
+
+def _folder_disc(name: str) -> int | None:
+    m = re.search(r"\d+", name) if DISC_DIR.match(name) else None
+    return int(m.group(0)) if m else None
+
+
+def disc_folder_names(album: AlbumFolder, pairs: list[tuple[Path, DiscogsTrack | None, str]]) -> dict[int, str]:
+    """The per-disc folder of each disc of a multi-disc release.
+
+    The source's own disc folder name (CD1, Disc 2, ...) when every paired file of that disc sits
+    in one folder of that disc's number; else a disc folder of that number that holds only the
+    disc's sidecars (an album whose audio was flattened earlier), so they meet again; else CD{n}.
+    """
+    seen: dict[int, set[str]] = {}
+    for local, dt, _method in pairs:
+        if dt is None:
+            continue
+        parent = local.parent
+        ok = parent.parent == album.path and _folder_disc(parent.name) == dt.disc
+        seen.setdefault(dt.disc, set()).add(parent.name if ok else "")
+    extra = {}
+    for folder in album.extra_dirs:
+        disc = _folder_disc(folder.name)
+        if disc is not None:
+            extra.setdefault(disc, []).append(folder.name)
+    out = {}
+    for disc, names in seen.items():
+        if len(names) == 1 and "" not in names:
+            out[disc] = next(iter(names))
+        elif len(extra.get(disc, [])) == 1:
+            out[disc] = extra[disc][0]
+        else:
+            out[disc] = f"CD{disc}"
+    return out
+
+
 def template_track_fields(dt: DiscogsTrack, side_names: bool | None = None) -> dict[str, str]:
     return track_fields(title=dt.title, artist=dt.artist, number=dt.number,
                         position=track_prefix(dt, side_names), disc=dt.disc)
@@ -274,6 +314,7 @@ def layout_album(
     check: bool = True,
     log: Callable[[str], None] = print,
     title_match_min: float = TITLE_MATCH_MIN,
+    disc_folders: bool = True,
 ) -> AlbumLayout:
     """Plan one album's apply: where it goes, every file's tags and destination. Read-only.
 
@@ -281,6 +322,10 @@ def layout_album(
     default_file_name). With check, validate_layout runs and raises, and so does a track
     bound for another disc's CD folder (see disc_folder_mismatches).
     title_match_min: the title-pass pairing threshold (see align_tracks).
+    disc_folders: on a release whose tracks span several discs, each disc's tracks go into a
+    per-disc folder of target_dir (see disc_folder_names), unless the file name already has a
+    folder or target_dir is itself a CD1/Disc 2 folder. False (a template with %discnumber%)
+    keeps whatever the namer says.
     """
     info = release_info(release, dtracks, original_year)
     if target_dir is None:
@@ -300,6 +345,14 @@ def layout_album(
         for conflict in conflicts:
             log(f"    {describe_disc_conflict(conflict, album.path)}")
 
+    per_disc: dict[int, str] = {}
+    try:
+        below = target_dir.relative_to(dest_root).parts
+    except ValueError:
+        below = (target_dir.name,)
+    if disc_folders and len({dt.disc for dt in dtracks}) > 1 and not any(_folder_disc(p) for p in below):
+        per_disc = disc_folder_names(album, pairs)
+
     plan: list[PlannedFile] = []
     unmatched: list[Path] = []
     for local, dt, method in pairs:
@@ -311,7 +364,10 @@ def layout_album(
             unmatched.append(local)
             continue
         meta = track_meta(release, info, dt, dtracks)
-        dest_file = target_dir / name_of(dt, local)
+        name = name_of(dt, local)
+        if dt.disc in per_disc and len(Path(name).parts) == 1:
+            name = f"{per_disc[dt.disc]}/{name}"
+        dest_file = target_dir / name
         where = f"{dt.disc}-{dt.number}"
         if dt.position and dt.position != str(dt.number):
             where += f", {dt.position}"
@@ -331,7 +387,18 @@ def layout_album(
     # Generated album playlists list the old file names. They are not moved;
     # they are deleted and a fresh one is written once the move succeeds.
     old_playlists: list[Path] = []
-    moves: list[PlannedFile] = [PlannedFile(extra_dir, target_dir / extra_dir.name) for extra_dir in album.extra_dirs]
+    moves: list[PlannedFile] = []
+    disc_dirs = {name.casefold() for name in per_disc.values()}
+    for extra_dir in album.extra_dirs:
+        if extra_dir.name.casefold() in disc_dirs and not extra_dir.is_symlink():
+            # a disc folder of sidecars only: its files join that disc's tracks file by file
+            for dirpath, dirnames, filenames in os.walk(extra_dir, followlinks=False):
+                dirnames.sort()
+                for name in sorted(filenames):
+                    path = Path(dirpath) / name
+                    moves.append(PlannedFile(path, target_dir / path.relative_to(album.path)))
+            continue
+        moves.append(PlannedFile(extra_dir, target_dir / extra_dir.name))
     for sidecar in album.sidecars:
         if sidecar.suffix.lower() in PLAYLIST_EXTS and is_generated_playlist(sidecar):
             old_playlists.append(sidecar)

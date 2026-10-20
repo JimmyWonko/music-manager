@@ -18,6 +18,7 @@ from obr_fixtures import (
     D1,
     D2_FILES,
     OBR_ID,
+    SIDECARS,
     TITLE,
     make_album,
     release,
@@ -36,6 +37,7 @@ from music_manager.apply import (
     execute_layout,
     layout_album,
     template_paths,
+    template_sets_disc_path,
 )
 from music_manager.fs import collect_albums
 from music_manager.journal import undo_journal
@@ -44,7 +46,6 @@ from music_manager.naming.templates import PRESETS, compile_template
 from music_manager.providers.discogs import flatten_tracklist, release_artists
 from music_manager.service import JobState
 
-BUG1 = pytest.mark.xfail(strict=True, reason="multi-disc tracks are flattened into the album folder")
 BUG2 = pytest.mark.xfail(strict=True, reason="a disc with fewer files than tracks is paired by number")
 FOLDER = (ARTIST, f"[2016]  {TITLE} [OBR-040]")
 
@@ -58,7 +59,7 @@ def plan_layout(tmp_path, rel, template=None, check=True, **album_kw):
     [album] = collect_albums(tmp_path / "in")
     target, namer = template_paths(template, tmp_path / "lib", rel, dtracks(rel), "")
     return layout_album(album, tmp_path / "lib", rel, dtracks(rel), "", target_dir=target, file_name=namer,
-                        check=check, log=lambda _l: None)
+                        check=check, log=lambda _l: None, disc_folders=not template_sets_disc_path(template))
 
 
 def rel_paths(layout):
@@ -67,7 +68,6 @@ def rel_paths(layout):
 
 # --- bug 1: per-disc folders ---------------------------------------------------------------------
 
-@BUG1
 def test_archivist_puts_each_disc_in_its_disc_folder_with_its_sidecars(tmp_path):
     layout = plan_layout(tmp_path, release("match"))
     got = rel_paths(layout)
@@ -79,7 +79,6 @@ def test_archivist_puts_each_disc_in_its_disc_folder_with_its_sidecars(tmp_path)
     assert layout.clashes == [] and disc_folder_mismatches(layout) == []
 
 
-@BUG1
 def test_the_sources_disc_folder_names_are_kept(tmp_path):
     layout = plan_layout(tmp_path, release("match"), disc_dir="Disc {d}")
     got = rel_paths(layout)
@@ -87,24 +86,35 @@ def test_the_sources_disc_folder_names_are_kept(tmp_path):
     assert f"Disc 2/{ARTIST} - {TITLE} CD2.cue" in got and disc_folder_mismatches(layout) == []
 
 
-@BUG1
-def test_a_flat_source_gets_cd_n_folders(tmp_path):
-    album = tmp_path / "in" / "Album"
-    make_album(album)
-    for d in (1, 2):  # flatten the rip: every file loose in the album folder, numbers restarting
-        for p in list((album / f"CD{d}").iterdir()):
-            p.rename(album / (p.name if p.suffix == ".flac" and d == 1 else (f"x{p.name}" if p.suffix != ".flac"
-                                                                                     else p.name)))
-        (album / f"CD{d}").rmdir()
+@pytest.mark.parametrize("sidecars", ["left_in_disc_folders", "loose"])
+def test_a_flat_source_gets_cd_n_folders(tmp_path, sidecars):
+    """Audio flattened into the album folder ("1-05 - Blue Umbrella.flac"), as the old layout left it."""
+    album = make_album(tmp_path / "in" / "Album")
+    for d in (1, 2):
+        for p in sorted((album / f"CD{d}").iterdir()):
+            if p.suffix == ".flac":
+                p.rename(album / f"{d}-{p.name}")
+            elif sidecars == "loose":
+                p.rename(album / p.name)
+        if sidecars == "loose":
+            (album / f"CD{d}").rmdir()
     rel = release("match")
+    before = contents(tmp_path / "in")
     [src] = collect_albums(tmp_path / "in")
     layout = layout_album(src, tmp_path / "lib", rel, dtracks(rel), "", log=lambda _l: None)
     got = rel_paths(layout)
     assert "CD1/5. Blue Umbrella.flac" in got and "CD2/5. Blue Umbrella.flac" in got
+    side = f"CD2/{ARTIST} - {TITLE} CD2.cue" if sidecars != "loose" else f"{ARTIST} - {TITLE} CD2.cue"
+    assert side in got and not any("(2)" in p for p in got)
     assert layout.clashes == [] and disc_folder_mismatches(layout) == []
+    execute_layout(layout, dry_run=False, journal_dir=tmp_path / "j", log=lambda _l: None)
+    assert sorted(p.name for p in layout.target_dir.iterdir()) == ["CD1", "CD2", "Covers"] + (
+        [] if sidecars != "loose" else sorted(f"{ARTIST} - {TITLE} CD{d}.{e}" for d in (1, 2) for e in SIDECARS))
+    [journal] = (tmp_path / "j").glob("*")
+    undo_journal(journal, apply=True)
+    assert contents(tmp_path / "in") == before
 
 
-@BUG1
 @pytest.mark.parametrize("preset", [p[0] for p in PRESETS])
 def test_every_preset_gets_disc_folders(tmp_path, preset):
     text = next(p[2] for p in PRESETS if p[0] == preset)
@@ -137,7 +147,6 @@ def test_single_disc_and_vinyl_stay_flat(tmp_path):
     assert "A1. Hello in There.flac" in got and "D2. Kentucky Moon.flac" in got
 
 
-@BUG1
 def test_apply_and_undo_with_disc_folders(tmp_path):
     rel = release("match")
     layout = plan_layout(tmp_path, rel)
@@ -238,7 +247,6 @@ def test_service_holds_and_allow_track_mismatch_does_not_override(svc):
     assert tree(root) == before
 
 
-@BUG1
 def test_service_apply_with_disc_folders_and_undo(svc):
     root, discogs = svc
     discogs.releases[OBR_ID] = release("match")

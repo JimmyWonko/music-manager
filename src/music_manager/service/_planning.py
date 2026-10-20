@@ -15,6 +15,7 @@ from ..apply import (
     layout_album,
     release_info,
     template_paths,
+    template_sets_disc_path,
 )
 from ..fs import AlbumFolder, is_audio
 from ..naming.templates import (
@@ -185,7 +186,7 @@ def album_target(album_id: int, release_id: int | None, template: CompiledTempla
         result.problems.append(Problem(LAYOUT_KIND[kind], message, list(paths)))
     if fetched:
         layout = layout_album(album, root, release, dtracks, original_year, target_dir=target, file_name=namer,
-                              check=False, log=lambda _line: None,
+                              check=False, log=lambda _line: None, disc_folders=not template_sets_disc_path(template),
                               title_match_min=title_match_min())
         result.layout = layout
         result.problems += _album_problems(result, row["track_count"])

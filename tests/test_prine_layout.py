@@ -246,7 +246,8 @@ def test_flat_original_applies_onto_the_right_discs_and_undoes(svc):
     assert service.jobs.wait(service.plan.apply(plan.id).id).state is JobState.DONE
     [target] = (svc / "John Prine").iterdir()  # the source folder was renamed into it
     assert target.name.startswith("[1993]  Anthology 2CD")
-    files = list(target.glob("*.flac"))
+    files = list(target.rglob("*.flac"))
+    assert sorted({p.parent.name for p in files}) == ["CD1", "CD2"]
     assert len(files) == 41 and all(tagged(p) == identity(p) for p in files)
     (op,) = service.journal.list(0, 10).items
     undo = service.journal.undo_plan(op.id)
