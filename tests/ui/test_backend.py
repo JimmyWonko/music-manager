@@ -492,13 +492,43 @@ def test_app_auto_falls_back(tmp_path):
 CONTRACT = Path(os.environ.get("MM_TEST_CONTRACT", "/workspace/mm-fix/API-CONTRACT.md"))
 
 
+# Contract sections for service commits the UI doesn't build against yet (regexes on the heading).
+PENDING_SECTIONS: list[str] = []   # c2fcf25 is built against now; was ["Additions of 2026-10-20 (afternoon"]
+
+
+def _without_pending(text: str) -> str:
+    """The contract minus PENDING_SECTIONS (each up to the next heading of the same or a higher level)."""
+    import re
+    out, skip = [], None
+    for line in text.splitlines():
+        h = re.match(r"(#+) ", line)
+        if h and skip is not None and len(h.group(1)) <= skip:
+            skip = None
+        if h and any(re.search(pat, line) for pat in PENDING_SECTIONS):
+            skip = len(h.group(1))
+        if skip is None:
+            out.append(line)
+    return "\n".join(out)
+
+
 def _contract_code():
     """The contract's python blocks, plus prose field additions such as "`AlbumRow.cluster_id: str | None = None`
     (additive, last field)" (c334bbf) written as a partial `class X: ...; field: T` block."""
     import re
-    text = CONTRACT.read_text()
-    prose = [f"class {c}: ...; {f}: {t}" for c, f, t in
-             re.findall(r"`(\w+)\.(\w+): ([^`]+)`\s*\(additive, last field\)", text)]
+    text = _without_pending(CONTRACT.read_text())
+    prose = [f"class {c}: ...; {f}: {t}" for c, f, t in      # "`X.f: T = d` (additive, last field)"
+             re.findall(r"`(\w+)\.(\w+): ([^`]+)`\s*\((?:additive, )?last field", text)]
+    prose += [f"class {c}: ...; {f}: {t}" for c, f, t in     # "`X` gains `f: T = d` (last field"
+              re.findall(r"`(\w+)` gains `(\w+): ([^`]+)`\s*\(last field", text)]
+    # "`Pin(path, position, …)`": a type given only as its constructor (c2fcf25 Pin, ManualPair)
+    prose += [f"class {c}:\n" + "".join(f"    {f.strip()}: object\n" for f in args.split(","))
+              for c, args in re.findall(r"`([A-Z]\w+)\(((?:\w+, )+\w+)\)`", text)
+              if not re.search(rf"^class {c}\b", text, re.M)]
+    # "MatchView.pins" is listed in the change log with no type or place (contract gap): last field, as in c2fcf25
+    if "MatchView.pins" in text and not re.search(r"^\s+pins:", text, re.M):
+        prose.append("class MatchView: ...; pins: list[Pin]")
+    prose += [f"class {c}(Enum): ...; {m}" for c, m in        # "`X.NEW` (appended last" / "(`X.NEW`, appended)"
+              re.findall(r"`(\w+)\.([A-Z][A-Z_]+)`(?:\s*\(|,\s*)appended", text)]
     return "\n".join(re.findall(r"```python\n(.*?)```", text, re.S) + prose)
 
 
@@ -549,9 +579,11 @@ def test_mock_types_match_contract_exactly():
     assert {"AlbumSort", "Destination", "Template", "TemplatePreview", "Collision", "Settings"} <= set(classes)
     assert classes["AlbumRow"][1][-3:] == ["held_for", "loose_tracks", "cluster_id"]   # d6ac2f3, c334bbf
     assert classes["Album"][1][-3:] == ["cluster_id", "tracks", "extras"]
-    assert classes["Cluster"][1][-1] == "album_id" and classes["MatchView"][1][-1] == "problems"   # c334bbf
+    assert classes["Cluster"][1][-2:] == ["album_id", "kind"] and classes["MatchView"][1][-2:] == ["problems", "pins"]
+    assert {"ClusterRow", "Pin", "ManualPair"} <= set(classes)                                     # c2fcf25
+    assert classes["FileChange"][1][-1] == "pinned" and classes["JobKind"][1][-1] == "CLUSTER"
     assert classes["ClusterFile"][1] == ["path", "disc", "number", "title", "duration_s", "album", "artist"]
-    assert classes["FileChange"][1][-1] == "skip_reason" and classes["Plan"][1][-2:] == ["skipped", "fetch_job"]
+    assert classes["FileChange"][1][-2] == "skip_reason" and classes["Plan"][1][-2:] == ["skipped", "fetch_job"]
     assert "RELEASE_NOT_FETCHED" in classes["ProblemKind"][1]
     assert T.MatchStatus.HELD.value == "held"
     assert [m.name for m in T.MatchStatus][-1] == "HELD"
@@ -560,7 +592,8 @@ def test_mock_types_match_contract_exactly():
     assert classes["Problem"][1] == ["kind", "message", "paths", "disc_conflicts", "layout_reason",
                                      "blocking_subdirs", "loose_files", "folder_mismatches"]
     assert {"DiscConflict", "DiscChoice", "DiscFolderMismatch"} <= set(classes)
-    assert classes["ProblemKind"][1][-4:] == ["DISC_AMBIGUOUS", "LAYOUT_AMBIGUOUS", "DISC_FOLDER_MISMATCH", "DISC_TRACK_COUNT"]
+    assert classes["ProblemKind"][1][-5:] == ["DISC_AMBIGUOUS", "LAYOUT_AMBIGUOUS", "DISC_FOLDER_MISMATCH", "DISC_TRACK_COUNT",
+                                             "PIN_CONFLICT"]   # c2fcf25
     assert all(m.value == m.name.lower() for m in T.ProblemKind)
     for name, (kind, members) in classes.items():
         mine = getattr(T, name)

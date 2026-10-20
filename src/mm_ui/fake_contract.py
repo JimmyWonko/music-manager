@@ -32,7 +32,14 @@ from .fake_service import (Album, AlbumFilter, AlbumPlan, AlbumRow, AlbumSort, C
                            FakeService, FileChange, Job, JobKind, JobState, LIBRARY_ROOT, MatchStatus, NotFound,
                            Operation, Page, Plan, PlanStale, Problem, ProblemKind, MMError, Settings, TagChange, Template,
                            TemplatePreview, ValidationError, Cluster, ClusterFile, MatchView, LocalTrack, Candidate,
-                           ScorePart, DISCOGS, SCANNED_AT)
+                           ScorePart, DISCOGS, SCANNED_AT, ClusterRow, Pin, ManualPair)
+
+
+def P_folder_disc(path: Path) -> int | None:
+    """The disc a file's CD folder names ("CD2", "Disc 2"), else None."""
+    import re
+    m = re.fullmatch(r"(?:cd|disc|disk)\s*(\d+)", Path(path).parent.name, re.I)
+    return int(m.group(1)) if m else None
 
 SYNTH_ROOT = Path("/mock/synthetic")   # synthetic padding rows (absolute, fake, never touched)
 SYNTH_BASE = 10_000_000                # synthetic album ids start here
@@ -243,7 +250,8 @@ class FakeContract:
         self.types = _NS(**{n: getattr(T, n) for n in (
             "AlbumFilter", "AlbumSort", "MatchStatus", "JobState", "JobKind", "Job", "Page", "Template",
             "TemplatePreview", "Collision", "Destination", "Settings", "Operation", "AutoRules", "Problem", "ProblemKind", "AlbumPlan", "Plan", "MMError", "NotFound",
-            "PlanStale", "ValidationError", "ProviderError", "ConfigError", "Cluster", "ClusterFile", "MatchView")})
+            "PlanStale", "ValidationError", "ProviderError", "ConfigError", "Cluster", "ClusterFile", "MatchView",
+            "ClusterRow", "Pin", "ManualPair")})
         self._ids = itertools.count(100_000)
         self._jobs: dict[int, Job] = {}
         self._plans: dict[int, Plan] = {}
@@ -255,15 +263,21 @@ class FakeContract:
         self._syn_cache: dict[tuple, tuple[list, list[int]]] = {}
         self.library = _NS(albums=self._albums, status_counts=self._status_counts, album=self._album,
                            search=self._search, scan=self._scan, clusters=self._clusters_list,
-                           cluster=self._cluster, adopt_cluster=self._adopt_cluster)
+                           cluster=self._cluster, adopt_cluster=self._adopt_cluster,
+                           unadopt_cluster=self._unadopt_cluster, move_to_cluster=self._move_to_cluster,
+                           scan_clusters=self._scan_clusters)
+        self._moved: dict[Path, str] = {}               # MOCK: move_to_cluster targets (group key)
+        self._pins: dict[int, dict[Path, Pin]] = {}     # album -> file -> pin
+        self._manual_ops: dict[int, list] = {}          # apply operation -> ManualPair (journal.manual_pairs)
         self._clusters: dict[str, Cluster] = {}         # the last clusters() call + adopted ones
         self._pending_cands: dict[int, list] = {}       # adopted cluster -> candidates match.find will "find"
-        self.match = _NS(view=self._view, find=self._find, candidates=self._candidates, choose=self.fake.choose,
+        self.match = _NS(view=self._view, clusters=self._match_clusters, pin=self._pin, unpin=self._unpin,
+                         pins=self._pins_of, find=self._find, candidates=self._candidates, choose=self.fake.choose,
                          destination=self._destination, skip=self.fake.skip, manual=self._manual,
                          auto_rules=lambda: T.AutoRules(), auto_accept=self._auto_accept)
         self.provider = _NS(submit_link=self.fake.submit_link)
         self.plan = _NS(build=self._build, apply=self._apply)
-        self.journal = _NS(list=self._journal_list, undo_plan=self._undo_plan, undo=self._undo)
+        self.journal = _NS(manual_pairs=self._manual_pairs, list=self._journal_list, undo_plan=self._undo_plan, undo=self._undo)
         self.templates = _NS(list=self._tpl_list, save=self._tpl_save, delete=self._tpl_delete,
                              preview=self._tpl_preview)
         self.settings = _NS(get=lambda: self._settings, set=self._settings_set)
@@ -443,25 +457,41 @@ class FakeContract:
             self.fake._timer.start()
         return self._finish(JobKind.MATCH, lambda: "mock: candidates are pre-seeded")
 
-    # ================================================================ clustering (c334bbf)
+    # ================================================================ clustering (c334bbf, c2fcf25)
     @staticmethod
-    def _cluster_key(paths) -> str:
+    def _cluster_key(paths, prefix: str = "cl-") -> str:
         import hashlib
-        return "cl-" + hashlib.sha1("\n".join(sorted(map(str, paths))).encode()).hexdigest()[:12]
+        return prefix + hashlib.sha1("\n".join(sorted(map(str, paths))).encode()).hexdigest()[:12]
 
-    def _cluster_of(self, tracks, folder: Path, album_id=None) -> Cluster:
+    def _group_of(self, path: Path) -> str:
+        """Clustering key of a loose file: its album tag, or where move_to_cluster put it ("\0un" = out)."""
+        return self._moved.get(path, self.fake._file_tags.get(path, ("", ""))[1].casefold())
+
+    def _cluster_of(self, tracks, folder: Path, album_id=None, kind: str = "tag_cluster") -> Cluster:
         tags = self.fake._file_tags
         files = [ClusterFile(t.path, t.disc or 1, t.number, t.title, t.duration_s, *reversed(tags.get(t.path, ("", ""))))
                  for t in sorted(tracks, key=lambda t: str(t.path))]
+        if kind == "unclustered":
+            return Cluster(self._cluster_key([f.path for f in files], "un-"), "", "", folder, files,
+                           len({f.disc for f in files}), None, kind)
         common = lambda xs, d: max(set(xs), key=xs.count) if any(xs) else d   # noqa: E731
         return Cluster(self._cluster_key([f.path for f in files]), common([f.artist for f in files if f.artist], folder.name),
                        common([f.album for f in files if f.album], folder.name), folder, files,
-                       len({f.disc for f in files}), album_id)
+                       len({f.disc for f in files}), album_id, kind)
+
+    def _adopted_cluster(self, a) -> Cluster:
+        c = self._clusters.get(a.cluster_id)
+        made = self._cluster_of(a.tracks, a.folder, a.id)
+        # the files may have changed (move_to_cluster): the id follows them, the name stays (Picard behaviour)
+        c = replace(made, artist=c.artist, title=c.title) if c is not None else made
+        if c.id != a.cluster_id:
+            self.fake._albums[a.id] = replace(a, cluster_id=c.id)
+        return c
 
     def _clusters_list(self, paths=None) -> list[Cluster]:
-        """MOCK of library.clusters: loose-tracks albums' files grouped by album tag, folder by folder (paths:
-        exactly those files, together), plus every adopted cluster."""
-        albums = [a for a in self.fake._albums.values()]
+        """MOCK of library.clusters: loose-tracks albums' files grouped by album tag (or a move_to_cluster),
+        folder by folder, files moved out of every cluster as kind "unclustered", plus every adopted cluster."""
+        albums = list(self.fake._albums.values())
         if paths is not None:
             by_path = {t.path: t for a in albums for t in a.tracks}
             if not paths or any(Path(str(x)) not in by_path for x in paths):
@@ -475,24 +505,38 @@ class FakeContract:
                 if getattr(a, "loose_tracks", False):
                     groups: dict[str, list] = {}
                     for t in a.tracks:
-                        groups.setdefault(self.fake._file_tags.get(t.path, ("", ""))[1].casefold(), []).append(t)
-                    out += [self._cluster_of(g, a.folder) for g in groups.values()]
-                elif getattr(a, "cluster_id", None) and a.cluster_id in self._clusters:
-                    out.append(replace(self._clusters[a.cluster_id], album_id=a.id))
-        adopted = {c.id: c for c in self._clusters.values() if c.album_id is not None}
-        self._clusters = adopted | {c.id: c for c in out}
+                        groups.setdefault(self._group_of(t.path), []).append(t)
+                    out += [self._cluster_of(g, a.folder, kind="unclustered" if k == "\0un" else "tag_cluster")
+                            for k, g in groups.items()]
+                elif getattr(a, "cluster_id", None):
+                    out.append(self._adopted_cluster(self.fake._albums[a.id]))
+        self._clusters.update({c.id: c for c in out})
         return sorted(out, key=lambda c: (str(c.folder), str(c.files[0].path) if c.files else ""))
 
     def _cluster(self, cluster_id: str) -> Cluster:
+        if cluster_id not in self._clusters:
+            self._clusters_list()
         try:
             return self._clusters[cluster_id]
         except KeyError:
             raise NotFound(f"cluster {cluster_id}") from None
 
+    def _scan_clusters(self) -> Job:
+        def work():
+            cs = self._clusters_list()
+            self.fake.events.clusters_changed.emit([c.id for c in cs])
+            return f"{len(cs)} cluster(s), {sum(len(c.files) for c in cs)} file(s)"
+        return self._finish(JobKind.CLUSTER, work)
+
+    def _loose_row(self, folder: Path):
+        return next((a for a in self.fake._albums.values() if getattr(a, "loose_tracks", False) and a.folder == folder), None)
+
     def _adopt_cluster(self, cluster_id: str) -> AlbumRow:
         """MOCK of library.adopt_cluster: index only. The cluster becomes an UNMATCHED album holding exactly its
         files (no sidecars or cover art); they leave their loose-tracks row. Idempotent."""
         c = self._cluster(cluster_id)
+        if c.kind == "unclustered":
+            raise ValidationError("unclustered files can't be adopted: move them into a cluster", field="cluster_id")
         if c.album_id is not None:
             return self.fake.album(c.album_id)
         fk = self.fake
@@ -513,11 +557,211 @@ class FakeContract:
             rest = [t for t in owner.tracks if t.path not in mine]
             fk._set(owner.id, tracks=rest, track_count=len(rest))
         fk.events.album_changed.emit(aid)
+        fk.events.clusters_changed.emit([c.id])
         return fk._albums[aid]
 
+    def _unadopt_cluster(self, album_id: int) -> Cluster:
+        fk = self.fake
+        a = self._album(album_id)
+        if not getattr(a, "cluster_id", None):
+            raise ValidationError(f"album {album_id} is not an adopted cluster", field="album_id")
+        if any(album_id in [ap.album_id for ap in pl.albums] for o, pl in self._op_plans.items()
+               if self._ops[o].kind == "apply"):
+            op = next(o for o, pl in self._op_plans.items() if album_id in [ap.album_id for ap in pl.albums])
+            raise MMError(f"{a.artist} – {a.title} was applied (operation {op}): undo that in History")
+        owner = self._loose_row(a.folder)
+        del fk._albums[album_id]
+        for d in (fk._cands, self._pending_cands, fk._chosen, self._pins):
+            d.pop(album_id, None)
+        self._clusters.pop(a.cluster_id, None)
+        if owner is not None:
+            fk._set(owner.id, tracks=owner.tracks + list(a.tracks), track_count=owner.track_count + len(a.tracks))
+        c = self._cluster_of(a.tracks, a.folder)
+        self._clusters[c.id] = c
+        fk.events.album_changed.emit(album_id)
+        fk.events.clusters_changed.emit([c.id])
+        return c
+
+    def _move_to_cluster(self, file, cluster_id) -> Cluster:
+        """MOCK of library.move_to_cluster: index only; both clusters get new ids (they hash their files)."""
+        fk, path = self.fake, Path(file)
+        self._clusters_list()
+        src = next((c for c in self._clusters.values() if path in [f.path for f in c.files]
+                    and (c.album_id is None or c.album_id in fk._albums)), None)
+        if src is None:
+            raise ValidationError(f"{path} is not a loose file", field="file")
+        if cluster_id is None:
+            dst_key, dst = "\0un", None
+        else:
+            dst = self._cluster(cluster_id)
+            if dst.folder != src.folder:
+                raise ValidationError("the target cluster is in another folder", field="cluster_id")
+            dst_key = ("\0un" if dst.kind == "unclustered" else
+                       self._group_of(dst.files[0].path) if dst.files else dst.title.casefold())
+        # leaving an adopted album: back to the loose row
+        if src.album_id is not None:
+            a = fk._albums[src.album_id]
+            t = next(t for t in a.tracks if t.path == path)
+            rest = [x for x in a.tracks if x.path != path]
+            self._pins.get(a.id, {}).pop(path, None)
+            if rest:
+                fk._albums[a.id] = replace(a, tracks=rest, track_count=len(rest))
+            else:
+                del fk._albums[a.id]
+            owner = self._loose_row(src.folder)
+            if owner is not None:
+                fk._albums[owner.id] = replace(owner, tracks=owner.tracks + [t], track_count=owner.track_count + 1)
+        self._moved[path] = dst_key
+        if dst is not None and dst.album_id is not None:          # into an adopted album
+            owner = self._loose_row(src.folder)
+            t = next(t for t in owner.tracks if t.path == path)
+            fk._albums[owner.id] = replace(owner, tracks=[x for x in owner.tracks if x.path != path],
+                                           track_count=owner.track_count - 1)
+            a = fk._albums[dst.album_id]
+            fk._albums[a.id] = replace(a, tracks=a.tracks + [t], track_count=a.track_count + 1)
+        before = {c.id for c in self._clusters.values()}
+        now = self._clusters_list()
+        new_dst = next(c for c in now if path in [f.path for f in c.files])
+        left = next((c for c in now if c.id not in before and c.id != new_dst.id), None)
+        for aid in {x for x in (src.album_id, dst.album_id if dst else None) if x is not None and x in fk._albums}:
+            fk.events.album_changed.emit(aid)
+        fk.events.cluster_changed.emit(cluster_id or "", new_dst.id)
+        fk.events.cluster_changed.emit(src.id, left.id if left else "")
+        return new_dst
+
+    def _match_clusters(self, filter=None, offset: int = 0, limit: int = 200) -> Page:
+        """MOCK of match.clusters: folder albums (the mock's own, not the synthetic padding), tag clusters
+        and unclustered files in one list; filter.status / max_confidence leave out clusters not adopted."""
+        f = filter or AlbumFilter()
+        text = (f.text or "").strip().casefold()
+        rows = []
+        for a in self.fake._albums.values():
+            if getattr(a, "loose_tracks", False):
+                continue
+            if f.status is not None and a.status not in set(f.status):
+                continue
+            if f.max_confidence is not None and (a.confidence is None or a.confidence >= f.max_confidence):
+                continue
+            if text and text not in f"{a.artist} {a.title} {' '.join(t.title for t in a.tracks)}".casefold():
+                continue
+            cid = getattr(a, "cluster_id", None)
+            rows.append(ClusterRow(cid or f"album-{a.id}", "tag_cluster" if cid else "folder", a.artist, a.title,
+                                   a.track_count, a.status, a.id, bool(cid), a.folder))
+        if f.status is None and f.max_confidence is None:
+            for c in self._clusters_list():
+                if c.album_id is not None:
+                    continue
+                if text and text not in f"{c.artist} {c.title} {' '.join(x.title for x in c.files)}".casefold():
+                    continue
+                rows.append(ClusterRow(c.id, c.kind, c.artist, c.title, len(c.files), None, None, True, c.folder))
+        rows.sort(key=lambda r: (r.kind == "unclustered", r.artist.casefold(), r.title.casefold(),
+                                 str(r.folder).casefold(), r.id))
+        return Page(rows[offset:offset + limit], len(rows), offset)
+
+    # ---------------------------------------------------------------- pins (c2fcf25)
+    def _release_for(self, album_id: int, release_id=None):
+        cands = self._candidates(album_id)
+        if release_id is not None:
+            if release_id not in [c.release_id for c in cands]:
+                raise NotFound(f"release {release_id} is not a candidate of album {album_id}")
+            return release_id
+        chosen = self.fake._chosen.get(album_id)
+        return chosen if chosen in [c.release_id for c in cands] else (cands[0].release_id if cands else None)
+
+    def _pin(self, album_id: int, file, position: str, override_hold: bool = False, release_id=None) -> Pin:
+        a = self._album(album_id)
+        path = Path(file)
+        if path not in {t.path for t in a.tracks}:
+            raise ValidationError(f"{path} is not a file of album {album_id}", field="file")
+        if not str(position or "").strip():
+            raise ValidationError("position is empty", field="position")
+        rid = self._release_for(album_id, release_id)
+        if rid is None:
+            raise MMError(f"album {album_id} has no candidates: run match.find first")
+        pin = Pin(path, str(position).strip(), rid, bool(override_hold), False)
+        self._pins.setdefault(album_id, {})[path] = pin
+        self.fake.events.match_view_changed.emit(album_id)
+        return pin
+
+    def _unpin(self, album_id: int, file=None) -> None:
+        self._album(album_id)
+        if file is None:
+            self._pins.pop(album_id, None)
+        else:
+            self._pins.get(album_id, {}).pop(Path(file), None)
+        self.fake.events.match_view_changed.emit(album_id)
+
+    def _pins_of(self, album_id: int) -> list:
+        self._album(album_id)
+        return sorted(self._pins.get(album_id, {}).values(), key=lambda p: str(p.path))
+
+    def _held_files(self, album, cand) -> set:
+        return {x for p in self._disc_ambiguous(album, cand) + self._disc_track_count(album, cand) for x in p.paths}
+
+    def _apply_pins(self, album, cand, pairs):
+        """Engine rule (c2fcf25 _pins.resolve) in small: pins go first, the rest keep their pairs; unusable
+        pins are PIN_CONFLICT problems. Returns (pairs, problems, usable {path: position})."""
+        pins = [p for p in self._pins.get(album.id, {}).values() if p.release_id == cand.release_id]
+        if not pins:
+            return pairs, [], {}
+        remotes = {pr.remote.position: pr.remote for pr in pairs if pr.remote is not None}
+        held = self._held_files(album, cand)
+        files = {t.path for t in album.tracks}
+        problems, wanted = [], {}
+        refuse = lambda pin, why: problems.append(Problem(   # noqa: E731
+            ProblemKind.PIN_CONFLICT, f"Manual pair {pin.path.name} -> {pin.position}: {why}", [pin.path]))
+        for pin in pins:
+            if pin.stale or pin.path not in files:
+                refuse(pin, "the file changed since it was paired; pair it again")
+            elif pin.position not in remotes:
+                refuse(pin, f"release {cand.release_id} has no track {pin.position}")
+            else:
+                wanted.setdefault(pin.position, []).append(pin)
+        usable = {}
+        for pos, group in wanted.items():
+            if len(group) > 1:
+                for pin in group:
+                    refuse(pin, f"{len(group)} files are paired with track {pos}")
+                continue
+            pin = group[0]
+            fd = P_folder_disc(pin.path)
+            if (pin.path in held or (fd is not None and fd != remotes[pos].disc)) and not pin.override_hold:
+                refuse(pin, "this overrides a disc hold (the file's disc can't be told, its disc's counts differ, "
+                            "or it sits in another disc's folder); pair it again with override_hold=True")
+                continue
+            usable[pin.path] = pos
+        if not usable:
+            return pairs, problems, {}
+        locals_ = {t.path: t for t in album.tracks}
+        taken = set(usable.values())
+        out = []
+        for pr in pairs:
+            lp = pr.local.path if pr.local is not None else None
+            if lp in usable:
+                continue
+            if pr.remote is not None and pr.remote.position in taken:
+                if pr.local is not None:
+                    out.append(T.TrackPair("unmatched", pr.local, None, 0.0, None, False))
+                continue
+            out.append(pr)
+        for path, pos in usable.items():
+            rt = remotes[pos]
+            sim = 1.0 if locals_[path].title.casefold() == rt.title.casefold() else 0.5
+            delta = (None if locals_[path].duration_s is None or rt.duration_s is None
+                     else locals_[path].duration_s - rt.duration_s)
+            out.append(T.TrackPair("manual", locals_[path], rt, sim, delta, True))
+        for pos, rt in remotes.items():          # tracks a pin took a file away from stay listed
+            if not any(x.remote is not None and x.remote.position == pos for x in out):
+                out.append(T.TrackPair("unmatched", None, rt, 0.0, None, False))
+        order = list(remotes)
+        out.sort(key=lambda x: (x.remote is None, order.index(x.remote.position) if x.remote else 0))
+        return out, problems, usable
+
     def _view(self, album_or_cluster_id, release_id=None) -> MatchView:
-        """MOCK of match.view: read-only, never fetches."""
+        """MOCK of match.view: read-only, never fetches; takes an album id, "album-<id>" or a cluster id."""
         cid = None
+        if isinstance(album_or_cluster_id, str) and album_or_cluster_id.startswith("album-"):
+            album_or_cluster_id = int(album_or_cluster_id[6:])
         if isinstance(album_or_cluster_id, str):
             c = self._cluster(album_or_cluster_id)
             cid = c.id
@@ -529,24 +773,25 @@ class FakeContract:
         a = self._album(aid)
         cid = cid or getattr(a, "cluster_id", None)
         cands = self._candidates(aid)
-        if release_id is not None and release_id not in [x.release_id for x in cands]:
-            raise NotFound(f"release {release_id} is not a candidate of album {aid}")
-        chosen = self.fake._chosen.get(aid)
-        rid = release_id or (chosen if chosen in [x.release_id for x in cands] else None) or (
-            cands[0].release_id if cands else None)
+        rid = self._release_for(aid, release_id)
         cand = next((x for x in cands if x.release_id == rid), None)
         if cand is None:
-            return MatchView(aid, cid, None, False, [], [], list(a.tracks), [], [])
+            return MatchView(aid, cid, None, False, cands, [], list(a.tracks), [], [])
+        pins = [p for p in self._pins_of(aid) if p.release_id == rid]
         if not cand.fetched or not cand.alignment:
-            return MatchView(aid, cid, rid, False, cands, [], list(a.tracks), [], [])
-        pairs = list(cand.alignment)
+            return MatchView(aid, cid, rid, False, cands, [], list(a.tracks), [], [], pins)
+        pairs, pin_problems, _ = self._apply_pins(a, cand, list(cand.alignment))
         try:
             problems = list(self._destination(aid, rid, None).problems)
         except MMError:
             problems = []
+        problems += [p for p in pin_problems if p not in problems]
         return MatchView(aid, cid, rid, True, cands, pairs,
                          [x.local for x in pairs if x.local is not None and x.remote is None],
-                         [x.remote for x in pairs if x.remote is not None and x.local is None], problems)
+                         [x.remote for x in pairs if x.remote is not None and x.local is None], problems, pins)
+
+    def _manual_pairs(self, operation_id: int) -> list:
+        return list(self._manual_ops.get(operation_id, []))
 
     def _manual(self, album_id: int, release_id_or_url: str) -> Job:
         if album_id < SYNTH_BASE and self.fake.album(album_id).status == MatchStatus.HELD:
@@ -880,6 +1125,9 @@ class FakeContract:
                         + self._disc_ambiguous(album, cand)            # never overridden
                         + self._disc_track_count(album, cand)          # never overridden
                         + self._disc_folder_mismatch(album, cand, files))     # never overridden
+            _pairs, pin_problems, pinned = (self._apply_pins(album, cand, list(cand.alignment))
+                                            if cand.alignment else ([], [], {}))
+            problems += pin_problems
             multi = self.fake.disc_pairing(aid, cand.release_id)
             if multi is None:
                 positions = dict(zip((t.path for t in album.tracks), self._positions(album, cand)))
@@ -898,7 +1146,9 @@ class FakeContract:
                       TagChange("CATALOGNUMBER", album.catno or None, cand.catno),
                       TagChange("LABEL", None, cand.label),
                       TagChange("DISCOGS_RELEASE_ID", None, str(cand.release_id))])
-                fcs.append(FileChange("track", before, after, tc))
+                if before in pinned:
+                    tc = [replace(x, after=pinned[before]) if x.key == "DISCOGS_POSITION" else x for x in tc]
+                fcs.append(FileChange("track", before, after, tc, pinned=before in pinned))
                 tags += len(tc)
             moves += len(fcs)
             aps.append(AlbumPlan(aid, cand.release_id, album.folder, folder, fcs, problems, *self._plan_names(album, cand)))
@@ -1014,7 +1264,13 @@ class FakeContract:
                 done = replace(plan, albums=ok, files_to_move=sum(len(a.files) for a in ok),
                                tags_to_write=sum(len(f.tags) for a in ok for f in a.files))
                 names = ", ".join(self._album_label(ap.album_id) for ap in ok)
-                self._record("apply", done, f"Tagged and moved: {names}")
+                op = self._record("apply", done, f"Tagged and moved: {names}")
+                self._manual_ops[op.id] = [ManualPair(ap.album_id, f.path_before, next(
+                    (t.after for t in f.tags if t.key == "DISCOGS_POSITION"), ""),
+                    self._pins.get(ap.album_id, {}).get(f.path_before, Pin(f.path_before, "", 0, False, False)).override_hold)
+                    for ap in ok for f in ap.files if getattr(f, "pinned", False)]
+                for ap in ok:                    # contract: a successful apply uses the album's pins up
+                    self._pins.pop(ap.album_id, None)
                 for ap in ok:
                     self.fake._set(ap.album_id, status=MatchStatus.APPLIED, folder=ap.folder_after, held_for=[])
             msg = f"Applied {len(ok)} album(s)"

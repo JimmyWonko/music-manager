@@ -228,6 +228,10 @@ class LibraryWindow(QMainWindow):
     def on_job_finished(self, job):
         if job.kind.name in ("SCAN", "MATCH"):
             self.reload()
+        # c2fcf25: library.scan doesn't regroup loose files; run the cluster scan after it
+        if (job.kind.name == "SCAN" and job.state.name == "DONE"
+                and getattr(self.svc.library, "scan_clusters", None) is not None):
+            self.last_cluster_job = self.svc.library.scan_clusters()
 
     def selected_ids(self) -> list[int]:
         return [self.model.rows[i.row()].id for i in self.view.selectionModel().selectedRows()

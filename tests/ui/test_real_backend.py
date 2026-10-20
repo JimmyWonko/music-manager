@@ -982,41 +982,126 @@ def _rollins(real):
     return art
 
 
-def test_real_clusters_adopt_and_match_window(real, qtbot, monkeypatch):
-    from mm_ui import problems as P
-    from mm_ui.match import FETCHING, KEY, MatchWindow
-    svc = real["svc"]
-    art = _rollins(real)
+def _match_window(svc, qtbot, answer=True):
+    from mm_ui.match import MatchWindow
     w = MatchWindow(svc); qtbot.addWidget(w)
-    groups, loose = w.left.topLevelItem(0), w.left.topLevelItem(1)
-    assert groups.child(0).text(0) == "Henry Rollins – Hot Animal Machine" and groups.child(0).childCount() == 3
-    assert loose.child(0).text(0) == "01 Gone Fishin'.mp3"
-    cid = groups.child(0).data(0, KEY)[1]
-    assert cid.startswith("cl-") and len(cid) == 15
+    w.asked, w.told, w.answer = [], [], answer
+    w.confirm = lambda title, text: w.asked.append(text) or w.answer
+    w.inform = lambda title, text: w.told.append(text)
+    return w
+
+
+def _needs_c2fcf25(svc):
+    if getattr(svc.match, "pin", None) is None:
+        pytest.skip("service predates match.pin / match.clusters (c2fcf25)")
+
+
+def _adopt_rollins(real, qtbot):
+    from mm_ui.match import KEY
+    svc = real["svc"]
+    _needs_c2fcf25(svc)
+    art = _rollins(real)
+    assert svc._c.jobs.wait(svc.library.scan_clusters().id).state.name == "DONE"
+    w = _match_window(svc, qtbot)
+    tags = next(w.left.topLevelItem(i) for i in range(3) if w.left.topLevelItem(i).data(0, KEY) == ("group", "tag_cluster"))
+    assert [tags.child(i).text(0) for i in range(tags.childCount())] == [
+        "Henry Rollins – Hot Animal Machine", "Rollins Band – Life Time"]
+    assert tags.child(0).childCount() == 3
+    cid = tags.child(0).data(0, KEY)[1]
     w.select(cid)
     assert w.view.album_id is None and len(w.view.unmatched_files) == 3 and w.adopt_btn.isEnabled()
     w.adopt()
     assert svc._c.jobs.wait(w.last_find_job.id).state.name == "DONE"
     qtbot.waitUntil(lambda: w.view is not None and w.view.album_id is not None and bool(w.view.candidates), timeout=5000)
     aid = w.view.album_id
-    assert svc.library.album(aid).cluster_id == cid and w.item_for(cid).text(0).endswith(f"[{P.CLUSTER_BADGE}]")
-    if not w.view.fetched:
-        assert w.fetch_label.text() == FETCHING and not w.fetch_label.isHidden()
     svc.match.choose(aid, 901)
     plan = svc.plan.build([aid])
     if plan.fetch_job is not None:
-        assert svc._c.jobs.wait(plan.fetch_job.id if hasattr(plan.fetch_job, "id") else plan.fetch_job).state.name == "DONE"
-        plan = svc.plan.build([aid])
+        assert svc._c.jobs.wait(plan.fetch_job).state.name == "DONE"
+    w.show_view()
     qtbot.waitUntil(lambda: w.view.fetched, timeout=5000)
-    assert w.fetch_label.isHidden()
+    return w, art, cid, aid
+
+
+def test_real_clusters_adopt_and_match_window(real, qtbot):
+    from mm_ui import problems as P
+    from mm_ui.review import ApplyDialog
+    svc = real["svc"]
+    w, art, cid, aid = _adopt_rollins(real, qtbot)
+    assert svc.library.album(aid).cluster_id == cid and f"[{P.CLUSTER_BADGE}]" in w.item_for(cid).text(0)
+    assert w.fetch_label.isHidden() and w.unadopt_btn.isEnabled()
     rel = w.tracks.topLevelItem(0)
     assert rel.text(1).startswith("Release tracks (3)")
     assert [rel.child(i).text(3) for i in range(3)] == ["01 Black And White.mp3", "02 Followed Around.mp3",
                                                         "03 Lost And Found.mp3"]
-    # apply dialog: only the cluster's files move, out of their common folder; the cover stays
-    from mm_ui.review import ApplyDialog
+    plan = svc.plan.build([aid])
     assert not plan.albums[0].problems, plan.albums[0].problems
     dlg = ApplyDialog(plan, album_row=svc.library.album); qtbot.addWidget(dlg)
     assert "is a cluster: only its 3 file(s) move" in dlg.cluster_label.text()
     assert str(art) in dlg.cluster_label.text() and P.NON_AUDIO_STAYS in dlg.cluster_label.text()
     assert all(Path(f.path_before).parent == art for f in plan.albums[0].files)
+    w.unadopt()
+    assert w.current == cid and w.view.album_id is None and w.adopt_btn.isEnabled()
+
+
+def test_real_drag_swap_manual_badge_plan_and_history(real, qtbot):
+    from mm_ui.history import HistoryDialog
+    from mm_ui.match import MANUAL
+    svc = real["svc"]
+    w, art, cid, aid = _adopt_rollins(real, qtbot)
+    rel = w.tracks.topLevelItem(0)
+    track = {rel.child(i).text(0): rel.child(i) for i in range(rel.childCount())}
+    w.drop_right(str(art / "03 Lost And Found.mp3"), track["1"])          # onto a track with a file: swap
+    rel = w.tracks.topLevelItem(0)
+    rows = {rel.child(i).text(0): (rel.child(i).text(3), rel.child(i).text(6)) for i in range(rel.childCount())}
+    assert rows["1"] == ("03 Lost And Found.mp3", f"✓ {MANUAL}") and rows["3"] == ("01 Black And White.mp3", f"✓ {MANUAL}")
+    assert {(p.path.name, p.position) for p in svc.match.pins(aid)} == {("03 Lost And Found.mp3", "1"),
+                                                                      ("01 Black And White.mp3", "3")}
+    w.tracks.setCurrentItem(rel.child(1)); assert w.pair_btn.isEnabled()
+    plan = svc.plan.build([aid])
+    assert {Path(f.path_before).name for f in plan.albums[0].files if f.pinned} == {"03 Lost And Found.mp3",
+                                                                                   "01 Black And White.mp3"}
+    assert svc._c.jobs.wait(svc.plan.apply(plan.id).id).state.name == "DONE"
+    h = HistoryDialog(svc); qtbot.addWidget(h)
+    h.table.selectRow(0)
+    assert "03 Lost And Found.mp3 → 1" in h.manual_label.text() and not h.manual_label.isHidden()
+
+
+def test_real_pin_over_disc_hold_asks_then_overrides(real, qtbot):
+    from mm_ui import problems as P
+    from mm_ui.match import MANUAL
+    svc = real["svc"]
+    _needs_c2fcf25(svc)
+    title, rid = "Medley Pins", 731
+    folder = real["lib"] / "Disc Band" / f"[1999]  {title} [DSC{rid}]"
+    for rel in ("CD1/01 One", "CD1/02 Two", "CD1/03 Three", "CD2/01 Four,Five", "CD2/02 Six"):
+        tone(folder / f"{rel}.flac")
+    tracks = [("1-1", "One"), ("1-2", "Two"), ("1-3", "Three"), ("2-1", "Four"), ("2-2", "Five"), ("2-3", "Six")]
+    r = release(rid, "Disc Band", title, 1999, f"DSC {rid}", [t for _p, t in tracks])
+    for tr, (pos, _t) in zip(r["tracklist"], tracks):
+        tr["position"] = pos
+    r["formats"] = [{"name": "CD", "qty": "2"}]
+    real["discogs"].releases[rid] = r
+    assert svc._c.jobs.wait(svc.library.scan().id).state.name == "DONE"
+    (row,) = [x for x in svc.albums(None, limit=50).items if x.title == title]
+    assert svc._c.jobs.wait(svc.match.find([row.id]).id).state.name == "DONE"
+    svc.match.choose(row.id, rid)
+    plan = svc.plan.build([row.id])
+    if plan.fetch_job is not None:
+        svc._c.jobs.wait(plan.fetch_job)
+    w = _match_window(svc, qtbot)
+    w.select(f"album-{row.id}")
+    assert w.view.fetched
+    rel = w.tracks.topLevelItem(0)
+    track = {rel.child(i).text(0): rel.child(i) for i in range(rel.childCount())}
+    # CD1 file onto a disc-2 track: never offered (disc_folder_mismatch is never overridden)
+    w.drop_right(str(folder / "CD1" / "01 One.flac"), "2-3")
+    assert not w.asked and "another disc's folder" in w.told[0] and svc.match.pins(row.id) == []
+    # the held medley file onto 2-1: asks, then pins with override_hold=True
+    w.drop_right(str(folder / "CD2" / "01 Four,Five.flac"), "2-1")
+    assert len(w.asked) == 1
+    assert [(p.position, p.override_hold) for p in svc.match.pins(row.id)] == [("2-1", True)]
+    rel = w.tracks.topLevelItem(0)
+    got = {rel.child(i).text(0): (rel.child(i).text(3), rel.child(i).text(6)) for i in range(rel.childCount())}
+    assert got["2-1"] == ("01 Four,Five.flac", f"✓ {MANUAL}")
+    assert not any(P.kind_of(p) == P.PIN_CONFLICT for p in w.view.problems)

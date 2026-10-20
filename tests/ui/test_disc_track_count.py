@@ -28,7 +28,7 @@ def _count(ap):
 
 
 def test_kind_appended_last_and_labelled():
-    assert [m.value for m in FS.ProblemKind][-1] == "disc_track_count"
+    assert [m.value for m in FS.ProblemKind][-2:] == ["disc_track_count", "pin_conflict"]   # c2fcf25 appended
     assert P.LABELS["disc_track_count"] == "A disc's file count doesn't match its tracks"
     assert len(set(P.LABELS.values())) == len(P.LABELS)
 

@@ -1,23 +1,39 @@
-"""Match window (v1 #1 of PICARD-UI-PLAN.md): clusters and unmatched files on the left, the album-match view
-(match.view) on the right. Read-only except Adopt (library.adopt_cluster, then match.find). No drag yet.
+"""Match window (PICARD-UI-PLAN.md v1 #1 and #2), built on feat/clustering c2fcf25.
 
-Built against c334bbf. Not used yet, because they are not in c334bbf: paged clusters, match.pin/unpin,
-cluster signals, pinned pairs in the journal (and the per-pair `method` field)."""
+Left: match.clusters (paged ClusterRow): folder albums, tag clusters and unclustered files, told apart by
+`kind`, keyed by row id. Right: match.view of the selected row: release tracks with their files, similarity,
+ok, manual pairs, unmatched files and tracks, problems.
+Actions: Adopt / Un-adopt (library.adopt_cluster / unadopt_cluster), Scan clusters (library.scan_clusters),
+Pair… (keyboard: Ctrl+P), Unpin, and drag:
+- a file onto a release track pins it there (match.pin); onto a track that already has a file, swaps them;
+- a file onto "Unclustered files" unpins it, or (not pinned) moves it out of its cluster (move_to_cluster None);
+- a loose file onto another cluster of its folder moves it there.
+A pin that overrides a disc hold asks first and is retried with override_hold=True; never for a file whose CD
+folder names another disc (disc_folder_mismatch is never overridden)."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QBrush, QColor
-from PySide6.QtWidgets import (QHBoxLayout, QLabel, QMainWindow, QProgressBar, QPushButton, QSplitter,
-                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtCore import QMimeData, Qt, QTimer
+from PySide6.QtGui import QBrush, QColor, QKeySequence, QShortcut
+from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QInputDialog, QLabel, QMainWindow, QMessageBox,
+                               QProgressBar, QPushButton, QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+                               QWidget)
 
 from . import problems as P
 from ._meta import DISPLAY_NAME
 from .backend import as_backend
 
-KEY = Qt.UserRole          # ("cluster", id) / ("file", cluster id) on the left
+KEY = Qt.UserRole            # left: ("row", row id) | ("file", row id, path) | ("group", kind)
+TRACK = Qt.UserRole          # right: release-track position ("" for non-track rows)
+FILE = Qt.UserRole + 1       # right: the file's path (str) when the row has one
+MIME = "application/x-mm-file"
 FETCHING = "Fetching from Discogs…"
+MANUAL = "manual"
+PAGE = 200
+GROUPS = (("folder", "Albums"), ("tag_cluster", "Clusters"), ("unclustered", "Unclustered files"))
+OVERRIDE_MARK = "override_hold"   # engine: PIN_CONFLICT "… overrides a disc hold …; pair it again with override_hold=True"
 
 
 def _dur(s) -> str:
@@ -28,169 +44,454 @@ def _sim(x) -> str:
     return "" if x is None else f"{x:.0%}"
 
 
+def folder_disc(path) -> int | None:
+    """The disc a file's CD folder names ("CD2", "Disc 2"), else None."""
+    m = re.fullmatch(r"(?:cd|disc|disk)\s*(\d+)", Path(path).parent.name, re.I)
+    return int(m.group(1)) if m else None
+
+
+def _mime(path) -> QMimeData:
+    md = QMimeData(); md.setData(MIME, str(path).encode()); md.setText(str(path))
+    return md
+
+
+def _dropped(event) -> str | None:
+    md = event.mimeData()
+    return bytes(md.data(MIME)).decode() if md.hasFormat(MIME) else None
+
+
+class _Tree(QTreeWidget):
+    """A tree whose file rows drag their path and whose drop targets call back the window."""
+
+    def __init__(self, path_of, on_drop, target_of):
+        super().__init__()
+        self._path_of, self._on_drop, self._target_of = path_of, on_drop, target_of
+        self.setDragEnabled(True); self.setAcceptDrops(True); self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDrop); self.setDefaultDropAction(Qt.MoveAction)
+
+    def mimeData(self, items):
+        path = self._path_of(items[0]) if items else None
+        return _mime(path) if path else QMimeData()
+
+    def mimeTypes(self):
+        return [MIME]
+
+    def dragEnterEvent(self, e):
+        e.acceptProposedAction() if _dropped(e) else e.ignore()
+
+    def dragMoveEvent(self, e):
+        it = self.itemAt(e.position().toPoint())
+        e.acceptProposedAction() if _dropped(e) and it is not None else e.ignore()
+
+    def dropEvent(self, e):
+        path, it = _dropped(e), self.itemAt(e.position().toPoint())
+        e.setDropAction(Qt.CopyAction); e.accept()      # the window changes the index; never let Qt move rows
+        if path and it is not None:       # read the target now: the rows are rebuilt after the drop
+            target = self._target_of(it)
+            QTimer.singleShot(0, lambda: self._on_drop(path, target))
+
+
 class MatchWindow(QMainWindow):
     def __init__(self, svc=None, parent=None):
         super().__init__(parent)
         self.svc = svc = as_backend(svc)
         self.setWindowTitle(f"{DISPLAY_NAME} — Match"); self.resize(1280, 800)
-        self.clusters: dict[str, object] = {}
-        self.current: str | None = None       # selected cluster id (rows are keyed by id, not position)
+        self.rows: dict[str, object] = {}     # ClusterRow by id
+        self.current: str | None = None       # selected row id
         self.view = None
+        # tests replace these two (no modal dialogs in tests)
+        self.confirm = lambda title, text: QMessageBox.question(self, title, text) == QMessageBox.Yes
+        self.inform = lambda title, text: QMessageBox.information(self, title, text)
 
-        self.left = QTreeWidget(); self.left.setHeaderLabels(["Clusters and unmatched files", "Files"])
-        self.left.setColumnWidth(0, 330)
+        self.left = _Tree(self._left_path, self.drop_left, lambda it: it.data(0, KEY))
+        self.left.setHeaderLabels(["Albums, clusters and unclustered files", "Files"])
+        self.left.setColumnWidth(0, 360)
         self.left.itemSelectionChanged.connect(self._on_select)
-        self.adopt_btn = QPushButton("Adopt as album"); self.adopt_btn.setEnabled(False)
+        self.adopt_btn = QPushButton("Adopt as album"); self.adopt_btn.clicked.connect(self.adopt)
         self.adopt_btn.setToolTip("Index this cluster as its own album (nothing moves), then search Discogs")
-        self.adopt_btn.clicked.connect(self.adopt)
-        lw = QWidget(); ll = QVBoxLayout(lw); ll.setContentsMargins(0, 0, 0, 0)
-        ll.addWidget(self.left, 1); ll.addWidget(self.adopt_btn)
+        self.unadopt_btn = QPushButton("Un-adopt"); self.unadopt_btn.clicked.connect(self.unadopt)
+        self.unadopt_btn.setToolTip("Turn this album back into a cluster: its candidates, choice and manual pairs "
+                                    "are dropped. Nothing moves.")
+        self.scan_btn = QPushButton("Scan clusters"); self.scan_btn.clicked.connect(self.scan_clusters)
+        lw = QWidget(); ll = QVBoxLayout(lw); ll.setContentsMargins(0, 0, 0, 0); ll.addWidget(self.left, 1)
+        lb = QHBoxLayout(); [lb.addWidget(b) for b in (self.adopt_btn, self.unadopt_btn, self.scan_btn)]
+        ll.addLayout(lb)
 
         self.header = QLabel(wordWrap=True); self.header.setTextFormat(Qt.RichText)
         self.spinner = QProgressBar(maximumHeight=8, textVisible=False); self.spinner.setRange(0, 0)
         self.spinner.setFixedWidth(80)
         self.fetch_label = QLabel(FETCHING)
         fr = QHBoxLayout(); fr.addWidget(self.spinner); fr.addWidget(self.fetch_label); fr.addStretch(1)
-        self.tracks = QTreeWidget()
-        self.tracks.setHeaderLabels(["#", "Release track", "Length", "Local file", "Length", "Similarity", "OK"])
-        for c, w in ((0, 60), (1, 260), (2, 60), (3, 300), (4, 60), (5, 80)):
+        self.tracks = _Tree(lambda it: it.data(0, FILE), self.drop_right, lambda it: it.data(0, TRACK))
+        self.tracks.setHeaderLabels(["#", "Release track", "Length", "Local file", "Length", "Similarity", "Pair"])
+        for c, w in ((0, 50), (1, 220), (2, 55), (3, 260), (4, 55), (5, 75), (6, 90)):
             self.tracks.setColumnWidth(c, w)
+        self.tracks.itemSelectionChanged.connect(self._sync_buttons)
+        self.pair_btn = QPushButton("Pair with track…"); self.pair_btn.clicked.connect(lambda: self.pair_selected())
+        self.pair_btn.setToolTip("Pair the selected file with a release track (Ctrl+P); same as dragging it there")
+        self.unpin_btn = QPushButton("Unpin"); self.unpin_btn.clicked.connect(self.unpin_selected)
+        QShortcut(QKeySequence("Ctrl+P"), self, activated=lambda: self.pair_selected())
+        self.hint = QLabel("Drag a file onto a release track to pair it by hand; onto a track with a file to swap; "
+                           "onto “Unclustered files” to unpin or move it out.", wordWrap=True)
+        self.hint.setStyleSheet("color:#666")
+        pr = QHBoxLayout(); pr.addWidget(self.hint, 1); pr.addWidget(self.pair_btn); pr.addWidget(self.unpin_btn)
         self.problems = QLabel(wordWrap=True); self.problems.setStyleSheet("color:#a33")
         rw = QWidget(); rl = QVBoxLayout(rw); rl.setContentsMargins(0, 0, 0, 0)
-        rl.addWidget(self.header); rl.addLayout(fr); rl.addWidget(self.tracks, 1); rl.addWidget(self.problems)
+        rl.addWidget(self.header); rl.addLayout(fr); rl.addWidget(self.tracks, 1); rl.addLayout(pr)
+        rl.addWidget(self.problems)
 
         split = QSplitter(); split.addWidget(lw); split.addWidget(rw); split.setSizes([420, 860])
         self.setCentralWidget(split)
+        self._refresh_timer = QTimer(self, singleShot=True, interval=0, timeout=self.refresh)
         ev = svc.events
-        ev.album_changed.connect(self._on_album_changed)
-        ev.job_finished.connect(lambda job: self.refresh())
+        self._conns = [(ev.album_changed, self._on_album), (ev.candidate_ready, lambda aid, rid: self._on_album(aid)),
+                       (ev.job_finished, self._on_job)]
+        for name, slot in (("match_view_changed", self._on_album), ("clusters_changed", lambda ids: self.refresh_soon()),
+                           ("cluster_changed", self._on_cluster_changed)):
+            sig = getattr(ev, name, None)
+            if sig is not None:
+                self._conns.append((sig, slot))
+        for sig, slot in self._conns:
+            sig.connect(slot)
+        self.destroyed.connect(lambda *_: None)
         self.refresh()
 
+    def closeEvent(self, e):
+        for sig, slot in self._conns:
+            try:
+                sig.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        super().closeEvent(e)
+
     # ---------------------------------------------------------------- left pane
+    def load_rows(self) -> list:
+        out, offset = [], 0
+        while True:
+            page = self.svc.match.clusters(None, offset, PAGE)
+            out += list(page.items); offset += len(page.items)
+            if not page.items or offset >= page.total:
+                return out
+
+    def refresh_soon(self):
+        self._refresh_timer.start()
+
     def refresh(self):
-        """Reload clusters, keeping the selection by cluster id."""
-        cs = self.svc.library.clusters()
-        self.clusters = {c.id: c for c in cs}
+        """Reload the rows, keeping the selection and expanded rows by id."""
+        rows = self.load_rows()
+        self.rows = {r.id: r for r in rows}
+        open_ids = {it.data(0, KEY)[1] for it in self._walk(self.left.invisibleRootItem())
+                    if it.isExpanded() and it.data(0, KEY) and it.data(0, KEY)[0] == "row"}
         self.left.blockSignals(True)
         self.left.clear()
-        groups = QTreeWidgetItem(self.left, ["Clusters"]); loose = QTreeWidgetItem(self.left, ["Unmatched files"])
-        for top in (groups, loose):
-            top.setFlags(top.flags() & ~Qt.ItemIsSelectable)
+        tops = {}
+        for kind, label in GROUPS:
+            top = tops[kind] = QTreeWidgetItem(self.left, [label]); top.setData(0, KEY, ("group", kind))
+            top.setFlags(top.flags() & ~Qt.ItemIsSelectable & ~Qt.ItemIsDragEnabled)
         keep = None
-        for c in cs:
-            # A one-file cluster has nothing to group with: Picard's "unclustered files". Adopted ones
-            # are albums now and sit with the clusters, badged.
-            single = len(c.files) == 1 and c.album_id is None
-            if single:
-                it = QTreeWidgetItem(loose, [Path(c.files[0].path).name, ""])
-            else:
-                it = QTreeWidgetItem(groups, [self.cluster_label(c), str(len(c.files))])
-                for f in c.files:
-                    ch = QTreeWidgetItem(it, [Path(f.path).name, ""])
-                    ch.setData(0, KEY, ("file", c.id)); ch.setToolTip(0, str(f.path))
-            it.setData(0, KEY, ("cluster", c.id))
-            it.setToolTip(0, f"{c.folder}\n{c.id}")
-            if c.album_id is not None:
+        for r in rows:
+            it = QTreeWidgetItem(tops.get(r.kind, tops["folder"]), [self.row_label(r), str(r.file_count)])
+            it.setData(0, KEY, ("row", r.id)); it.setToolTip(0, f"{r.folder}\n{r.id}")
+            it.setFlags(it.flags() & ~Qt.ItemIsDragEnabled)
+            if r.kind == "tag_cluster" and r.album_id is not None:
                 it.setForeground(0, QBrush(QColor("#2a6")))
-            if c.id == self.current:
+            if r.kind != "folder":                       # loose files: draggable children
+                for f in self.svc.library.cluster(r.id).files:
+                    ch = QTreeWidgetItem(it, [Path(f.path).name, ""])
+                    ch.setData(0, KEY, ("file", r.id, str(f.path))); ch.setToolTip(0, str(f.path))
+                    ch.setFlags(ch.flags() | Qt.ItemIsDragEnabled)
+                it.setExpanded(r.id in open_ids or r.kind == "unclustered")
+            if r.id == self.current:
                 keep = it
-        groups.setText(1, str(groups.childCount())); loose.setText(1, str(loose.childCount()))
-        groups.setExpanded(True); loose.setExpanded(True)
+        for kind, top in tops.items():
+            top.setText(1, str(top.childCount())); top.setExpanded(True)
         self.left.blockSignals(False)
         if keep is not None:
             keep.setSelected(True); self.left.setCurrentItem(keep)
+        elif self.current not in self.rows:
+            self.current = None
         self.show_view()
 
     @staticmethod
-    def cluster_label(c) -> str:
-        discs = f" · {c.disc_count} discs" if c.disc_count > 1 else ""
-        adopted = f"  [{P.CLUSTER_BADGE}]" if c.album_id is not None else ""
-        return f"{c.artist} – {c.title}{discs}{adopted}"
+    def row_label(r) -> str:
+        if r.kind == "unclustered":
+            return f"{Path(r.folder).name}/ (not in a cluster)"
+        badge = f"  [{P.CLUSTER_BADGE}]" if r.kind == "tag_cluster" and r.album_id is not None else ""
+        status = f" · {r.status.name.replace('_', ' ').lower()}" if r.status is not None else ""
+        return f"{r.artist} – {r.title}{badge}{status}"
+
+    def _left_path(self, item):
+        k = item.data(0, KEY)
+        return k[2] if k and k[0] == "file" else None
 
     def _on_select(self):
         items = self.left.selectedItems()
         key = items[0].data(0, KEY) if items else None
-        self.current = key[1] if key else None
+        self.current = key[1] if key and key[0] in ("row", "file") else None
         self.show_view()
-
-    def item_for(self, cluster_id: str):
-        for it in self._walk(self.left.invisibleRootItem()):
-            k = it.data(0, KEY)
-            if k and k[0] == "cluster" and k[1] == cluster_id:
-                return it
-        return None
 
     def _walk(self, item):
         for i in range(item.childCount()):
             ch = item.child(i); yield ch; yield from self._walk(ch)
 
-    def select(self, cluster_id: str):
-        it = self.item_for(cluster_id)
+    def item_for(self, row_id: str):
+        return next((it for it in self._walk(self.left.invisibleRootItem())
+                     if it.data(0, KEY) == ("row", row_id)), None)
+
+    def select(self, row_id: str):
+        it = self.item_for(row_id)
         if it is not None:
             self.left.setCurrentItem(it)
 
     # ---------------------------------------------------------------- right pane
     def show_view(self):
-        c = self.clusters.get(self.current) if self.current else None
-        self.adopt_btn.setEnabled(c is not None and c.album_id is None)
+        r = self.rows.get(self.current) if self.current else None
+        self.adopt_btn.setEnabled(r is not None and r.kind == "tag_cluster" and r.album_id is None)
+        self.unadopt_btn.setEnabled(r is not None and r.kind == "tag_cluster" and r.album_id is not None)
         self.tracks.clear(); self.problems.clear()
-        if c is None:
+        if r is None:
             self.view = None
-            self.header.setText("<i>Select a cluster or a file.</i>")
-            self.spinner.hide(); self.fetch_label.hide()
+            self.header.setText("<i>Select an album, a cluster or a file.</i>")
+            self.spinner.hide(); self.fetch_label.hide(); self._sync_buttons()
             return
-        v = self.view = self.svc.match.view(c.id)
+        try:
+            v = self.view = self.svc.match.view(r.id)
+        except self.svc.types.NotFound:     # adopted / un-adopted / moved meanwhile: reload the rows
+            self.view = None
+            self.header.setText("<i>This changed; reloading…</i>")
+            self.spinner.hide(); self.fetch_label.hide(); self._sync_buttons()
+            self.refresh_soon()
+            return
         cand = next((x for x in v.candidates if x.release_id == v.release_id), None)
-        if v.album_id is None:
+        badge = f" [{P.CLUSTER_BADGE}]" if v.cluster_id else ""
+        if r.kind == "unclustered":
+            sub = "Files moved out of every cluster: drag one onto a cluster of this folder to group it."
+        elif v.album_id is None:
             sub = "Not adopted yet: <b>Adopt as album</b> to search Discogs for it. Nothing moves."
         elif cand is None:
-            sub = f"Album #{v.album_id} [{P.CLUSTER_BADGE}] · no Discogs candidates yet"
+            sub = f"Album #{v.album_id}{badge} · no Discogs candidates yet"
         else:
-            sub = (f"Album #{v.album_id} [{P.CLUSTER_BADGE}] · Discogs: {cand.artist} – {cand.title}"
+            sub = (f"Album #{v.album_id}{badge} · Discogs: {cand.artist} – {cand.title}"
                    f" ({cand.year}, {cand.catno}) · score {cand.score:.0%} · {len(v.candidates)} candidate(s)")
-        self.header.setText(f"<b>{c.artist} – {c.title}</b> · {len(c.files)} file(s) in {c.folder}<br>{sub}")
+        name = Path(r.folder).name if r.kind == "unclustered" else f"{r.artist} – {r.title}"
+        self.header.setText(f"<b>{name}</b> · {r.file_count} file(s) in {r.folder}<br>{sub}")
         waiting = v.album_id is not None and cand is not None and not v.fetched
         self.spinner.setVisible(waiting); self.fetch_label.setVisible(waiting)
+        pinned = {Path(p.path) for p in getattr(v, "pins", [])}
         if v.fetched:
-            rel = QTreeWidgetItem(self.tracks, ["", f"Release tracks ({sum(x.remote is not None for x in v.pairs)})"])
+            n = sum(x.remote is not None for x in v.pairs)
+            rel = QTreeWidgetItem(self.tracks, ["", f"Release tracks ({n})"
+                                                + (f" · {len(v.unmatched_tracks)} without a file" if v.unmatched_tracks else "")])
+            rel.setFlags(rel.flags() & ~Qt.ItemIsDragEnabled & ~Qt.ItemIsSelectable)
             for pr in v.pairs:
                 if pr.remote is None:
                     continue
                 lt, rt = pr.local, pr.remote
+                manual = pr.method == MANUAL
+                okc = (("✓ " + MANUAL) if manual else "✓" if pr.ok else "✗") if lt else ""
                 it = QTreeWidgetItem(rel, [rt.position, rt.title, _dur(rt.duration_s),
                                            Path(lt.path).name if lt else "— no file", _dur(lt.duration_s) if lt else "",
-                                           _sim(pr.title_similarity) if lt else "", ("✓" if pr.ok else "✗") if lt else ""])
-                if lt is None or not pr.ok:
+                                           _sim(pr.title_similarity) if lt else "", okc])
+                it.setData(0, TRACK, rt.position)
+                flags = it.flags() | Qt.ItemIsDropEnabled
+                if lt is not None:
+                    it.setData(0, FILE, str(lt.path)); it.setToolTip(3, str(lt.path)); flags |= Qt.ItemIsDragEnabled
+                else:
+                    flags &= ~Qt.ItemIsDragEnabled
+                it.setFlags(flags)
+                if manual:
+                    it.setToolTip(6, "Paired by you (drag-and-drop or Pair…)")
+                    for col in range(7):
+                        it.setForeground(col, QBrush(QColor("#1f5fa8")))
+                elif lt is None or not pr.ok:
                     for col in range(7):
                         it.setForeground(col, QBrush(QColor("#a33")))
-                if lt is not None:
-                    it.setToolTip(3, str(lt.path))
             rel.setExpanded(True)
         if v.unmatched_files:
             un = QTreeWidgetItem(self.tracks, ["", f"Unmatched files ({len(v.unmatched_files)})"])
+            un.setFlags(un.flags() & ~Qt.ItemIsDragEnabled & ~Qt.ItemIsSelectable)
             for lt in v.unmatched_files:
-                it = QTreeWidgetItem(un, ["", "", "", Path(lt.path).name, _dur(lt.duration_s), "", ""])
-                it.setToolTip(3, str(lt.path))
+                it = QTreeWidgetItem(un, ["", "", "", Path(lt.path).name, _dur(lt.duration_s), "",
+                                          "pinned (not used)" if Path(lt.path) in pinned else ""])
+                it.setData(0, FILE, str(lt.path)); it.setToolTip(3, str(lt.path))
+                it.setFlags(it.flags() | Qt.ItemIsDragEnabled)
             un.setExpanded(True)
-        # MatchView.unmatched_tracks are the "— no file" rows above; say how many in the header row
-        if v.fetched and v.unmatched_tracks:
-            rel.setText(1, f"Release tracks ({sum(x.remote is not None for x in v.pairs)}) · {len(v.unmatched_tracks)} without a file")
         if v.problems:
             self.problems.setText("<br>".join(f"⚠ {P.label(p)}: {p.message}" for p in v.problems))
+        self._sync_buttons()
 
-    def _on_album_changed(self, album_id: int):
-        c = self.clusters.get(self.current) if self.current else None
-        if c is not None and c.album_id == album_id:
-            self.show_view()       # e.g. the release finished fetching: fetched False -> True
-        elif any(x.album_id == album_id for x in self.clusters.values()) or c is None or c.album_id is None:
-            self.refresh()
+    def _sync_buttons(self):
+        f = self.selected_file()
+        can = self.view is not None and self.view.fetched and self.view.album_id is not None
+        self.pair_btn.setEnabled(bool(can and f))
+        self.unpin_btn.setEnabled(bool(can and f and self._pin_of(f) is not None))
 
-    # ---------------------------------------------------------------- actions
-    def adopt(self):
-        c = self.clusters.get(self.current) if self.current else None
-        if c is None or c.album_id is not None:
+    def _view_album(self):
+        return self.view.album_id if self.view is not None else None
+
+    def _on_album(self, album_id: int):
+        if self.view is not None and self.view.album_id == album_id:
+            self.show_view()      # pins, fetched release, status: refetch the view
+
+    def _on_job(self, job):
+        kind = getattr(getattr(job, "kind", None), "name", "")
+        if kind in ("CLUSTER", "SCAN"):
+            self.refresh_soon()
+        elif self.view is not None:
+            self.show_view()
+
+    def _on_cluster_changed(self, old: str, new: str):
+        if self.current == old and new:
+            self.current = new          # cluster ids hash their files: follow the cluster
+        self.refresh_soon()
+
+    # ---------------------------------------------------------------- pairing
+    def selected_file(self) -> str | None:
+        items = self.tracks.selectedItems()
+        return items[0].data(0, FILE) if items else None
+
+    def _pin_of(self, path):
+        return next((p for p in getattr(self.view, "pins", []) if Path(p.path) == Path(path)), None) if self.view else None
+
+    def _track_of(self, path) -> str | None:
+        return next((pr.remote.position for pr in (self.view.pairs if self.view else [])
+                     if pr.local is not None and pr.remote is not None and Path(pr.local.path) == Path(path)), None)
+
+    def _file_on(self, position):
+        return next((pr.local.path for pr in self.view.pairs
+                     if pr.remote is not None and pr.remote.position == position and pr.local is not None), None)
+
+    def _remote(self, position):
+        return next((pr.remote for pr in self.view.pairs if pr.remote is not None and pr.remote.position == position), None)
+
+    def pair(self, path, position: str) -> bool:
+        """Pin `path` to the release track at `position`; swap if that track already has a file. Asks before
+        overriding a disc hold. Returns True when the pair is in place."""
+        v = self.view
+        if v is None or v.album_id is None or not v.fetched:
+            return False
+        path = Path(path)
+        if self._track_of(path) == position:
+            return True
+        other, back = self._file_on(position), self._track_of(path)
+        aid = v.album_id
+        if not self._pin_one(aid, path, position):
+            return False
+        if other is not None and Path(other) != path:
+            if back is not None:             # swap: the other file takes the dragged file's old track
+                self._pin_one(aid, Path(other), back)
+            elif self._pin_of(other) is not None:
+                self.svc.match.unpin(aid, Path(other))
+        self.show_view()
+        return True
+
+    def _pin_one(self, aid, path: Path, position: str) -> bool:
+        before = self._pin_of(path)
+        self.svc.match.pin(aid, path, position, False, self.view.release_id)
+        self.view = self.svc.match.view(aid, self.view.release_id)
+        conflict = next((p for p in self.view.problems if P.kind_of(p) == P.PIN_CONFLICT
+                         and Path(path) in [Path(x) for x in p.paths]), None)
+        if conflict is None:
+            return True
+        rt = self._remote(position)
+        if OVERRIDE_MARK not in conflict.message:     # bad position / two files on one track: shown as a problem
+            return True
+        fd = folder_disc(path)
+        if fd is not None and rt is not None and fd != rt.disc:
+            self._restore(aid, path, before)
+            self.inform("Can't pair across disc folders",
+                        f"{path.name} is in the {path.parent.name} folder, and “{position}” is on disc {rt.disc}. "
+                        "A file can't be paired with another disc's track while it sits in that disc's folder "
+                        "(the album would still be held: tracks would go into another disc's folder). "
+                        "Move the file to the right disc folder first.")
+            return False
+        if not self.confirm("Override the disc hold?",
+                            f"{path.name} is held: the engine can't tell its disc, or its disc's file and track "
+                            f"counts differ.\n\nPair it with “{position}” anyway? The pair is used as you set it "
+                            "and the plan will say a disc hold was overridden."):
+            self._restore(aid, path, before)
+            return False
+        self.svc.match.pin(aid, path, position, True, self.view.release_id)
+        self.view = self.svc.match.view(aid, self.view.release_id)
+        return True
+
+    def _restore(self, aid, path, before):
+        if before is None:
+            self.svc.match.unpin(aid, path)
+        else:
+            self.svc.match.pin(aid, path, before.position, before.override_hold, before.release_id)
+        self.view = self.svc.match.view(aid, self.view.release_id)
+
+    def pair_selected(self, position: str | None = None) -> bool:
+        """Keyboard pairing: the selected file onto a release track chosen from a list."""
+        f = self.selected_file()
+        if not f or self.view is None or not self.view.fetched:
+            return False
+        if position is None:
+            tracks = [pr.remote for pr in self.view.pairs if pr.remote is not None]
+            names = [f"{t.position}  {t.title}" for t in tracks]
+            pick, ok = QInputDialog.getItem(self, "Pair with track", f"Pair {Path(f).name} with:", names, 0, False)
+            if not ok:
+                return False
+            position = tracks[names.index(pick)].position
+        return self.pair(f, position)
+
+    def unpin_selected(self):
+        f = self.selected_file()
+        if f and self.view is not None and self._pin_of(f) is not None:
+            self.svc.match.unpin(self.view.album_id, Path(f))
+            self.show_view()
+
+    # ---------------------------------------------------------------- drops
+    def drop_right(self, path: str, target):
+        """target: a release-track position, or its tree item."""
+        pos = target.data(0, TRACK) if isinstance(target, QTreeWidgetItem) else target
+        if pos:
+            self.pair(path, pos)
+
+    def drop_left(self, path: str, target):
+        """target: a left-pane key (("group", kind) / ("row", id) / ("file", id, path)), or its tree item."""
+        key = target.data(0, KEY) if isinstance(target, QTreeWidgetItem) else target
+        if not key:
             return
-        row = self.svc.library.adopt_cluster(c.id)
-        self.last_find_job = self.svc.match.find([row.id])
+        target = None
+        if key == ("group", "unclustered") or (key[0] in ("row", "file") and
+                                               getattr(self.rows.get(key[1]), "kind", "") == "unclustered"):
+            if self._pin_of(path) is not None:            # pinned: drop the pin, nothing else
+                self.svc.match.unpin(self.view.album_id, Path(path)); self.show_view()
+                return
+        elif key[0] in ("row", "file") and getattr(self.rows.get(key[1]), "kind", "") == "tag_cluster":
+            target = key[1]
+        else:
+            return
+        try:
+            self.svc.library.move_to_cluster(Path(path), target)
+        except Exception as e:        # ValidationError: not a loose file / another folder
+            self.inform("Can't move this file", str(e))
+            return
         self.refresh()
-        self.select(c.id)
+
+    # ---------------------------------------------------------------- adopt / un-adopt / scan
+    def adopt(self):
+        r = self.rows.get(self.current) if self.current else None
+        if r is None or r.kind != "tag_cluster" or r.album_id is not None:
+            return
+        row = self.svc.library.adopt_cluster(r.id)
+        self.last_find_job = self.svc.match.find([row.id])
+        self.refresh(); self.select(r.id)
+
+    def unadopt(self):
+        r = self.rows.get(self.current) if self.current else None
+        if r is None or r.kind != "tag_cluster" or r.album_id is None:
+            return
+        try:
+            c = self.svc.library.unadopt_cluster(r.album_id)
+        except Exception as e:        # MMError: applied once (undo it in History)
+            self.inform("Can't un-adopt", str(e))
+            return
+        self.current = c.id
+        self.refresh(); self.select(c.id)
+
+    def scan_clusters(self):
+        self.last_cluster_job = self.svc.library.scan_clusters()
+        return self.last_cluster_job

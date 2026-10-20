@@ -2,6 +2,8 @@
 (journal.undo_plan -> ApplyDialog -> journal.undo(op, plan_id) -> events.job_finished)."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView, QLabel, QPushButton, QTableWidget,
@@ -40,6 +42,9 @@ class HistoryDialog(QDialog):
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers); self.table.verticalHeader().hide()
         lay.addWidget(self.table, 1)
+        self.manual_label = QLabel(wordWrap=True)          # c2fcf25: journal.manual_pairs of the selected apply
+        self.manual_label.setStyleSheet("color:#1f5fa8"); self.manual_label.hide()
+        lay.addWidget(self.manual_label)
         row = QHBoxLayout()
         self.undo_btn = QPushButton("Preview undo…"); self.undo_btn.setStyleSheet("font-weight:600")
         row.addStretch(); row.addWidget(self.undo_btn)
@@ -95,6 +100,18 @@ class HistoryDialog(QDialog):
     def sync(self):
         op = self.current()
         self.undo_btn.setEnabled(bool(op and op.undoable))
+        lines = self.manual_lines(op) if op is not None else []
+        self.manual_label.setText("<b>Paired by you:</b><br>" + "<br>".join(lines) if lines else "")
+        self.manual_label.setVisible(bool(lines))
+
+    def manual_lines(self, op) -> list[str]:
+        """'03 Lost And Found.flac → 4 (Henry Rollins – Hot Animal Machine)', from journal.manual_pairs."""
+        get = getattr(self.svc.journal, "manual_pairs", None)
+        if get is None or op.kind != "apply":
+            return []
+        import html
+        return [html.escape(f"{Path(m.path).name} → {m.position} ({self.album_name(m.album_id)})"
+                            + (" · disc hold overridden" if m.override_hold else "")) for m in get(op.id)]
 
     def album_name(self, album_id) -> str:
         if not album_id:

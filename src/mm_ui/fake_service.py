@@ -23,6 +23,7 @@ class MatchStatus(Enum):   # values are strings, as in the real service (API-DEV
 
 class JobKind(Enum):
     SCAN = "scan"; MATCH = "match"; FETCH_CANDIDATES = "fetch_candidates"; APPLY = "apply"; UNDO = "undo"
+    CLUSTER = "cluster"     # c2fcf25: library.scan_clusters
 
 
 class JobState(Enum):
@@ -101,6 +102,37 @@ class Cluster:
     files: list[ClusterFile]
     disc_count: int
     album_id: int | None = None
+    kind: str = "tag_cluster"   # c2fcf25: or "unclustered" (files moved out of every cluster; artist/title "")
+
+
+@dataclass(frozen=True)
+class ClusterRow:           # c2fcf25: one line of match.clusters
+    id: str                 # "album-<id>", "cl-…" (tag cluster) or "un-…" (unclustered)
+    kind: str               # "folder" | "tag_cluster" | "unclustered"
+    artist: str
+    title: str
+    file_count: int
+    status: MatchStatus | None
+    album_id: int | None
+    loose_tracks: bool
+    folder: Path
+
+
+@dataclass(frozen=True)
+class Pin:                  # c2fcf25: a manual pair
+    path: Path
+    position: str
+    release_id: int
+    override_hold: bool
+    stale: bool
+
+
+@dataclass(frozen=True)
+class ManualPair:           # c2fcf25: journal.manual_pairs
+    album_id: int
+    path: Path
+    position: str
+    override_hold: bool
 
 
 @dataclass(frozen=True)
@@ -114,6 +146,7 @@ class MatchView:
     unmatched_files: list[LocalTrack]
     unmatched_tracks: list[RemoteTrack]
     problems: list[Problem]
+    pins: list[Pin] = field(default_factory=list)   # c2fcf25: the album's pins for this release
 
 
 @dataclass(frozen=True)
@@ -162,6 +195,7 @@ class TagChange:
 class FileChange:
     kind: str; path_before: Path; path_after: Path; tags: list[TagChange]
     skip_reason: str | None = None     # None means the step runs; skipped steps count toward nothing
+    pinned: bool = False               # c2fcf25: this track was paired by hand (match.pin)
 
 
 class ProblemKind(StrEnum):
@@ -177,6 +211,7 @@ class ProblemKind(StrEnum):
     LAYOUT_AMBIGUOUS = "layout_ambiguous"       # loose audio next to disc folders / other albums; never overridden
     DISC_FOLDER_MISMATCH = "disc_folder_mismatch"   # destination puts tracks in another disc's CD folder; never overridden
     DISC_TRACK_COUNT = "disc_track_count"   # 1566b36: a disc's file/track counts differ, titles don't settle it; never overridden
+    PIN_CONFLICT = "pin_conflict"           # c2fcf25: a manual pin that can't be used (paths: its file)
 # Cross-device moves are not a problem: they are allowed, and every file appears in `files`.
 
 
@@ -333,6 +368,9 @@ class Events(QObject):
     job_finished = Signal(object)
     album_changed = Signal(int)
     candidate_ready = Signal(int, int)
+    clusters_changed = Signal(object)       # c2fcf25: list[str] of current cluster ids
+    cluster_changed = Signal(str, str)      # c2fcf25: old id, new id ("" = gone)
+    match_view_changed = Signal(int)        # c2fcf25: album_id (pins)
     rate_limited = Signal(float)
 
 
