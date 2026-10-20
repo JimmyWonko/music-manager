@@ -72,12 +72,15 @@ def test_move_files_between_clusters_and_back(lib):  # noqa: F811
     assert _loose().track_count == 0
 
 
+@pytest.mark.xfail(strict=True, reason="album_removed not added yet")
 def test_unadopt_restores_the_loose_row_and_refuses_after_apply(lib):  # noqa: F811
     ham = service.library.clusters()[0]
     row = service.library.adopt_cluster(ham.id)
     changed = _record(service.events.clusters_changed)
+    removed, touched = _record(service.events.album_removed), _record(service.events.album_changed)
     back = service.library.unadopt_cluster(row.id)
-    assert back.id == ham.id and back.album_id is None and changed
+    assert back.id == ham.id and back.album_id is None and changed == [[ham.id]]
+    assert removed == [row.id] and row.id not in touched and _loose().id in touched
     assert _loose().track_count == 4
     with pytest.raises(service.NotFound):
         service.library.album(row.id)
@@ -135,6 +138,7 @@ def test_pin_reassigns_a_file_and_flows_into_plan_journal_and_history(lib):  # n
     assert all(f.exists() for f in files)
 
 
+@pytest.mark.xfail(strict=True, reason="PinConflict not added yet")
 def test_bad_pins_are_problems_not_errors(lib):  # noqa: F811
     _root, _artist, files = lib
     row = service.library.adopt_cluster(service.library.clusters()[0].id)
@@ -142,8 +146,13 @@ def test_bad_pins_are_problems_not_errors(lib):  # noqa: F811
     service.match.pin(row.id, files[0], "2")
     service.match.pin(row.id, files[1], "2")
     service.match.pin(row.id, files[2], "9")
-    kinds = [p.kind for p in service.match.view(row.id).problems]
-    assert kinds.count("pin_conflict") == 3  # one per file: two on track 2, one on no track and "track_mismatch" in kinds
+    problems = service.match.view(row.id).problems
+    kinds = [p.kind for p in problems]
+    assert kinds.count("pin_conflict") == 3  # one per file: two on track 2, one on no track
+    causes = sorted((c.path, c.position, c.reason) for p in problems for c in p.pin_conflicts)
+    assert causes == [(files[0], "2", "duplicate_position"), (files[1], "2", "duplicate_position"),
+                      (files[2], "9", "unknown_position")]
+    assert all(p.pin_conflicts == [] for p in problems if p.kind != "pin_conflict") and "track_mismatch" in kinds
     service.match.choose(row.id, HAM_ID)
     assert "pin_conflict" in [p.kind for p in service.plan.build([row.id]).albums[0].problems]
     service.match.unpin(row.id, files[0])
@@ -152,6 +161,7 @@ def test_bad_pins_are_problems_not_errors(lib):  # noqa: F811
     assert service.match.pins(row.id) == [] and service.ProblemKind("pin_conflict") is list(service.ProblemKind)[-1]
 
 
+@pytest.mark.xfail(strict=True, reason="PinConflict not added yet")
 def test_a_pin_overrides_a_held_disc_only_when_asked(lib):  # noqa: F811
     row, files = _adopted_with_mystery(lib)
     assert "disc_track_count" in [p.kind for p in service.match.view(row.id).problems]
@@ -159,6 +169,13 @@ def test_a_pin_overrides_a_held_disc_only_when_asked(lib):  # noqa: F811
     view = service.match.view(row.id)
     kinds = [p.kind for p in view.problems]
     assert "pin_conflict" in kinds and "disc_track_count" in kinds
+    assert [c.reason for p in view.problems for c in p.pin_conflicts] == ["override_hold_required"]
+    service.match.choose(row.id, HAM_ID)
+    plan = service.plan.build([row.id])
+    with pytest.raises(service.MMError):
+        service.plan.apply(plan.id)  # held: the cause survives in held_for
+    held = service.library.album(row.id).held_for
+    assert [c.reason for p in held for c in p.pin_conflicts] == ["override_hold_required"]
     service.match.pin(row.id, files[3], "4", override_hold=True)
     view = service.match.view(row.id)
     assert "disc_track_count" not in [p.kind for p in view.problems]
