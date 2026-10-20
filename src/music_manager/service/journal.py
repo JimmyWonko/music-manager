@@ -347,7 +347,8 @@ def _restore_album(st: State, album_id: int, original: Path) -> None:
         _reindex(st, album_id, root, original, MatchStatus.NEEDS_REVIEW)
     else:
         set_status(album_id, MatchStatus.NEEDS_REVIEW)
-    events.album_changed.emit(album_id)
+    if st.index.one("SELECT id FROM albums WHERE id = ?", (album_id,)) is not None:  # an adopted cluster
+        events.album_changed.emit(album_id)  # undone into its folder is removed (album_removed)
 
 
 def manual_pairs(operation_id: int) -> builtins.list[ManualPair]:

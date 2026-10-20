@@ -8,7 +8,7 @@ from ..fs import AlbumFolder
 from ..match import _disc_from_folder, align_tracks_detailed
 from ..providers.discogs import DiscogsTrack
 from ._state import State
-from ._types import Pin, Problem, ProblemKind
+from ._types import Pin, PinConflict, Problem, ProblemKind
 
 HELD_METHODS = ("ambiguous_disc", "track_count")  # what the engine refuses; a pin overrides it only when asked
 
@@ -64,16 +64,16 @@ def resolve(st: State, album_id: int, release_id: int, album: AlbumFolder, dtrac
     baseline = {p: how for p, _dt, how in align_tracks_detailed(album, dtracks, title_match_min)[0]}
     wanted: dict[int, list[Pin]] = {}
 
-    def refuse(pin: Pin, why: str) -> None:
+    def refuse(pin: Pin, reason: str, why: str) -> None:
         problems.append(Problem(ProblemKind.PIN_CONFLICT, f"Manual pair {pin.path.name} -> {pin.position}: {why}",
-                                [pin.path]))
+                                [pin.path], pin_conflicts=[PinConflict(pin.path, pin.position, reason)]))
 
     for pin in pins:
         i = track_index(pin.position, dtracks)
         if pin.stale or pin.path not in files:
-            refuse(pin, "the file changed since it was paired; pair it again")
+            refuse(pin, "stale", "the file changed since it was paired; pair it again")
         elif i is None:
-            refuse(pin, f"release {release_id} has no track {pin.position}")
+            refuse(pin, "unknown_position", f"release {release_id} has no track {pin.position}")
         else:
             wanted.setdefault(i, []).append(pin)
     usable: dict[Path, int] = {}
@@ -81,14 +81,19 @@ def resolve(st: State, album_id: int, release_id: int, album: AlbumFolder, dtrac
     for i, group in wanted.items():
         if len(group) > 1:
             for pin in group:
-                refuse(pin, f"{len(group)} files are paired with track {pin.position}")
+                refuse(pin, "duplicate_position", f"{len(group)} files are paired with track {pin.position}")
             continue
         pin = group[0]
         folder_disc = _disc_from_folder(pin.path, album.path) if multi else None
-        held = baseline.get(pin.path) in HELD_METHODS or (folder_disc is not None and folder_disc != dtracks[i].disc)
+        wrong_folder = folder_disc is not None and folder_disc != dtracks[i].disc
+        held = baseline.get(pin.path) in HELD_METHODS or wrong_folder
         if held and not pin.override_hold:
-            refuse(pin, "this overrides a disc hold (the file's disc can't be told, its disc's counts differ, "
-                        "or it sits in another disc's folder); pair it again with override_hold=True")
+            if wrong_folder:
+                refuse(pin, "disc_folder_mismatch", f"the file is in the disc {folder_disc} folder, the track is on "
+                       f"disc {dtracks[i].disc}; pair it again with override_hold=True")
+            else:
+                refuse(pin, "override_hold_required", "this overrides a disc hold (the file's disc can't be told "
+                       "or its disc's counts differ); pair it again with override_hold=True")
             continue
         usable[pin.path] = i
         if held:

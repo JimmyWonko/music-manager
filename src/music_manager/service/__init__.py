@@ -46,6 +46,7 @@ from ._types import (
     Operation,
     Page,
     Pin,
+    PinConflict,
     Plan,
     PlanStale,
     Problem,
@@ -65,7 +66,7 @@ from ._types import (
 __all__ = [
     "DISCOGS_CREDIT", "Album", "AlbumFilter", "AlbumPlan", "AlbumRow", "AlbumSort", "AutoRules", "Candidate",
     "Cluster", "ClusterFile", "ClusterRow", "Collision", "ConfigError", "Destination", "DiscChoice", "DiscConflict", "DiscFolderMismatch", "Events", "FileChange", "Job", "JobKind", "JobState", "LayoutConflict", "LocalTrack",
-    "MMError", "ManualPair", "MatchStatus", "MatchView", "NotFound", "Operation", "Page", "Pin", "Plan", "PlanStale", "Problem",
+    "MMError", "ManualPair", "MatchStatus", "MatchView", "NotFound", "Operation", "Page", "Pin", "PinConflict", "Plan", "PlanStale", "Problem",
     "ProblemKind",
     "ProviderCredit", "ProviderError", "RemoteTrack", "ScorePart", "Settings", "TagChange", "Template",
     "TemplatePreview", "TrackPair", "ValidationError", "configure", "events", "jobs", "journal", "library", "match",

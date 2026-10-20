@@ -62,7 +62,8 @@ def test_module_surface_matches_the_contract():
     }.items():
         for name in names:
             assert callable(getattr(getattr(service, ns), name)), f"{ns}.{name}"
-    for sig in ("job_progress", "job_finished", "album_changed", "candidate_ready", "rate_limited"):
+    for sig in ("job_progress", "job_finished", "album_changed", "candidate_ready", "rate_limited", "album_removed",
+                "clusters_changed", "cluster_changed", "match_view_changed"):
         assert hasattr(service.events, sig)
     for name in ("AlbumFilter", "AlbumSort", "MatchStatus", "JobState", "JobKind", "MMError", "ValidationError",
                  "NotFound", "PlanStale", "ProviderError", "ConfigError", "Page", "Plan", "AlbumPlan", "FileChange",
@@ -80,6 +81,9 @@ def test_types_are_frozen_with_the_contract_fields_and_defaults():
                                        "confidence", "artwork", "artist_sort", "added_at", "held_for",
                                        "loose_tracks", "cluster_id"]  # cluster_id: additive, default None
     assert names(service.Album)[-2:] == ["tracks", "extras"]
+    assert names(service.Problem) == ["kind", "message", "paths", "disc_conflicts", "layout_reason", "blocking_subdirs",
+                                      "loose_files", "folder_mismatches", "pin_conflicts"]  # each one appended
+    assert names(service.PinConflict) == ["path", "position", "reason"]
     assert names(service.Plan) == ["id", "albums", "warnings", "files_to_move", "tags_to_write", "bytes_to_copy",
                                    "skipped", "fetch_job"]  # fetch_job: additive, defaults to None
     assert dataclasses.fields(service.Plan)[-1].default is None

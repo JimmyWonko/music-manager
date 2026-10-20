@@ -358,7 +358,7 @@ def _reindex(st: State, album_id: int, root: Path, folder: Path, status: MatchSt
             st.index.delete_fts(conn, album_id)
         if found is not None:
             index_album(st, root, found, album_id=other["id"])
-        events.album_changed.emit(album_id)
+        events.album_removed.emit(album_id)
         events.album_changed.emit(other["id"])
         return
     if found is not None:

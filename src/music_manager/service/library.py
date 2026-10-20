@@ -99,7 +99,8 @@ def _drop_vanished(st: State, root: Path, seen: set[str]) -> int:
             conn.execute("DELETE FROM albums WHERE id = ?", (album_id,))
             st.index.delete_fts(conn, album_id)
     for album_id in gone:
-        events.album_changed.emit(album_id)
+        events.album_changed.emit(album_id)  # kept for older slots
+        events.album_removed.emit(album_id)
     return len(gone)
 
 
@@ -614,7 +615,7 @@ def unadopt_cluster(album_id: int) -> Cluster:
     with st.index.tx() as conn:
         conn.execute("DELETE FROM albums WHERE id = ?", (int(album_id),))
         st.index.delete_fts(conn, int(album_id))
-    events.album_changed.emit(int(album_id))
+    events.album_removed.emit(int(album_id))
     _refresh_loose(st, folder)
     found = _in_folder(st, folder)
     back = next((c for c in found if paths and any(f.path == paths[0] for f in c.files)), None)
@@ -683,7 +684,10 @@ def move_to_cluster(file: Path, cluster_id: str | None) -> Cluster:
     if cg and (target is None or target.album_id is None):
         _refresh_loose(st, folder)
     for aid in {owner["id"], target.album_id if target is not None else None} - {None}:
-        events.album_changed.emit(aid)
+        if st.index.one("SELECT id FROM albums WHERE id = ?", (aid,)) is None:
+            events.album_removed.emit(aid)  # an adopted cluster left empty
+        else:
+            events.album_changed.emit(aid)
     after = _in_folder(st, folder)
     now = _holding(after, path)
     if now is None:

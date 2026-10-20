@@ -16,6 +16,7 @@ from ._types import (
     LocalTrack,
     MatchStatus,
     NotFound,
+    PinConflict,
     Problem,
     ProblemKind,
 )
@@ -70,6 +71,9 @@ def problems_to_json(problems: list[Problem]) -> str:
             item["folder_mismatches"] = [{"path": str(m.path), "destination": str(m.destination),
                                           "folder": str(m.folder), "folder_disc": m.folder_disc,
                                           "tag_disc": m.tag_disc} for m in p.folder_mismatches]
+        if p.pin_conflicts:
+            item["pin_conflicts"] = [{"path": str(c.path), "position": c.position, "reason": c.reason}
+                                     for c in p.pin_conflicts]
         out.append(item)
     return json.dumps(out, ensure_ascii=False)
 
@@ -103,6 +107,8 @@ def problems_from_json(text: str | None) -> list[Problem]:
             folder_mismatches=[DiscFolderMismatch(Path(m["path"]), Path(m["destination"]), Path(m["folder"]),
                                                   int(m["folder_disc"]), int(m["tag_disc"]))
                                for m in item.get("folder_mismatches", [])],
+            pin_conflicts=[PinConflict(Path(c["path"]), c.get("position", ""), c.get("reason", "stale"))
+                           for c in item.get("pin_conflicts", [])],
         ))
     return out
 

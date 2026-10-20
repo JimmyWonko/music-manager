@@ -144,6 +144,22 @@ class ProviderCredit:
 DISCOGS_CREDIT = ProviderCredit("Discogs", "Data provided by Discogs", "https://www.discogs.com/")
 
 
+PinConflictReason = Literal["stale", "unknown_position", "duplicate_position", "override_hold_required",
+                            "disc_folder_mismatch"]
+
+
+@dataclass(frozen=True)
+class PinConflict:
+    """Why one manual pin (match.pin) is not used."""
+    path: Path
+    position: str  # as pinned
+    # stale: the file changed or left the album since it was pinned; unknown_position: not on the release;
+    # duplicate_position: another pin names the same track; override_hold_required: the engine holds this
+    # file (disc_ambiguous / disc_track_count); disc_folder_mismatch: the file sits in another disc's CD
+    # folder. The last two are used with override_hold=True.
+    reason: PinConflictReason
+
+
 @dataclass(frozen=True)
 class Problem:
     kind: ProblemKind
@@ -157,6 +173,8 @@ class Problem:
     loose_files: list[Path] = field(default_factory=list)  # the audio files directly in the album folder
     # DISC_FOLDER_MISMATCH: one per track the destination puts into another disc's CD folder (same files as paths).
     folder_mismatches: list[DiscFolderMismatch] = field(default_factory=list)
+    # PIN_CONFLICT: one per refused pin (the same files as paths).
+    pin_conflicts: list[PinConflict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
