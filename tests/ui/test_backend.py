@@ -493,8 +493,13 @@ CONTRACT = Path(os.environ.get("MM_TEST_CONTRACT", "/workspace/mm-fix/API-CONTRA
 
 
 def _contract_code():
+    """The contract's python blocks, plus prose field additions such as "`AlbumRow.cluster_id: str | None = None`
+    (additive, last field)" (c334bbf) written as a partial `class X: ...; field: T` block."""
     import re
-    return "\n".join(re.findall(r"```python\n(.*?)```", CONTRACT.read_text(), re.S))
+    text = CONTRACT.read_text()
+    prose = [f"class {c}: ...; {f}: {t}" for c, f, t in
+             re.findall(r"`(\w+)\.(\w+): ([^`]+)`\s*\(additive, last field\)", text)]
+    return "\n".join(re.findall(r"```python\n(.*?)```", text, re.S) + prose)
 
 
 def _contract_classes(code, with_partial=False):
@@ -542,8 +547,10 @@ def test_mock_types_match_contract_exactly():
     import mm_ui.fake_service as T
     classes, partial = _contract_classes(_contract_code(), with_partial=True)
     assert {"AlbumSort", "Destination", "Template", "TemplatePreview", "Collision", "Settings"} <= set(classes)
-    assert classes["AlbumRow"][1][-4:] == ["artist_sort", "added_at", "held_for", "loose_tracks"]   # d6ac2f3
-    assert classes["Album"][1][-3:] == ["loose_tracks", "tracks", "extras"]
+    assert classes["AlbumRow"][1][-3:] == ["held_for", "loose_tracks", "cluster_id"]   # d6ac2f3, c334bbf
+    assert classes["Album"][1][-3:] == ["cluster_id", "tracks", "extras"]
+    assert classes["Cluster"][1][-1] == "album_id" and classes["MatchView"][1][-1] == "problems"   # c334bbf
+    assert classes["ClusterFile"][1] == ["path", "disc", "number", "title", "duration_s", "album", "artist"]
     assert classes["FileChange"][1][-1] == "skip_reason" and classes["Plan"][1][-2:] == ["skipped", "fetch_job"]
     assert "RELEASE_NOT_FETCHED" in classes["ProblemKind"][1]
     assert T.MatchStatus.HELD.value == "held"

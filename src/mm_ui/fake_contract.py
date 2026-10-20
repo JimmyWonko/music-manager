@@ -31,7 +31,8 @@ from . import fake_service as T
 from .fake_service import (Album, AlbumFilter, AlbumPlan, AlbumRow, AlbumSort, Collision, Destination,
                            FakeService, FileChange, Job, JobKind, JobState, LIBRARY_ROOT, MatchStatus, NotFound,
                            Operation, Page, Plan, PlanStale, Problem, ProblemKind, MMError, Settings, TagChange, Template,
-                           TemplatePreview, ValidationError)
+                           TemplatePreview, ValidationError, Cluster, ClusterFile, MatchView, LocalTrack, Candidate,
+                           ScorePart, DISCOGS, SCANNED_AT)
 
 SYNTH_ROOT = Path("/mock/synthetic")   # synthetic padding rows (absolute, fake, never touched)
 SYNTH_BASE = 10_000_000                # synthetic album ids start here
@@ -242,7 +243,7 @@ class FakeContract:
         self.types = _NS(**{n: getattr(T, n) for n in (
             "AlbumFilter", "AlbumSort", "MatchStatus", "JobState", "JobKind", "Job", "Page", "Template",
             "TemplatePreview", "Collision", "Destination", "Settings", "Operation", "AutoRules", "Problem", "ProblemKind", "AlbumPlan", "Plan", "MMError", "NotFound",
-            "PlanStale", "ValidationError", "ProviderError", "ConfigError")})
+            "PlanStale", "ValidationError", "ProviderError", "ConfigError", "Cluster", "ClusterFile", "MatchView")})
         self._ids = itertools.count(100_000)
         self._jobs: dict[int, Job] = {}
         self._plans: dict[int, Plan] = {}
@@ -253,8 +254,11 @@ class FakeContract:
         self._settings = Settings(library_roots=[LIBRARY_ROOT, SYNTH_ROOT], active_template="archivist")
         self._syn_cache: dict[tuple, tuple[list, list[int]]] = {}
         self.library = _NS(albums=self._albums, status_counts=self._status_counts, album=self._album,
-                           search=self._search, scan=self._scan)
-        self.match = _NS(find=self._find, candidates=self._candidates, choose=self.fake.choose,
+                           search=self._search, scan=self._scan, clusters=self._clusters_list,
+                           cluster=self._cluster, adopt_cluster=self._adopt_cluster)
+        self._clusters: dict[str, Cluster] = {}         # the last clusters() call + adopted ones
+        self._pending_cands: dict[int, list] = {}       # adopted cluster -> candidates match.find will "find"
+        self.match = _NS(view=self._view, find=self._find, candidates=self._candidates, choose=self.fake.choose,
                          destination=self._destination, skip=self.fake.skip, manual=self._manual,
                          auto_rules=lambda: T.AutoRules(), auto_accept=self._auto_accept)
         self.provider = _NS(submit_link=self.fake.submit_link)
@@ -432,7 +436,117 @@ class FakeContract:
         return self._finish(JobKind.SCAN, lambda: "mock: scan is a no-op")
 
     def _find(self, album_ids) -> Job:
+        for aid in [a for a in album_ids if a in self._pending_cands]:     # an adopted cluster: search now
+            self.fake._cands[aid] = self._pending_cands.pop(aid)
+            self.fake._fetch_queue += [(aid, c.release_id) for c in self.fake._cands[aid][:1]]
+            self.fake._set(aid, status=MatchStatus.NEEDS_REVIEW, confidence=self.fake._cands[aid][0].score)
+            self.fake._timer.start()
         return self._finish(JobKind.MATCH, lambda: "mock: candidates are pre-seeded")
+
+    # ================================================================ clustering (c334bbf)
+    @staticmethod
+    def _cluster_key(paths) -> str:
+        import hashlib
+        return "cl-" + hashlib.sha1("\n".join(sorted(map(str, paths))).encode()).hexdigest()[:12]
+
+    def _cluster_of(self, tracks, folder: Path, album_id=None) -> Cluster:
+        tags = self.fake._file_tags
+        files = [ClusterFile(t.path, t.disc or 1, t.number, t.title, t.duration_s, *reversed(tags.get(t.path, ("", ""))))
+                 for t in sorted(tracks, key=lambda t: str(t.path))]
+        common = lambda xs, d: max(set(xs), key=xs.count) if any(xs) else d   # noqa: E731
+        return Cluster(self._cluster_key([f.path for f in files]), common([f.artist for f in files if f.artist], folder.name),
+                       common([f.album for f in files if f.album], folder.name), folder, files,
+                       len({f.disc for f in files}), album_id)
+
+    def _clusters_list(self, paths=None) -> list[Cluster]:
+        """MOCK of library.clusters: loose-tracks albums' files grouped by album tag, folder by folder (paths:
+        exactly those files, together), plus every adopted cluster."""
+        albums = [a for a in self.fake._albums.values()]
+        if paths is not None:
+            by_path = {t.path: t for a in albums for t in a.tracks}
+            if not paths or any(Path(str(x)) not in by_path for x in paths):
+                raise ValidationError("paths: audio files inside a library root", field="paths")
+            tracks = [by_path[Path(str(x))] for x in paths]
+            parents = {t.path.parent for t in tracks}
+            out = [self._cluster_of(tracks, parents.pop() if len(parents) == 1 else LIBRARY_ROOT)]
+        else:
+            out = []
+            for a in albums:
+                if getattr(a, "loose_tracks", False):
+                    groups: dict[str, list] = {}
+                    for t in a.tracks:
+                        groups.setdefault(self.fake._file_tags.get(t.path, ("", ""))[1].casefold(), []).append(t)
+                    out += [self._cluster_of(g, a.folder) for g in groups.values()]
+                elif getattr(a, "cluster_id", None) and a.cluster_id in self._clusters:
+                    out.append(replace(self._clusters[a.cluster_id], album_id=a.id))
+        adopted = {c.id: c for c in self._clusters.values() if c.album_id is not None}
+        self._clusters = adopted | {c.id: c for c in out}
+        return sorted(out, key=lambda c: (str(c.folder), str(c.files[0].path) if c.files else ""))
+
+    def _cluster(self, cluster_id: str) -> Cluster:
+        try:
+            return self._clusters[cluster_id]
+        except KeyError:
+            raise NotFound(f"cluster {cluster_id}") from None
+
+    def _adopt_cluster(self, cluster_id: str) -> AlbumRow:
+        """MOCK of library.adopt_cluster: index only. The cluster becomes an UNMATCHED album holding exactly its
+        files (no sidecars or cover art); they leave their loose-tracks row. Idempotent."""
+        c = self._cluster(cluster_id)
+        if c.album_id is not None:
+            return self.fake.album(c.album_id)
+        fk = self.fake
+        mine = {f.path for f in c.files}
+        owner = next((a for a in fk._albums.values() if mine & {t.path for t in a.tracks}), None)
+        tracks = [t for t in (owner.tracks if owner else []) if t.path in mine]
+        aid = next(fk._ids)
+        fk._albums[aid] = Album(aid, c.folder, c.artist, c.title, "", "", len(tracks), MatchStatus.UNMATCHED, None,
+                                None, c.artist, SCANNED_AT + timedelta(minutes=aid), [], cluster_id=c.id,
+                                tracks=tracks, extras=[])
+        parts = [ScorePart("album", .40, 1.0, c.title, c.title, True), ScorePart("artist", .35, 1.0, c.artist, c.artist, True)]
+        fk._cands[aid] = []
+        self._pending_cands[aid] = [Candidate(next(fk._rid), None, c.artist, c.title, "1987", "US", "Mock Label", "X-1",
+                                              ["CD"], 0.91, None, parts, None, None, None, None, False, DISCOGS,
+                                              auto_score=0.91)]
+        self._clusters[c.id] = replace(c, album_id=aid)
+        if owner is not None:
+            rest = [t for t in owner.tracks if t.path not in mine]
+            fk._set(owner.id, tracks=rest, track_count=len(rest))
+        fk.events.album_changed.emit(aid)
+        return fk._albums[aid]
+
+    def _view(self, album_or_cluster_id, release_id=None) -> MatchView:
+        """MOCK of match.view: read-only, never fetches."""
+        cid = None
+        if isinstance(album_or_cluster_id, str):
+            c = self._cluster(album_or_cluster_id)
+            cid = c.id
+            if c.album_id is None:
+                files = [LocalTrack(0, f.path, f.disc, f.number, f.title, f.duration_s) for f in c.files]
+                return MatchView(None, cid, None, False, [], [], files, [], [])
+            album_or_cluster_id = c.album_id
+        aid = int(album_or_cluster_id)
+        a = self._album(aid)
+        cid = cid or getattr(a, "cluster_id", None)
+        cands = self._candidates(aid)
+        if release_id is not None and release_id not in [x.release_id for x in cands]:
+            raise NotFound(f"release {release_id} is not a candidate of album {aid}")
+        chosen = self.fake._chosen.get(aid)
+        rid = release_id or (chosen if chosen in [x.release_id for x in cands] else None) or (
+            cands[0].release_id if cands else None)
+        cand = next((x for x in cands if x.release_id == rid), None)
+        if cand is None:
+            return MatchView(aid, cid, None, False, [], [], list(a.tracks), [], [])
+        if not cand.fetched or not cand.alignment:
+            return MatchView(aid, cid, rid, False, cands, [], list(a.tracks), [], [])
+        pairs = list(cand.alignment)
+        try:
+            problems = list(self._destination(aid, rid, None).problems)
+        except MMError:
+            problems = []
+        return MatchView(aid, cid, rid, True, cands, pairs,
+                         [x.local for x in pairs if x.local is not None and x.remote is None],
+                         [x.remote for x in pairs if x.remote is not None and x.local is None], problems)
 
     def _manual(self, album_id: int, release_id_or_url: str) -> Job:
         if album_id < SYNTH_BASE and self.fake.album(album_id).status == MatchStatus.HELD:
@@ -619,6 +733,13 @@ class FakeContract:
                 Problem(ProblemKind.TRACK_MISMATCH,
                         f"Discogs lists {ewb.track_count + 1} tracks, folder has {ewb.track_count}", [ewb.folder])]
 
+    def _nesting(self, album, dst: Path, root: Path) -> list[Problem]:
+        # An adopted cluster moves only its own files (Bassline, after c334bbf): its folder is just their
+        # common parent, so a destination below it is not nesting the album inside itself.
+        if getattr(album, "cluster_id", None):
+            return []
+        return self._nesting_problems(album.folder, dst, root)
+
     @staticmethod
     def _nesting_problems(src: Path, dst: Path, root: Path) -> list[Problem]:
         out = []
@@ -655,7 +776,7 @@ class FakeContract:
         problems += [Problem(ProblemKind.COLLISION, f"Two files would get the same name: {c.target.name}", [c.target])
                      for c in self._collisions({album_id: (folder, files)}) if c.album_ids == [album_id]]
         root = self._root_for(album.folder)
-        problems += self._nesting_problems(album.folder, folder, root) + self.mock_problems.get(album_id, [])
+        problems += self._nesting(album, folder, root) + self.mock_problems.get(album_id, [])
         problems += (self._disc_ambiguous(album, cand) + self._disc_track_count(album, cand)
                      + self._disc_folder_mismatch(album, cand, files))
         return Destination(root, folder, files if cand.fetched else [], problems)
@@ -753,7 +874,7 @@ class FakeContract:
         for aid, (album, cand, folder, files) in layouts.items():
             problems = (self._layout_ambiguous(album)                       # never overridden
                         + collided.get(aid, []) + self._occupied_problems(aid, folder, targets)
-                        + self._nesting_problems(album.folder, folder, self._root_for(album.folder))
+                        + self._nesting(album, folder, self._root_for(album.folder))
                         + [p for p in self.mock_problems.get(aid, [])
                            if not (p.kind == ProblemKind.TRACK_MISMATCH and aid in allow_track_mismatch)]
                         + self._disc_ambiguous(album, cand)            # never overridden

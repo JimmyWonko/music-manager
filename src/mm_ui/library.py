@@ -107,7 +107,7 @@ class LibraryModel(QAbstractTableModel):
         if c in (0, 1) and role in (Qt.DisplayRole, Qt.ToolTipRole):
             artist, title = self.layout.names(r)
             if role == Qt.DisplayRole:
-                return artist if c == 0 else title
+                return artist if c == 0 else title + P.badge(r)
             tip = self.layout.tooltip(r)
             return tip.lstrip("\n") or None
         if role == Qt.DisplayRole:
@@ -149,10 +149,12 @@ class LibraryWindow(QMainWindow):
         self.status.addItems(STATUS_FILTERS)          # item text gets "(count)" appended
         self.match_btn = QPushButton("Find Discogs matches for selected")
         self.review_btn = QPushButton("Open review queue")
+        self.clusters_btn = QPushButton("Clusters & matching")
+        self.clusters_btn.setToolTip("Loose files grouped by album tag, and how they line up with a Discogs release")
         self.desc_btn = QToolButton(text="Descending", checkable=True)
         self.desc_btn.setToolTip("Reverse the sort column (ties stay in folder order)")
         top = QHBoxLayout(); top.addWidget(self.search, 1); top.addWidget(self.status); top.addWidget(self.desc_btn)
-        top.addWidget(self.match_btn); top.addWidget(self.review_btn)
+        top.addWidget(self.match_btn); top.addWidget(self.review_btn); top.addWidget(self.clusters_btn)
         self.model = LibraryModel(svc)
         self.view = QTableView(); self.view.setModel(self.model)
         self.view.setSelectionBehavior(QTableView.SelectRows)
@@ -184,6 +186,7 @@ class LibraryWindow(QMainWindow):
         self.model.modelReset.connect(self.fit_rows); self.model.rowsInserted.connect(self.fit_rows)
         self.search.textChanged.connect(self.reload); self.status.currentIndexChanged.connect(self.reload)
         self.review_btn.clicked.connect(self.open_review)
+        self.clusters_btn.clicked.connect(self.open_match)
         self.match_btn.clicked.connect(self.find_selected)
         svc.events.job_finished.connect(self.on_job_finished)
         self.hint = QLabel(wordWrap=True); self.hint.setStyleSheet("color:#8a6d00")
@@ -293,6 +296,10 @@ class LibraryWindow(QMainWindow):
              + 2 * v.frameWidth() + (v.horizontalScrollBar().sizeHint().height()
                                      if v.horizontalScrollBar().isVisible() else 0))
         v.setMaximumHeight(h if not self.model.canFetchMore(QModelIndex()) else 16777215)
+
+    def open_match(self):
+        from .match import MatchWindow
+        self._match = MatchWindow(self.svc); self._match.show()
 
     def open_review(self):
         from .review import ReviewWindow

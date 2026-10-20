@@ -153,7 +153,7 @@ class AlbumListModel(QAbstractListModel):
         a = self.rows[idx.row()]
         if role == Qt.DisplayRole:
             conf = f"{a.confidence:.0%}" if a.confidence is not None else "—"
-            return self.layout.label(a) + f"   {conf}" + ("   ⚠ Needs a look" if is_held(a) else "")
+            return self.layout.label(a) + P.badge(a) + f"   {conf}" + ("   ⚠ Needs a look" if is_held(a) else "")
         if role == Qt.ForegroundRole:
             return QBrush(QColor(STATUS_COLOR.get(a.status.name, "#000")))
         if role == Qt.ToolTipRole:
@@ -892,6 +892,17 @@ class ApplyDialog(QDialog):
             lay.addWidget(self.warnings_label)
         else:
             self.warnings_label.hide()
+        # Adopted clusters (c334bbf): only the cluster's own audio files move; its folder is just their
+        # common parent, and covers / other files there stay put.
+        self.cluster_label = QLabel(wordWrap=True)
+        rows = [] if undo or self._row is None else [(ap, self._row(ap.album_id)) for ap in self.clean_aps]
+        notes = [P.cluster_note(ap, r, name(ap)) for ap, r in rows if r is not None and getattr(r, "cluster_id", None)]
+        if notes:
+            self.cluster_label.setText("<br>".join(notes))
+            self.cluster_label.setStyleSheet("color:#555")
+            lay.addWidget(self.cluster_label)
+        else:
+            self.cluster_label.hide()
         self.problems = P.all_problems(plan)
         self.legacy = [p for p in self.problems if P.kind_of(p) == P.LEGACY]
         self.blocking = self.legacy if undo else [p for ap in self.held_aps for p in ap.problems]

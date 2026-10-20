@@ -82,6 +82,41 @@ class Candidate:
 
 
 @dataclass(frozen=True)
+class ClusterFile:          # c334bbf, contract "Clustering and album match view (2026-10-20)"
+    path: Path
+    disc: int               # DISCNUMBER tag, else CD folder / "2-01" name, else 1
+    number: int | None
+    title: str
+    duration_s: float | None
+    album: str              # the file's own album tag ("" if none); what it was clustered by
+    artist: str             # its albumartist tag, else artist tag
+
+
+@dataclass(frozen=True)
+class Cluster:
+    id: str                 # "cl-" + 12 hex chars, a hash of its file paths: same files, same id
+    artist: str
+    title: str
+    folder: Path            # the files' common parent folder
+    files: list[ClusterFile]
+    disc_count: int
+    album_id: int | None = None
+
+
+@dataclass(frozen=True)
+class MatchView:
+    album_id: int | None    # None: a cluster not adopted yet
+    cluster_id: str | None
+    release_id: int | None
+    fetched: bool           # else pairs / unmatched_tracks are empty and every file is unmatched
+    candidates: list[Candidate]
+    pairs: list[TrackPair]
+    unmatched_files: list[LocalTrack]
+    unmatched_tracks: list[RemoteTrack]
+    problems: list[Problem]
+
+
+@dataclass(frozen=True)
 class AutoRules:
     min_score: float = 0.90             # AUTO_MIN_SCORE
     min_margin: float = 0.10            # AUTO_MIN_MARGIN, lead over the runner-up
@@ -97,6 +132,7 @@ class AlbumRow:
     added_at: datetime      # when a scan first saw this folder (timezone-aware UTC); ADDED sorts by it
     held_for: list          # list[Problem]; empty unless status is HELD
     loose_tracks: bool = False   # d6ac2f3: loose audio next to subfolders with audio (artist = folder name, title "")
+    cluster_id: str | None = None  # c334bbf: set when this album is an adopted cluster (library.adopt_cluster)
 
 
 @dataclass(frozen=True)
@@ -605,6 +641,7 @@ class FakeService(QObject):
         self._layout_problems: dict[int, tuple] = {}       # MOCK: (layout_problem, reason, subfolders) (68cf4d7)
         self._sidecars: dict[int, dict] = {}               # MOCK: album -> {file: (cue/m3u, its disc)}
         self._tracklists: dict[int, list[RemoteTrack]] = {}   # MOCK: releases with an explicit (multi-disc) tracklist
+        self._file_tags: dict[Path, tuple[str, str]] = {}   # MOCK: file -> (artist, album) tags, for clustering
         self._rid = rid
         self._tid = tid
         self._timer = QTimer(self)
@@ -703,6 +740,22 @@ class FakeService(QObject):
                                              layout_reason="album_folders", blocking_subdirs=["Bonus"])
         ids["bonus_dir"] = self.add_layout_album(zen / "Bonus", "", "Bonus", "", "", ["01 Outtake"], candidate=False)
         return ids
+
+    def add_loose_cluster_demo(self) -> dict[str, int]:
+        """MOCK of the contract's clustering example: Henry Rollins/ holds loose files tagged for two albums next
+        to an album folder, so the folder is loose tracks (held) and library.clusters() splits it in two."""
+        art = LIBRARY_ROOT / "Henry Rollins"
+        sub = "[1987]  Hot Animal Machine [TXH 0002]"
+        files = ["01 Black And White", "02 Followed Around", "03 Lost And Found", "05 There's A Man Outside"]
+        aid = self.add_layout_album(art, "Henry Rollins", "", "", "", files[:3] + ["01 Gone Fishin'"],
+                                    STRAY_AUDIO.format(folders=f"{sub}/"), candidate=False,
+                                    layout_reason="album_folders", blocking_subdirs=[sub])
+        for t in self._albums[aid].tracks:
+            self._file_tags[t.path] = (("Rollins Band", "Life Time") if "Gone" in t.title
+                                       else ("Henry Rollins", "Hot Animal Machine"))
+        real = self.add_layout_album(art / sub, "Henry Rollins", "Hot Animal Machine (2CD)", "1987", "TXH 0002",
+                                     ["01 Black And White"])
+        return {"loose": aid, "album": real}
 
     def layout_problem(self, album_id: int) -> str:
         """AlbumFolder.layout_problem of a mock album ("" when the layout is fine)."""

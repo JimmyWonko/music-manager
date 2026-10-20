@@ -956,3 +956,67 @@ def test_real_disc_track_count_medley_held_and_shown(real, qtbot):
     a = svc.library.album(row.id)
     assert a.status.name == "HELD" and "disc_track_count" in {q.kind.value for q in a.held_for}
     assert _tree(folder) == before
+
+
+# ---------------------------------------------------------------- clustering + Match window (c334bbf)
+def _tagged(path: Path, artist: str, album: str, title: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "1",
+                    "-metadata", f"artist={artist}", "-metadata", f"album={album}", "-metadata", f"title={title}",
+                    "-y", str(path)], check=True)
+
+
+def _rollins(real):
+    """The contract's clustering example: loose files of two albums next to an album folder."""
+    svc, lib, dg = real["svc"], real["lib"], real["discogs"]
+    art = lib / "Henry Rollins"
+    for i, t in enumerate(["Black And White", "Followed Around", "Lost And Found"], 1):
+        _tagged(art / f"{i:02d} {t}.mp3", "Henry Rollins", "Hot Animal Machine", t)
+    _tagged(art / "01 Gone Fishin'.mp3", "Rollins Band", "Life Time", "Gone Fishin'")
+    tone(art / "[1987]  Hot Animal Machine [TXH 0002]" / "01 Black And White.flac")
+    (art / "cover.jpg").write_bytes(b"\xff\xd8\xff")
+    dg.releases[901] = release(901, "Henry Rollins", "Hot Animal Machine", 1987, "TXH 0002",
+                               ["Black And White", "Followed Around", "Lost And Found"])
+    job = svc.library.scan()
+    assert svc._c.jobs.wait(job.id).state.name == "DONE"
+    return art
+
+
+def test_real_clusters_adopt_and_match_window(real, qtbot, monkeypatch):
+    from mm_ui import problems as P
+    from mm_ui.match import FETCHING, KEY, MatchWindow
+    svc = real["svc"]
+    art = _rollins(real)
+    w = MatchWindow(svc); qtbot.addWidget(w)
+    groups, loose = w.left.topLevelItem(0), w.left.topLevelItem(1)
+    assert groups.child(0).text(0) == "Henry Rollins – Hot Animal Machine" and groups.child(0).childCount() == 3
+    assert loose.child(0).text(0) == "01 Gone Fishin'.mp3"
+    cid = groups.child(0).data(0, KEY)[1]
+    assert cid.startswith("cl-") and len(cid) == 15
+    w.select(cid)
+    assert w.view.album_id is None and len(w.view.unmatched_files) == 3 and w.adopt_btn.isEnabled()
+    w.adopt()
+    assert svc._c.jobs.wait(w.last_find_job.id).state.name == "DONE"
+    qtbot.waitUntil(lambda: w.view is not None and w.view.album_id is not None and bool(w.view.candidates), timeout=5000)
+    aid = w.view.album_id
+    assert svc.library.album(aid).cluster_id == cid and w.item_for(cid).text(0).endswith(f"[{P.CLUSTER_BADGE}]")
+    if not w.view.fetched:
+        assert w.fetch_label.text() == FETCHING and not w.fetch_label.isHidden()
+    svc.match.choose(aid, 901)
+    plan = svc.plan.build([aid])
+    if plan.fetch_job is not None:
+        assert svc._c.jobs.wait(plan.fetch_job.id if hasattr(plan.fetch_job, "id") else plan.fetch_job).state.name == "DONE"
+        plan = svc.plan.build([aid])
+    qtbot.waitUntil(lambda: w.view.fetched, timeout=5000)
+    assert w.fetch_label.isHidden()
+    rel = w.tracks.topLevelItem(0)
+    assert rel.text(1).startswith("Release tracks (3)")
+    assert [rel.child(i).text(3) for i in range(3)] == ["01 Black And White.mp3", "02 Followed Around.mp3",
+                                                        "03 Lost And Found.mp3"]
+    # apply dialog: only the cluster's files move, out of their common folder; the cover stays
+    from mm_ui.review import ApplyDialog
+    assert not plan.albums[0].problems, plan.albums[0].problems
+    dlg = ApplyDialog(plan, album_row=svc.library.album); qtbot.addWidget(dlg)
+    assert "is a cluster: only its 3 file(s) move" in dlg.cluster_label.text()
+    assert str(art) in dlg.cluster_label.text() and P.NON_AUDIO_STAYS in dlg.cluster_label.text()
+    assert all(Path(f.path_before).parent == art for f in plan.albums[0].files)

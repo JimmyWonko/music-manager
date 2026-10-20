@@ -9,6 +9,8 @@ Decisions (21:44 PT):
 """
 from __future__ import annotations
 
+import html
+
 import re as _re
 from pathlib import Path
 
@@ -516,3 +518,23 @@ def status_summary(counts: dict) -> str:
     known = [(STATUS_WORDS[k], c[k]) for k in STATUS_WORDS if c.get(k)]
     other = [(k.replace("_", " ").lower(), n) for k, n in c.items() if k not in STATUS_WORDS and n]
     return " · ".join(f"{n:,} {w}" for w, n in known + other)
+
+
+# --- clusters (c334bbf) ---------------------------------------------------------------------------------
+CLUSTER_BADGE = "cluster"
+NON_AUDIO_STAYS = "Covers and other non-audio files stay in the original folder."
+
+
+def badge(row) -> str:
+    """The "[cluster]" badge for an adopted cluster (AlbumRow.cluster_id set); empty otherwise."""
+    return f"  [{CLUSTER_BADGE}]" if getattr(row, "cluster_id", None) else ""
+
+
+def cluster_note(ap, row, name: str) -> str:
+    """Apply-dialog note for an adopted cluster: only its own files move, from their common parent folder
+    to the template's destination; everything else in that folder stays."""
+    n = len([f for f in ap.files if getattr(f, "kind", "track") == "track"]) or len(ap.files)
+    src = getattr(ap, "folder_before", None) or getattr(row, "folder", "")
+    dst = getattr(ap, "folder_after", None)
+    return (f"ℹ <b>{html.escape(name)}</b> is a cluster: only its {n} file(s) move, from "
+            f"{html.escape(str(src))}/ (their common folder) to {html.escape(str(dst))}/. {NON_AUDIO_STAYS}")
