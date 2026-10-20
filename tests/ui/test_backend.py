@@ -512,24 +512,10 @@ def _without_pending(text: str) -> str:
 
 
 def _contract_code():
-    """The contract's python blocks, plus prose field additions such as "`AlbumRow.cluster_id: str | None = None`
-    (additive, last field)" (c334bbf) written as a partial `class X: ...; field: T` block."""
+    """The contract's python blocks (1f7b340: every type is a full block, including the additions)."""
     import re
     text = _without_pending(CONTRACT.read_text())
-    prose = [f"class {c}: ...; {f}: {t}" for c, f, t in      # "`X.f: T = d` (additive, last field)"
-             re.findall(r"`(\w+)\.(\w+): ([^`]+)`\s*\((?:additive, )?last field", text)]
-    prose += [f"class {c}: ...; {f}: {t}" for c, f, t in     # "`X` gains `f: T = d` (last field"
-              re.findall(r"`(\w+)` gains `(\w+): ([^`]+)`\s*\(last field", text)]
-    # "`Pin(path, position, …)`": a type given only as its constructor (c2fcf25 Pin, ManualPair)
-    prose += [f"class {c}:\n" + "".join(f"    {f.strip()}: object\n" for f in args.split(","))
-              for c, args in re.findall(r"`([A-Z]\w+)\(((?:\w+, )+\w+)\)`", text)
-              if not re.search(rf"^class {c}\b", text, re.M)]
-    # "MatchView.pins" is listed in the change log with no type or place (contract gap): last field, as in c2fcf25
-    if "MatchView.pins" in text and not re.search(r"^\s+pins:", text, re.M):
-        prose.append("class MatchView: ...; pins: list[Pin]")
-    prose += [f"class {c}(Enum): ...; {m}" for c, m in        # "`X.NEW` (appended last" / "(`X.NEW`, appended)"
-              re.findall(r"`(\w+)\.([A-Z][A-Z_]+)`(?:\s*\(|,\s*)appended", text)]
-    return "\n".join(re.findall(r"```python\n(.*?)```", text, re.S) + prose)
+    return "\n".join(re.findall(r"```python\n(.*?)```", text, re.S))
 
 
 def _contract_classes(code, with_partial=False):
@@ -580,7 +566,8 @@ def test_mock_types_match_contract_exactly():
     assert classes["AlbumRow"][1][-3:] == ["held_for", "loose_tracks", "cluster_id"]   # d6ac2f3, c334bbf
     assert classes["Album"][1][-3:] == ["cluster_id", "tracks", "extras"]
     assert classes["Cluster"][1][-2:] == ["album_id", "kind"] and classes["MatchView"][1][-2:] == ["problems", "pins"]
-    assert {"ClusterRow", "Pin", "ManualPair"} <= set(classes)                                     # c2fcf25
+    assert {"ClusterRow", "Pin", "ManualPair", "PinConflict"} <= set(classes)                      # c2fcf25, 1f7b340
+    assert classes["Problem"][1][-1] == "pin_conflicts" and classes["PinConflict"][1] == ["path", "position", "reason"]
     assert classes["FileChange"][1][-1] == "pinned" and classes["JobKind"][1][-1] == "CLUSTER"
     assert classes["ClusterFile"][1] == ["path", "disc", "number", "title", "duration_s", "album", "artist"]
     assert classes["FileChange"][1][-2] == "skip_reason" and classes["Plan"][1][-2:] == ["skipped", "fetch_job"]
@@ -590,7 +577,7 @@ def test_mock_types_match_contract_exactly():
     assert classes["Destination"][1][0] == "library_root"
     # ccfa4a8 / 2b82859: structured Problem detail, new kinds appended last (match by value, never position)
     assert classes["Problem"][1] == ["kind", "message", "paths", "disc_conflicts", "layout_reason",
-                                     "blocking_subdirs", "loose_files", "folder_mismatches"]
+                                     "blocking_subdirs", "loose_files", "folder_mismatches", "pin_conflicts"]
     assert {"DiscConflict", "DiscChoice", "DiscFolderMismatch"} <= set(classes)
     assert classes["ProblemKind"][1][-5:] == ["DISC_AMBIGUOUS", "LAYOUT_AMBIGUOUS", "DISC_FOLDER_MISMATCH", "DISC_TRACK_COUNT",
                                              "PIN_CONFLICT"]   # c2fcf25

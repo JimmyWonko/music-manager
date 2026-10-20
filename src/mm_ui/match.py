@@ -8,10 +8,11 @@ Pair… (keyboard: Ctrl+P), Unpin, and drag:
 - a file onto a release track pins it there (match.pin); onto a track that already has a file, swaps them;
 - a file onto "Unclustered files" unpins it, or (not pinned) moves it out of its cluster (move_to_cluster None);
 - a loose file onto another cluster of its folder moves it there.
-A pin that overrides a disc hold asks first and is retried with override_hold=True; never for a file whose CD
-folder names another disc (disc_folder_mismatch is never overridden)."""
+A pin refused with PinConflict.reason "override_hold_required" asks first and is retried with override_hold=True;
+every other reason (disc_folder_mismatch included) is explained and the pin is undone."""
 from __future__ import annotations
 
+import html
 import re
 from pathlib import Path
 
@@ -33,7 +34,6 @@ FETCHING = "Fetching from Discogs…"
 MANUAL = "manual"
 PAGE = 200
 GROUPS = (("folder", "Albums"), ("tag_cluster", "Clusters"), ("unclustered", "Unclustered files"))
-OVERRIDE_MARK = "override_hold"   # engine: PIN_CONFLICT "… overrides a disc hold …; pair it again with override_hold=True"
 
 
 def _dur(s) -> str:
@@ -43,11 +43,6 @@ def _dur(s) -> str:
 def _sim(x) -> str:
     return "" if x is None else f"{x:.0%}"
 
-
-def folder_disc(path) -> int | None:
-    """The disc a file's CD folder names ("CD2", "Disc 2"), else None."""
-    m = re.fullmatch(r"(?:cd|disc|disk)\s*(\d+)", Path(path).parent.name, re.I)
-    return int(m.group(1)) if m else None
 
 
 def _mime(path) -> QMimeData:
@@ -146,7 +141,7 @@ class MatchWindow(QMainWindow):
         ev = svc.events
         self._conns = [(ev.album_changed, self._on_album), (ev.candidate_ready, lambda aid, rid: self._on_album(aid)),
                        (ev.job_finished, self._on_job)]
-        for name, slot in (("match_view_changed", self._on_album), ("clusters_changed", lambda ids: self.refresh_soon()),
+        for name, slot in (("album_removed", self._on_removed), ("match_view_changed", self._on_album), ("clusters_changed", lambda ids: self.refresh_soon()),
                            ("cluster_changed", self._on_cluster_changed)):
             sig = getattr(ev, name, None)
             if sig is not None:
@@ -256,7 +251,7 @@ class MatchWindow(QMainWindow):
             return
         try:
             v = self.view = self.svc.match.view(r.id)
-        except self.svc.types.NotFound:     # adopted / un-adopted / moved meanwhile: reload the rows
+        except self.svc.types.NotFound:     # removed meanwhile (album_removed is on its way): reload the rows
             self.view = None
             self.header.setText("<i>This changed; reloading…</i>")
             self.spinner.hide(); self.fetch_label.hide(); self._sync_buttons()
@@ -317,7 +312,12 @@ class MatchWindow(QMainWindow):
                 it.setFlags(it.flags() | Qt.ItemIsDragEnabled)
             un.setExpanded(True)
         if v.problems:
-            self.problems.setText("<br>".join(f"⚠ {P.label(p)}: {p.message}" for p in v.problems))
+            lines = []
+            for p in v.problems:
+                cs = P.pin_conflicts(p)
+                lines += ([f"⚠ {P.label(p)}: {P.pin_conflict_text(c)}" for c in cs] if cs
+                          else [f"⚠ {P.label(p)}: {p.message}"])
+            self.problems.setText("<br>".join(html.escape(x, quote=False) for x in lines))
         self._sync_buttons()
 
     def _sync_buttons(self):
@@ -332,6 +332,12 @@ class MatchWindow(QMainWindow):
     def _on_album(self, album_id: int):
         if self.view is not None and self.view.album_id == album_id:
             self.show_view()      # pins, fetched release, status: refetch the view
+
+    def _on_removed(self, album_id: int):
+        if any(r.album_id == album_id for r in self.rows.values()):
+            if self.view is not None and self.view.album_id == album_id:
+                self.view = None
+            self.refresh_soon()
 
     def _on_job(self, job):
         kind = getattr(getattr(job, "kind", None), "name", "")
@@ -361,9 +367,6 @@ class MatchWindow(QMainWindow):
         return next((pr.local.path for pr in self.view.pairs
                      if pr.remote is not None and pr.remote.position == position and pr.local is not None), None)
 
-    def _remote(self, position):
-        return next((pr.remote for pr in self.view.pairs if pr.remote is not None and pr.remote.position == position), None)
-
     def pair(self, path, position: str) -> bool:
         """Pin `path` to the release track at `position`; swap if that track already has a file. Asks before
         overriding a disc hold. Returns True when the pair is in place."""
@@ -389,21 +392,12 @@ class MatchWindow(QMainWindow):
         before = self._pin_of(path)
         self.svc.match.pin(aid, path, position, False, self.view.release_id)
         self.view = self.svc.match.view(aid, self.view.release_id)
-        conflict = next((p for p in self.view.problems if P.kind_of(p) == P.PIN_CONFLICT
-                         and Path(path) in [Path(x) for x in p.paths]), None)
+        conflict = self.conflict_for(path)
         if conflict is None:
             return True
-        rt = self._remote(position)
-        if OVERRIDE_MARK not in conflict.message:     # bad position / two files on one track: shown as a problem
-            return True
-        fd = folder_disc(path)
-        if fd is not None and rt is not None and fd != rt.disc:
+        if conflict.reason != P.OVERRIDE_REASON:
             self._restore(aid, path, before)
-            self.inform("Can't pair across disc folders",
-                        f"{path.name} is in the {path.parent.name} folder, and “{position}” is on disc {rt.disc}. "
-                        "A file can't be paired with another disc's track while it sits in that disc's folder "
-                        "(the album would still be held: tracks would go into another disc's folder). "
-                        "Move the file to the right disc folder first.")
+            self.inform("This pair can't be used", P.pin_conflict_text(conflict))
             return False
         if not self.confirm("Override the disc hold?",
                             f"{path.name} is held: the engine can't tell its disc, or its disc's file and track "
@@ -414,6 +408,11 @@ class MatchWindow(QMainWindow):
         self.svc.match.pin(aid, path, position, True, self.view.release_id)
         self.view = self.svc.match.view(aid, self.view.release_id)
         return True
+
+    def conflict_for(self, path):
+        """This file's PinConflict in the current view (Problem.pin_conflicts), else None."""
+        return next((c for p in (self.view.problems if self.view else []) if P.kind_of(p) == P.PIN_CONFLICT
+                     for c in P.pin_conflicts(p) if Path(c.path) == Path(path)), None)
 
     def _restore(self, aid, path, before):
         if before is None:

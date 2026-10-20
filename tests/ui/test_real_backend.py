@@ -1040,8 +1040,12 @@ def test_real_clusters_adopt_and_match_window(real, qtbot):
     assert "is a cluster: only its 3 file(s) move" in dlg.cluster_label.text()
     assert str(art) in dlg.cluster_label.text() and P.NON_AUDIO_STAYS in dlg.cluster_label.text()
     assert all(Path(f.path_before).parent == art for f in plan.albums[0].files)
+    removed = []
+    svc.events.album_removed.connect(removed.append, Qt.DirectConnection) if hasattr(svc.events, "album_removed") else None
     w.unadopt()
     assert w.current == cid and w.view.album_id is None and w.adopt_btn.isEnabled()
+    if hasattr(svc.events, "album_removed"):                 # 1f7b340
+        qtbot.waitUntil(lambda: removed == [aid], timeout=3000)
 
 
 def test_real_drag_swap_manual_badge_plan_and_history(real, qtbot):
@@ -1097,6 +1101,8 @@ def test_real_pin_over_disc_hold_asks_then_overrides(real, qtbot):
     # CD1 file onto a disc-2 track: never offered (disc_folder_mismatch is never overridden)
     w.drop_right(str(folder / "CD1" / "01 One.flac"), "2-3")
     assert not w.asked and "another disc's folder" in w.told[0] and svc.match.pins(row.id) == []
+    assert w.told[0] == P.pin_conflict_text(next(iter([x for x in [svc.types.PinConflict(
+        folder / "CD1" / "01 One.flac", "2-3", "disc_folder_mismatch")]])))
     # the held medley file onto 2-1: asks, then pins with override_hold=True
     w.drop_right(str(folder / "CD2" / "01 Four,Five.flac"), "2-1")
     assert len(w.asked) == 1

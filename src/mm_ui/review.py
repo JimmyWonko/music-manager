@@ -165,8 +165,21 @@ class AlbumListModel(QAbstractListModel):
     def refresh_album(self, album_id):
         for i, a in enumerate(self.rows):
             if a.id == album_id:
-                self.rows[i] = self.svc.library.album(album_id)
+                try:
+                    self.rows[i] = self.svc.library.album(album_id)
+                except self.svc.types.NotFound:     # deleted (album_removed may come after album_changed)
+                    self.remove_album(album_id); return
                 self.dataChanged.emit(self.index(i), self.index(i))
+
+    def remove_album(self, album_id) -> bool:
+        """album_removed (1f7b340): drop the row."""
+        for i, a in enumerate(self.rows):
+            if a.id == album_id:
+                self.beginRemoveRows(QModelIndex(), i, i)
+                del self.rows[i]; self.total = max(0, self.total - 1)
+                self.endRemoveRows()
+                return True
+        return False
 
 
 class _PreviewLabel(QLabel):
@@ -324,6 +337,8 @@ class ReviewWindow(QMainWindow):
         self.apply_btn.clicked.connect(self.open_apply)
         svc.events.candidate_ready.connect(self.on_candidate_ready)
         svc.events.album_changed.connect(self.on_album_changed)
+        if getattr(svc.events, "album_removed", None) is not None:
+            svc.events.album_removed.connect(self.on_album_removed)
         svc.events.job_finished.connect(self.on_job_finished)
         svc.events.job_progress.connect(self.on_job_progress)
         svc.events.rate_limited.connect(lambda s: self.rate_label.setText(f"   Discogs: next request in {s:.0f}s"))
@@ -367,6 +382,12 @@ class ReviewWindow(QMainWindow):
 
     def on_album_changed(self, album_id):
         self.model.refresh_album(album_id); self.update_counts()
+
+    def on_album_removed(self, album_id):
+        self.model.remove_album(album_id)
+        if self.album_id == album_id:
+            self.album_id = None; self.render()
+        self.update_counts()
 
     # ---------------------------------------------------------------- render
     def render(self):

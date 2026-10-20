@@ -48,6 +48,16 @@ class LibraryModel(QAbstractTableModel):
     def sort_key(self):
         return self.svc.sort(COLUMNS[self.sort_col][1])
 
+    def remove_album(self, album_id) -> bool:
+        """album_removed (1f7b340): drop the row."""
+        for i, r in enumerate(self.rows):
+            if r.id == album_id:
+                self.beginRemoveRows(QModelIndex(), i, i)
+                del self.rows[i]; self.total = max(0, self.total - 1)
+                self.endRemoveRows()
+                return True
+        return False
+
     @property
     def descending(self) -> bool:
         return self.sort_order == Qt.DescendingOrder
@@ -194,6 +204,8 @@ class LibraryWindow(QMainWindow):
         hint_row = QHBoxLayout(); hint_row.addWidget(self.hint, 1); hint_row.addWidget(self.root_btn)
         lay.insertLayout(1, hint_row)
         svc.events.album_changed.connect(lambda _id: self.update_counts())
+        if getattr(svc.events, "album_removed", None) is not None:
+            svc.events.album_removed.connect(lambda aid: (self.model.remove_album(aid), self.update_counts()))
         self.reload()
         self.fit_rows()
 

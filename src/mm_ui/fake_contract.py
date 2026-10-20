@@ -251,7 +251,7 @@ class FakeContract:
             "AlbumFilter", "AlbumSort", "MatchStatus", "JobState", "JobKind", "Job", "Page", "Template",
             "TemplatePreview", "Collision", "Destination", "Settings", "Operation", "AutoRules", "Problem", "ProblemKind", "AlbumPlan", "Plan", "MMError", "NotFound",
             "PlanStale", "ValidationError", "ProviderError", "ConfigError", "Cluster", "ClusterFile", "MatchView",
-            "ClusterRow", "Pin", "ManualPair")})
+            "ClusterRow", "Pin", "ManualPair", "PinConflict")})
         self._ids = itertools.count(100_000)
         self._jobs: dict[int, Job] = {}
         self._plans: dict[int, Plan] = {}
@@ -574,11 +574,11 @@ class FakeContract:
         for d in (fk._cands, self._pending_cands, fk._chosen, self._pins):
             d.pop(album_id, None)
         self._clusters.pop(a.cluster_id, None)
+        fk.events.album_removed.emit(album_id)                 # 1f7b340: removed, then the loose row changed
         if owner is not None:
             fk._set(owner.id, tracks=owner.tracks + list(a.tracks), track_count=owner.track_count + len(a.tracks))
         c = self._cluster_of(a.tracks, a.folder)
         self._clusters[c.id] = c
-        fk.events.album_changed.emit(album_id)
         fk.events.clusters_changed.emit([c.id])
         return c
 
@@ -606,8 +606,9 @@ class FakeContract:
             self._pins.get(a.id, {}).pop(path, None)
             if rest:
                 fk._albums[a.id] = replace(a, tracks=rest, track_count=len(rest))
-            else:
+            else:                                             # an adopted cluster left empty is deleted
                 del fk._albums[a.id]
+                fk.events.album_removed.emit(a.id)
             owner = self._loose_row(src.folder)
             if owner is not None:
                 fk._albums[owner.id] = replace(owner, tracks=owner.tracks + [t], track_count=owner.track_count + 1)
@@ -708,26 +709,29 @@ class FakeContract:
         held = self._held_files(album, cand)
         files = {t.path for t in album.tracks}
         problems, wanted = [], {}
-        refuse = lambda pin, why: problems.append(Problem(   # noqa: E731
-            ProblemKind.PIN_CONFLICT, f"Manual pair {pin.path.name} -> {pin.position}: {why}", [pin.path]))
+        refuse = lambda pin, reason, why: problems.append(Problem(   # noqa: E731
+            ProblemKind.PIN_CONFLICT, f"Manual pair {pin.path.name} -> {pin.position}: {why}", [pin.path],
+            pin_conflicts=[T.PinConflict(pin.path, pin.position, reason)]))
         for pin in pins:
             if pin.stale or pin.path not in files:
-                refuse(pin, "the file changed since it was paired; pair it again")
+                refuse(pin, "stale", "the file changed since it was paired; pair it again")
             elif pin.position not in remotes:
-                refuse(pin, f"release {cand.release_id} has no track {pin.position}")
+                refuse(pin, "unknown_position", f"release {cand.release_id} has no track {pin.position}")
             else:
                 wanted.setdefault(pin.position, []).append(pin)
         usable = {}
         for pos, group in wanted.items():
             if len(group) > 1:
                 for pin in group:
-                    refuse(pin, f"{len(group)} files are paired with track {pos}")
+                    refuse(pin, "duplicate_position", f"{len(group)} files are paired with track {pos}")
                 continue
             pin = group[0]
             fd = P_folder_disc(pin.path)
-            if (pin.path in held or (fd is not None and fd != remotes[pos].disc)) and not pin.override_hold:
-                refuse(pin, "this overrides a disc hold (the file's disc can't be told, its disc's counts differ, "
-                            "or it sits in another disc's folder); pair it again with override_hold=True")
+            if not pin.override_hold and fd is not None and fd != remotes[pos].disc:
+                refuse(pin, "disc_folder_mismatch", "the file sits in another disc's folder")
+                continue
+            if not pin.override_hold and pin.path in held:
+                refuse(pin, "override_hold_required", "this overrides a disc hold; pair it again with override_hold=True")
                 continue
             usable[pin.path] = pos
         if not usable:

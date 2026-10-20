@@ -540,3 +540,25 @@ def cluster_note(ap, row, name: str) -> str:
     dst = getattr(ap, "folder_after", None)
     return (f"ℹ <b>{html.escape(name)}</b> is a cluster: only its {n} file(s) move, from "
             f"{html.escape(str(src))}/ (their common folder) to {html.escape(str(dst))}/. {NON_AUDIO_STAYS}")
+
+
+# --- pin conflicts (1f7b340: Problem.pin_conflicts, PinConflict.reason) -----------------------------------
+PIN_REASONS = {
+    "stale": "the file changed or left the album since you paired it. Pair it again.",
+    "unknown_position": "this release has no track {position}. Pair it with another track.",
+    "duplicate_position": "another file is also paired with track {position}. Keep one of them.",
+    "override_hold_required": "the file is held (its disc can't be told, or its disc's file and track counts "
+                              "differ). Pair it again and confirm the override to use it anyway.",
+    "disc_folder_mismatch": "the file is in another disc's folder, so it can't go to track {position}. "
+                            "Move it to the right disc folder first.",
+}
+OVERRIDE_REASON = "override_hold_required"   # the only reason the UI offers an override for
+
+
+def pin_conflicts(problem) -> list:
+    return list(getattr(problem, "pin_conflicts", None) or [])
+
+
+def pin_conflict_text(c) -> str:
+    why = PIN_REASONS.get(c.reason, "the engine can't use this pair ({reason}).")
+    return f"{Path(c.path).name} → {c.position}: " + why.format(position=c.position, reason=c.reason)

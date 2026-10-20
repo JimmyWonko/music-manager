@@ -48,7 +48,7 @@ def test_new_problem_fields_default_empty_and_kinds_appended_last():
         [], "", [], [], [])
     assert [f.name for f in dataclasses.fields(FS.Problem)] == [
         "kind", "message", "paths", "disc_conflicts", "layout_reason", "blocking_subdirs", "loose_files",
-        "folder_mismatches"]
+        "folder_mismatches", "pin_conflicts"]
     assert [f.name for f in dataclasses.fields(FS.DiscConflict)] == [
         "path", "number", "title", "reason", "same_number", "title_matches", "folder_disc", "tag_disc",
         "sidecar_disc", "sidecar"]

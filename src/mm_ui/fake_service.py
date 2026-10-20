@@ -216,6 +216,13 @@ class ProblemKind(StrEnum):
 
 
 @dataclass(frozen=True)
+class PinConflict:          # 1f7b340: why one pin isn't used
+    path: Path
+    position: str
+    reason: str             # stale | unknown_position | duplicate_position | override_hold_required | disc_folder_mismatch
+
+
+@dataclass(frozen=True)
 class Problem:
     kind: ProblemKind; message: str; paths: list[Path]   # message is plain text for the dialog
     # ccfa4a8 (all default empty, so older code and stored problems still work):
@@ -224,6 +231,7 @@ class Problem:
     blocking_subdirs: list[Path] = field(default_factory=list)          # LAYOUT_AMBIGUOUS: subfolders that caused it
     loose_files: list[Path] = field(default_factory=list)               # LAYOUT_AMBIGUOUS: audio directly in the folder
     folder_mismatches: list[DiscFolderMismatch] = field(default_factory=list)  # DISC_FOLDER_MISMATCH: one per file
+    pin_conflicts: list[PinConflict] = field(default_factory=list)   # 1f7b340: PIN_CONFLICT, one per refused pin
 
 
 @dataclass(frozen=True)
@@ -367,6 +375,7 @@ class Events(QObject):
     job_progress = Signal(object)
     job_finished = Signal(object)
     album_changed = Signal(int)
+    album_removed = Signal(int)             # 1f7b340: album deleted from the index (un-adopt, emptied cluster, …)
     candidate_ready = Signal(int, int)
     clusters_changed = Signal(object)       # c2fcf25: list[str] of current cluster ids
     cluster_changed = Signal(str, str)      # c2fcf25: old id, new id ("" = gone)

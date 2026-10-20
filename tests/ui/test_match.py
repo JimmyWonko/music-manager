@@ -273,3 +273,40 @@ def test_file_rows_drag_their_path_and_tracks_accept_drops(fake, qtbot):
     assert not rel.flags() & Qt.ItemIsDragEnabled
     f = _group(w, "tag_cluster").child(1).child(0)          # a loose file on the left drags too
     assert bytes(w.left.mimeData([f]).data(MIME)).decode().endswith("Gone Fishin'.mp3")
+
+
+# ---------------------------------------------------------------- 1f7b340: pin_conflicts, album_removed
+def test_every_contract_reason_has_a_message():
+    import re
+    from test_backend import CONTRACT
+    if not CONTRACT.is_file():
+        pytest.skip("contract not present")
+    block = re.search(r"class PinConflict:.*?reason: Literal\[(.*?)\]", CONTRACT.read_text(), re.S).group(1)
+    assert set(re.findall(r'"(\w+)"', block)) == set(P.PIN_REASONS)
+
+
+def test_conflicts_are_explained_by_reason_and_only_hold_asks(fake, qtbot):
+    w = _adopted(fake, qtbot)
+    aid = w.view.album_id
+    f2 = _file_path(w, HAM[1])
+    assert not w.pair(f2, "9") and not w.asked                 # unknown position: told, pin undone
+    assert "has no track 9" in w.told[-1] and fake.match.pins(aid) == []
+    fake.match.pin(aid, f2, "9"); w.show_view()
+    (c,) = w.conflict_for(f2) and [w.conflict_for(f2)]
+    assert c.reason == "unknown_position"
+    assert P.pin_conflict_text(c) in w.problems.text()
+
+
+def test_album_removed_drops_rows_everywhere(fake, qtbot):
+    from mm_ui.library import LibraryWindow
+    w = _adopted(fake, qtbot)
+    aid = w.view.album_id
+    lib = LibraryWindow(fake); qtbot.addWidget(lib)
+    rw = ReviewWindow(fake); qtbot.addWidget(rw); rw.filter_box.setCurrentText("All")
+    ids = lambda m: [r.id for r in m.rows]     # noqa: E731
+    assert aid in ids(lib.model) and aid in ids(rw.model)
+    removed = []
+    fake.events.album_removed.connect(removed.append)
+    w.unadopt()
+    assert removed == [aid] and aid not in ids(lib.model) and aid not in ids(rw.model)
+    assert w.view is not None and w.view.album_id is None
