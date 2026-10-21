@@ -1376,3 +1376,46 @@ def test_real_tag_batch_latin1_losses_junk_and_settings(real, qtbot):
     assert dlg.ok_btn.isEnabled() and DROPPED_TEXT in dlg.loss_label.text()
     assert (folder / ".DS_Store").exists() and (folder / "01 One.wav").exists()   # nothing written before Apply
     svc.settings.set(id3_latin1=False)
+
+
+def test_real_latin1_transliterated_amber_with_proposed_tooltip(real, qtbot):
+    pytest.importorskip("unidecode", reason="transliteration needs the optional unidecode package")
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor
+    from mm_ui.review import TRANSLIT, ApplyDialog
+    svc = real["svc"]
+    if not hasattr(svc.settings, "verify_hashes_available"):
+        pytest.skip("service predates Latin-1 severity (bfe3fc0)")
+    title, rid = "Translit Batch", 753
+    folder = real["lib"] / "Translit Band" / title
+    for i, t in enumerate(["One", "Two"], 1):
+        tone(folder / f"{i:02d} {t}.wav")
+    real["discogs"].releases[rid] = release(rid, "Translit Band", title, 1999, f"TRL {rid}", ["Łódź", "Two"])
+    assert svc._c.jobs.wait(svc.library.scan().id).state.name == "DONE"
+    (row,) = [x for x in svc.albums(None, limit=50).items if x.title == title]
+    assert svc._c.jobs.wait(svc.match.find([row.id]).id).state.name == "DONE"
+    svc.match.choose(row.id, rid)
+    svc.settings.set(id3_latin1=True)
+    try:
+        plan = svc.plan.build([row.id])
+        if plan.fetch_job is not None:
+            svc._c.jobs.wait(plan.fetch_job)
+            plan = svc.plan.build([row.id])
+        (ap,) = plan.albums
+        (x,) = [x for x in ap.encoding_losses if x.value == "Łódź"]
+        assert x.severity == "transliterated" and x.proposed_value == "Lódz", x
+        assert ap.encoding_transliterated >= 1 and ap.encoding_dropped == 0 and not ap.problems
+        d = ApplyDialog(plan); qtbot.addWidget(d)
+        assert d.drop_banner.isHidden() and d.ok_btn.isEnabled()
+
+        def walk(it):
+            for i in range(it.childCount()):
+                yield it.child(i); yield from walk(it.child(i))
+        (r,) = [r for r in walk(d.tree.invisibleRootItem())
+                if r.data(0, Qt.UserRole) == "encoding_loss" and r.text(1) == "Łódź"]
+        assert r.data(0, Qt.UserRole + 1) == "transliterated" and r.text(2) == "Lódz"
+        assert all(r.foreground(c).color().name() == QColor(TRANSLIT).name() for c in range(3))
+        assert "Łódź -> Lódz" in r.toolTip(1)
+        assert f"color:{TRANSLIT}" in d.loss_label.text() and "1 transliterated" in d.loss_label.text()
+    finally:
+        svc.settings.set(id3_latin1=False)
