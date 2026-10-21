@@ -19,8 +19,12 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog
+from ui_env import (  # MM_TEST_BASSLINE overrides (e.g. a git-archive of a pinned commit)
+    BACKEND_PATH,
+    BASSLINE,
+    SUITE_BACKEND,
+)
 
-from ui_env import BACKEND_PATH, BASSLINE, SUITE_BACKEND   # MM_TEST_BASSLINE overrides (e.g. a git-archive of a pinned commit)
 from mm_ui import backend as B
 
 SRC = BASSLINE / "src"
@@ -201,6 +205,7 @@ def test_real_template_unknown_function_field(real):
 def test_real_review_apply_then_history_undo(real, qtbot, monkeypatch):
     """build (off the UI thread) -> apply -> undo through the UI on synthetic FLACs; files and tags on disk."""
     import mutagen
+
     from mm_ui.history import HistoryDialog
     from mm_ui.review import ApplyDialog, ReviewWindow
     svc, flac = real["svc"], real["flac"]
@@ -339,6 +344,7 @@ def _age_releases(monkeypatch, seconds):
 def test_real_plan_build_never_fetches_and_reuses_fetch_job(real, monkeypatch):
     """(1) RELEASE_NOT_FETCHED, (2) Plan.fetch_job last field + same id while running, (4) no Discogs in build."""
     import dataclasses
+
     from mm_ui import problems as P
     svc = real["svc"]; _needs_fetch_job(svc)
     T = svc.types
@@ -721,6 +727,7 @@ def test_real_types_match_the_mock(real):
     """Problem's new fields, DiscConflict / DiscChoice / DiscFolderMismatch (exported from music_manager.service)
     and ProblemKind (same names and values, and now the same order) match the mock."""
     import dataclasses
+
     from mm_ui import fake_service as FS
     T = real["svc"].types
     for name in ("Problem", "DiscConflict", "DiscChoice", "DiscFolderMismatch"):
@@ -755,6 +762,7 @@ def test_real_disc_conflicts_reason_and_choices(real, qtbot):
 def test_real_sources_disagree_folder_tag_and_m3u(real, qtbot):
     """A CD2 folder file tagged disc 1 and listed by CD1's playlist: held, never paired by the tags."""
     import mutagen
+
     from mm_ui import problems as P
     from mm_ui.review import ApplyDialog, ReviewWindow
     svc = real["svc"]
@@ -1160,6 +1168,7 @@ def _st_row(w, label):
 
 def test_real_subtrack_types_match_the_mock(real):
     import dataclasses
+
     from mm_ui import fake_service as FS
     T = real["svc"].types
     _needs_subtracks(real["svc"])
