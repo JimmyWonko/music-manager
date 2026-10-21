@@ -417,6 +417,7 @@ class TagChange:
     # TOTALTRACKS -> TRACKTOTAL, shown even when the value stays the same (2026-10-21)
     key_before: str | None = None
     key_after: str | None = None
+    migration: bool = False  # True only for removals/renames caused by Settings.migrate_tag_keys (Vorbis YEAR)
 
 
 @dataclass(frozen=True)
@@ -474,6 +475,7 @@ class UnwrittenField:
     reason: str  # stable code: conflicting_barcodes, region_not_country, unknown_country, mixed_media,
     # no_single_type, missing_catalog_number
     detail: str  # human-readable
+    folder: Path | None = None  # the album folder (AlbumPlan.folder_before); plan.build always sets it
 
 
 @dataclass(frozen=True)
