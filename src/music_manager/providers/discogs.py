@@ -290,6 +290,18 @@ class Discogs:
         data = self._get(f"{API}/database/search", fallback, "search", json.dumps(fallback, sort_keys=True))
         return rank_by_year(list(data.get("results") or []), year)
 
+    def search_barcode(self, barcode: str) -> list[SearchResult]:
+        """Releases with this UPC/EAN barcode (digits). Cached like every search."""
+        params = {"type": "release", "per_page": "15", "barcode": barcode}
+        data = self._get(f"{API}/database/search", params, "search", json.dumps(params, sort_keys=True))
+        return list(data.get("results") or [])
+
+    def search_text(self, query: str, year: str = "") -> list[SearchResult]:
+        """Free-text release search (Discogs "q"); year only re-orders results."""
+        params = {"type": "release", "per_page": "15", "q": query}
+        data = self._get(f"{API}/database/search", params, "search", json.dumps(params, sort_keys=True))
+        return rank_by_year(list(data.get("results") or []), year)
+
     def release(self, release_id: int) -> DiscogsRelease:
         return cast(DiscogsRelease, self._get(f"{API}/releases/{release_id}", None, "release", str(release_id)))
 

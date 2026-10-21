@@ -27,6 +27,7 @@ from ..providers.discogs import (
     release_catno,
     split_result_title,
 )
+from ..tags.read import normalize_barcode
 from ._common import album_folder, album_record, local_tracks
 from ._common import title_match_min as rules_title_match_min
 from ._pins import resolve as resolve_pins
@@ -35,6 +36,7 @@ from ._types import (
     DISCOGS_CREDIT,
     Candidate,
     LocalTrack,
+    MatchReason,
     NotFound,
     ProviderError,
     RemoteTrack,
@@ -269,6 +271,57 @@ def breakdown(search: SearchResult, guess: dict, pairs: list[TrackPair] | None, 
     return parts
 
 
+def barcode_matches(search: SearchResult, release: DiscogsRelease | None, barcode: str) -> bool | None:
+    """True/False when the guess has a barcode and Discogs lists some; None when there is nothing to compare."""
+    if not barcode:
+        return None
+    listed = [normalize_barcode(b) for b in (search.get("barcode") or [])]
+    listed += [normalize_barcode(i.get("value")) for i in ((release or {}).get("identifiers") or [])
+               if str(i.get("type") or "").casefold() == "barcode"]
+    listed = [b for b in listed if b]
+    if not listed:
+        return None
+    return barcode in listed or any(b.lstrip("0") == barcode.lstrip("0") for b in listed)
+
+
+def reasons(parts: list[ScorePart], barcode: str, barcode_ok: bool | None, fetched: bool) -> list[MatchReason]:
+    """Candidate.reasons: the score's parts (and the barcode) in plain words."""
+    out: list[MatchReason] = []
+    if barcode:
+        if barcode_ok is None:
+            out.append(MatchReason("barcode", False, f"Discogs lists no barcode to compare with {barcode}"))
+        else:
+            out.append(MatchReason("barcode", barcode_ok, f"Barcode {barcode} matches" if barcode_ok
+                                   else f"Barcode differs: {barcode} here, not on this release"))
+    names = {"album": "Album title", "artist": "Artist", "catno": "Catalog number", "year": "Year"}
+    for p in parts:
+        if p.field in ("album", "artist"):
+            pct = round(p.value * 100)
+            word = "matches" if p.ok else "differs"
+            out.append(MatchReason(p.field, p.ok, f'{names[p.field]} {word} ({pct}% alike): '
+                                                  f'"{p.local}" / "{p.remote}"'))
+        elif p.field in ("catno", "year"):
+            if not p.local or not p.remote:
+                out.append(MatchReason(p.field, False, f"{names[p.field]}: nothing to compare"))
+            elif p.ok:
+                out.append(MatchReason(p.field, True, f"{names[p.field]} {p.remote} matches"))
+            else:
+                out.append(MatchReason(p.field, False,
+                                       f"{names[p.field]} differs: {p.local} here, {p.remote} on Discogs"))
+        elif p.field == "track_count":
+            out.append(MatchReason(p.field, p.ok, f"Same number of tracks ({p.local})" if p.ok
+                                   else f"Track count differs: {p.local} here, {p.remote} on Discogs"))
+        elif p.field == "durations":
+            if p.weight == 0.0:
+                out.append(MatchReason(p.field, False, "No track lengths to compare"))
+            else:
+                out.append(MatchReason(p.field, p.ok, f"Track lengths agree for {round(p.value * 100)}% of tracks "
+                                                      f"({p.local} here, {p.remote} on Discogs)"))
+    if not fetched:
+        out.append(MatchReason("track_count", False, "Tracklist not fetched yet"))
+    return out
+
+
 def _primary_image(release: DiscogsRelease | None) -> tuple[str | None, str | None]:
     images = list((release or {}).get("images") or [])
     if not images:
@@ -281,6 +334,7 @@ def build_candidates(album_id: int, st: State | None = None) -> list[Candidate]:
     st = st or state()
     row = album_record(album_id, st)
     guess = json.loads(row["guess"] or "{}")
+    barcode = normalize_barcode(guess.get("barcode"))
     locals_ = local_tracks(album_id, st)
     folder = None
     scored = []
@@ -298,10 +352,12 @@ def build_candidates(album_id: int, st: State | None = None) -> list[Candidate]:
             remote_count = len(dtracks)
         auto = score_result(search, guess)  # exactly the --auto score
         score = service_score(auto, pairs, len(locals_), remote_count)
-        scored.append((score, crow["rank"], crow, search, release, pairs, remote_count, auto))
-    scored.sort(key=lambda x: (-x[0], x[1]))
+        bc_ok = barcode_matches(search, release, barcode)
+        scored.append((score, crow["rank"], crow, search, release, pairs, remote_count, auto, bc_ok))
+    # equal scores: a release with the album's barcode first, then search order
+    scored.sort(key=lambda x: (-round(x[0], 9), not x[8], x[1]))
     out = []
-    for i, (score, _rank, crow, search, release, pairs, remote_count, auto) in enumerate(scored):
+    for i, (score, _rank, crow, search, release, pairs, remote_count, auto, bc_ok) in enumerate(scored):
         margin = score - scored[i + 1][0] if i + 1 < len(scored) else None
         r_artist, r_title = split_result_title(search.get("title") or "")
         if release is not None:
@@ -321,7 +377,7 @@ def build_candidates(album_id: int, st: State | None = None) -> list[Candidate]:
             formats=formats,
             score=score,
             margin=margin,
-            breakdown=breakdown(search, guess, pairs, len(locals_), remote_count),
+            breakdown=(parts := breakdown(search, guess, pairs, len(locals_), remote_count)),
             alignment=pairs,
             artwork_url=art_url or search.get("cover_image") or None,
             thumb_url=search.get("thumb") or thumb,
@@ -329,6 +385,8 @@ def build_candidates(album_id: int, st: State | None = None) -> list[Candidate]:
             fetched=release is not None,
             source=DISCOGS_CREDIT,
             auto_score=auto,
+            found_by=search.get("_via") or ("manual" if crow["rank"] < 0 else ""),
+            reasons=reasons(parts, barcode, bc_ok, release is not None),
         ))
     return out
 

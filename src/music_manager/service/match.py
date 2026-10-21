@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 
 from ..match import AUTO_MIN_MARGIN, AUTO_MIN_SCORE, TITLE_MATCH_MIN, score_result
+from ..providers.discogs import rank_by_year
+from ..tags.read import normalize_barcode
 from ._common import (
     album_record,
     cluster_guess,
@@ -100,13 +102,41 @@ def candidates(album_id: int) -> list[Candidate]:
     return build_candidates(album_id)
 
 
+def _via(results, how: str) -> list[dict]:
+    out = []
+    for r in results or []:
+        r = dict(r)
+        r["_via"] = how  # stored with the candidate: Candidate.found_by
+        out.append(r)
+    return out
+
+
 def _search(client, guess: dict) -> list[dict]:
-    results = provider_call(client.search_releases, guess.get("artist", ""), guess.get("album", ""),
-                            guess.get("catno", ""), guess.get("year", ""))
-    if not results and guess.get("album"):
-        results = provider_call(client.search_releases, "", guess.get("album", ""), guess.get("catno", ""),
-                                guess.get("year", ""))
-    return list(results or [])
+    """Search fallbacks, first one with results wins: barcode, artist + album (+ catno), catno alone,
+    album alone, then the album title as free text. Clients without search_barcode/search_text
+    (older stand-ins) skip those steps."""
+    artist, album = guess.get("artist", ""), guess.get("album", "")
+    catno, year, barcode = guess.get("catno", ""), guess.get("year", ""), guess.get("barcode", "")
+    if barcode and hasattr(client, "search_barcode"):
+        results = provider_call(client.search_barcode, barcode)
+        if results:
+            return _via(rank_by_year(list(results), year), "barcode")
+    results = provider_call(client.search_releases, artist, album, catno, year)
+    if results:
+        return _via(results, "artist_album")
+    if catno and (artist or album):
+        results = provider_call(client.search_releases, "", "", catno, year)
+        if results:
+            return _via(results, "catno")
+    if album and artist:
+        results = provider_call(client.search_releases, "", album, catno, year)
+        if results:
+            return _via(results, "album")
+    if album and hasattr(client, "search_text"):
+        results = provider_call(client.search_text, album, year)
+        if results:
+            return _via(results, "text")
+    return []
 
 
 def _match_one(st, client, album_id: int, ctx) -> str:
@@ -227,6 +257,66 @@ def manual(album_id: int, release_id_or_url: str) -> Job:
         return f"added release {release_id}: {release.get('title') or ''}"
 
     return st.runner.submit(JobKind.FETCH_CANDIDATES, work, total=1, message=f"fetching release {release_id}")
+
+
+def _looks_like_barcode(text: str) -> str:
+    """A typed UPC/EAN (11 to 14 digits; shorter numbers are release ids)."""
+    digits = normalize_barcode(text)
+    return digits if len(digits) >= 11 else ""
+
+
+def search(album_id: int, text: str) -> Job:
+    """Manual search ("Search Discogs..."): add what a typed search finds as candidates.
+
+    text is a release id or discogs.com URL (same as match.manual), a
+    barcode (11-14 digits, spaces and dashes allowed), or free text (Discogs
+    "q", e.g. "artist title"). Hits are kept as candidates with found_by
+    "manual_search" (a later find keeps them) and the top ones are fetched.
+    The album goes to NEEDS_REVIEW unless it is ACCEPTED or APPLIED. No hits:
+    the job fails and nothing changes.
+    """
+    st = state()
+    row = album_record(album_id, st)
+    query = " ".join(str(text or "").split())
+    if not query:
+        raise ValidationError("type a release id, discogs.com URL, barcode or search text", field="text")
+    barcode = _looks_like_barcode(query)
+    if not barcode and parse_release_ref(query) is not None:
+        return manual(album_id, query)
+    guess = json.loads(row["guess"] or "{}")
+
+    def work(ctx) -> str:
+        client = st.client()
+        if barcode:
+            results = provider_call(client.search_barcode, barcode)
+        else:
+            results = provider_call(client.search_text, query, guess.get("year", ""))
+        results = _via(list(results or [])[:SEARCH_KEEP], "manual_search")
+        if not results:
+            raise MMError(f"no Discogs results for {query!r}")
+        with st.index.tx() as conn:
+            for result in results:
+                rid = int(result.get("id") or 0)
+                if rid:
+                    conn.execute(
+                        "INSERT INTO candidates(album_id, release_id, rank, search) VALUES(?, ?, -1, ?)"
+                        " ON CONFLICT(album_id, release_id) DO UPDATE SET search = excluded.search",
+                        (album_id, rid, json.dumps(result, ensure_ascii=False)))
+        for i, result in enumerate(results[:FETCH_TOP]):
+            ctx.progress(i, min(len(results), FETCH_TOP), f"fetching release {result.get('id')}")
+            try:
+                fetch_release(album_id, int(result["id"]), st, search=result)
+            except (ProviderError, KeyError, ValueError):
+                continue
+        current = MatchStatus(album_record(album_id, st)["status"])
+        if current not in (MatchStatus.ACCEPTED, MatchStatus.APPLIED):
+            set_status(album_id, MatchStatus.NEEDS_REVIEW)
+        else:
+            events.album_changed.emit(album_id)
+        return f"added {len(results)} release(s) for {query!r}"
+
+    return st.runner.submit(JobKind.FETCH_CANDIDATES, work, total=FETCH_TOP,
+                            message=f"searching Discogs for {query!r}")
 
 
 def destination(album_id: int, release_id: int, template: str | None = None) -> Destination:
@@ -387,4 +477,4 @@ def clusters(filter: AlbumFilter | None = None, offset: int = 0, limit: int = 20
     return Page(rows[offset:offset + limit], len(rows), offset)
 
 
-__all__ = ["auto_accept", "auto_rules", "candidates", "choose", "destination", "find", "manual", "skip", "view"]
+__all__ = ["auto_accept", "auto_rules", "candidates", "choose", "destination", "find", "manual", "search", "skip", "view"]

@@ -252,6 +252,17 @@ class TrackPair:
     ok: bool
 
 
+FoundBy = Literal["barcode", "artist_album", "catno", "album", "text", "manual", "manual_search", ""]
+
+
+@dataclass(frozen=True)
+class MatchReason:
+    """One plain-language reason for (or against) a candidate, for the review screen."""
+    field: str  # "barcode", "album", "artist", "catno", "year", "track_count", "durations"
+    ok: bool  # True: speaks for this release
+    text: str  # e.g. "Catalog number LT-2CD matches"
+
+
 @dataclass(frozen=True)
 class Candidate:
     release_id: int
@@ -273,6 +284,10 @@ class Candidate:
     fetched: bool
     source: ProviderCredit
     auto_score: float | None = None  # the --auto score (search-result parts only); auto_accept uses it
+    # which search found it: barcode, artist_album, catno, album, text (title only), manual (release id/URL),
+    # manual_search (match.search); "" when unknown (found before 2026-10-21)
+    found_by: FoundBy = ""
+    reasons: list[MatchReason] = field(default_factory=list)  # barcode first (if known), then breakdown order
 
 
 @dataclass(frozen=True)

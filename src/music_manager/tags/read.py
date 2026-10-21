@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from mutagen import File as MutagenFile
@@ -45,6 +46,34 @@ def read_easy_tags(path: Path) -> dict[str, str]:
         if value:
             out[key] = str(value[0])
     return out
+
+
+BARCODE_KEYS = ("barcode", "upc", "ean", "txxx:barcode", "txxx:upc", "txxx:ean",
+                "----:com.apple.itunes:barcode", "wm/barcode", "wm/upc")
+
+
+def normalize_barcode(text: str | None) -> str:
+    """Digits of a UPC/EAN barcode ("5 012345-678900" -> "5012345678900"); "" unless it has 8 to 14 digits."""
+    digits = re.sub(r"[\s.-]", "", str(text or ""))
+    return digits if digits.isdigit() and 8 <= len(digits) <= 14 else ""
+
+
+def read_barcode(path: Path) -> str:
+    """The file's barcode tag (BARCODE, UPC or EAN, any format), as digits; "" if none."""
+    from .textmap import tag_text_map
+
+    _audio, tags = _read_tag_file(path)
+    if not tags:
+        return ""
+    try:
+        text = tag_text_map(tags)
+    except Exception:  # noqa: BLE001 - odd tags: no barcode
+        return ""
+    for key in BARCODE_KEYS:
+        found = normalize_barcode(text.get(key))
+        if found:
+            return found
+    return ""
 
 
 def already_tagged(path: Path) -> str | None:

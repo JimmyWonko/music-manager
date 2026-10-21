@@ -91,8 +91,8 @@ def test_types_are_frozen_with_the_contract_fields_and_defaults():
                                         "artist", "title", "cover"]  # additive: "", "", None
     assert names(service.FileChange) == ["kind", "path_before", "path_after", "tags", "skip_reason",
                                           "pinned"]  # pinned: additive, default False
-    assert names(service.Candidate)[-1] == "auto_score"  # additive, default None
-    assert names(service.Candidate)[:-1] == ["release_id", "master_id", "artist", "title", "year", "country", "label",
+    assert names(service.Candidate)[-3:] == ["auto_score", "found_by", "reasons"]  # additive: None, "", []
+    assert names(service.Candidate)[:-3] == ["release_id", "master_id", "artist", "title", "year", "country", "label",
                                         "catno", "formats", "score", "margin", "breakdown", "alignment",
                                         "artwork_url", "thumb_url", "artwork", "fetched", "source"]
     assert names(service.Operation)[-2:] == ["journal_format", "legacy"]
