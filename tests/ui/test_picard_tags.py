@@ -41,7 +41,9 @@ def test_migration_on_shows_year_removal_in_the_preview(fake, qtbot, album):
     fake.settings.set(migrate_tag_keys=True)
     d = _dialog(fake, qtbot, album)
     year = [r for r in _rows(d) if r.text(0) == "YEAR"]
-    assert year and all(r.text(1) == "1984" and r.text(2) == "(removed)" for r in year)
+    assert year and all(r.text(1) == "1984" and r.text(2) == "removed by migration" for r in year)
+    t = next(t for f in built(fake, [album]).albums[0].files for t in f.tags if t.key_before == "YEAR")
+    assert t.migration is True
     assert not any(r.text(0).startswith("YEAR renamed") for r in _rows(d))
 
 
@@ -100,3 +102,21 @@ def test_undo_plan_swaps_key_before_and_after(fake, album):
     rev = fake._c._reverse(plan, 1)
     t = next(t for f in rev.albums[0].files for t in f.tags if P.is_rename(t))
     assert (t.key_before, t.key_after) == ("TRACKTOTAL", "TOTALTRACKS")
+
+
+def test_plain_removals_keep_removed_label_and_renames_are_not_migrations(fake, qtbot, album):
+    plan = built(fake, [album])
+    assert all(not t.migration for f in plan.albums[0].files for t in f.tags if P.is_rename(t))
+    from mm_ui.fake_service import TagChange
+    assert P.removed_text(TagChange("genre", "Rock", None, "GENRE", None)) == "(removed)"
+    assert P.removed_text(TagChange("year", "1984", None, "YEAR", None, migration=True)) == "removed by migration"
+
+
+def test_unwritten_folder_is_filled_and_shown_in_tooltips(fake, qtbot, album):
+    plan = built(fake, [album])
+    ap = plan.albums[0]
+    assert ap.unwritten and all(u.folder == ap.folder_before for u in ap.unwritten)
+    assert all(any(w.startswith(f"{ap.folder_before}: {u.field}: ") for w in plan.warnings) for u in ap.unwritten)
+    d = ApplyDialog(plan); qtbot.addWidget(d)
+    marks = [r for r in _rows(d) if r.text(0).startswith("⚠ Not written")]
+    assert marks and all(str(ap.folder_before) in r.toolTip(0) for r in marks)

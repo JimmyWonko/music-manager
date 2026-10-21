@@ -1110,12 +1110,17 @@ class ApplyDialog(QDialog):
                     fi.addChild(ti)
                 else:
                     key = t.key_before if t.after is None and getattr(t, "key_before", None) else t.key
-                    fi.addChild(QTreeWidgetItem([key, t.before or "(none)", t.after or "(removed)"]))
+                    ti = QTreeWidgetItem([key, t.before or "(none)", t.after or P.removed_text(t)])
+                    if t.after is None and getattr(t, "migration", False):
+                        ti.setToolTip(2, "Removed because “Remove tag keys Picard doesn't write” is on; "
+                                         "undo restores it")
+                    fi.addChild(ti)
         for u in getattr(ap, "unwritten", None) or []:
             ui = QTreeWidgetItem([f"⚠ {P.UNWRITTEN_MARK}: {u.field}", P.unwritten_text(u).split(" — ", 1)[1],
                                   "existing value kept"])
             ui.setData(0, Qt.UserRole, "unwritten")
-            ui.setToolTip(0, P.unwritten_text(u)); ui.setToolTip(1, u.detail)
+            where = getattr(u, "folder", None) or ap.folder_before
+            ui.setToolTip(0, f"{P.unwritten_text(u)}\n{where}"); ui.setToolTip(1, f"{u.detail}\n{where}")
             font = ui.font(0); font.setItalic(True)
             for c in range(3):
                 ui.setForeground(c, QBrush(QColor(UNWRITTEN))); ui.setFont(c, font)

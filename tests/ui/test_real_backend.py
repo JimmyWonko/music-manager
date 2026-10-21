@@ -1311,7 +1311,10 @@ def test_real_picard_renames_unwritten_and_tag_settings(real, qtbot):
     d.boxes["migrate_tag_keys"].setChecked(True); d.save()
     assert svc.settings.get().migrate_tag_keys is True
     _plan, rows = dialog_rows()
-    assert ("YEAR", "1984", "(removed)") in rows, rows
+    assert ("YEAR", "1984", "removed by migration") in rows, rows
+    assert all(u.folder == folder for u in ap.unwritten), ap.unwritten
+    assert any(t.migration for f in _plan.albums[0].files for t in f.tags)
+    assert not any(t.migration for f in _plan.albums[0].files for t in f.tags if P.is_rename(t))
     tags = mutagen.File(folder / "01 One.flac")
     assert tags["YEAR"] == ["1984"] and tags["TOTALTRACKS"] == ["2"]    # nothing written before Apply
     assert any(P.is_rename(t) for f in _plan.albums[0].files for t in f.tags)

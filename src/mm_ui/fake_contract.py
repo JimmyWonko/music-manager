@@ -1387,7 +1387,7 @@ class FakeContract:
                 fcs.append(FileChange("track", before, after, tc, pinned=before in pinned))
                 tags += len(tc)
             moves += len(fcs)
-            unwritten = [] if problems else list(self.mock_unwritten.get(aid, []))
+            unwritten = [] if problems else [replace(u, folder=album.folder) for u in self.mock_unwritten.get(aid, [])]
             aps.append(AlbumPlan(aid, cand.release_id, album.folder, folder, fcs, problems, *self._plan_names(album, cand),
                                  unwritten=unwritten))
         wanted = [(ap.album_id, ap.release_id) for ap, err in not_fetched if err is None]
@@ -1400,7 +1400,7 @@ class FakeContract:
         not_fetched = pending
         order = {aid: i for i, aid in enumerate(album_ids)}
         aps = sorted(aps + not_fetched, key=lambda ap: order[ap.album_id])
-        warnings = [f"{ap.folder_before}: {u.field}: {u.detail}" for ap in aps for u in ap.unwritten]
+        warnings = [f"{u.folder or ap.folder_before}: {u.field}: {u.detail}" for ap in aps for u in ap.unwritten]
         if not_fetched:
             warnings.append(f"{len(not_fetched)} release(s) are being fetched from Discogs (job {fetch_job}): build "
                             "the plan again when it finishes" if fetch_job is not None
@@ -1538,7 +1538,7 @@ class FakeContract:
                 new = TAG_ALIASES[old]
                 out.append(TagChange(new.lower(), value, value, old, new))
             elif old == "YEAR" and self._settings.migrate_tag_keys:
-                out.append(TagChange("year", value, None, "YEAR", None))
+                out.append(TagChange("year", value, None, "YEAR", None, migration=True))
         return out
 
     def add_picard_demo(self, album_id: int) -> None:
@@ -1558,7 +1558,7 @@ class FakeContract:
     def _reverse(plan: Plan, new_id: int) -> Plan:
         aps = [AlbumPlan(ap.album_id, ap.release_id, ap.folder_after, ap.folder_before,
                          [FileChange(f.kind, f.path_after, f.path_before,
-                                     [TagChange(t.key, t.after, t.before, t.key_after, t.key_before) for t in f.tags]) for f in ap.files], [],
+                                     [TagChange(t.key, t.after, t.before, t.key_after, t.key_before, t.migration) for t in f.tags]) for f in ap.files], [],
                          ap.artist, ap.title)
                for ap in plan.albums]
         return Plan(new_id, aps, [], plan.files_to_move, plan.tags_to_write, 0)

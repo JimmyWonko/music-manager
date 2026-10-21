@@ -590,5 +590,13 @@ def is_rename(t) -> bool:
     return kb is not None and ka is not None and kb != ka
 
 
+MIGRATION_REMOVED = "removed by migration"
+
+
+def removed_text(t) -> str:
+    """After-column text of a removal: Settings.migrate_tag_keys removals (TagChange.migration) say so."""
+    return MIGRATION_REMOVED if getattr(t, "migration", False) else "(removed)"
+
+
 def rename_text(t) -> str:
     return f"{t.key_before} renamed to {t.key_after}"
