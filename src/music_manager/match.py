@@ -638,7 +638,8 @@ class SubtrackDecision:
     reason: "pinned" (a group pin forces it), "durations_fit" (merged); "not_needed" (the disc's counts
     already match), "ambiguous" (merging every group on the disc does not make its counts match),
     "durations_unknown" (Discogs or the file has no length), "durations_differ" (outside the tolerance),
-    "still_held" (the disc stays held after merging) - not merged.
+    "still_held" (the disc stays held after merging), "split" (the user split it), "merge_off" (automatic
+    merging is switched off) - not merged.
     """
     disc: int
     base: str
@@ -668,14 +669,15 @@ def subtrack_fits(file_s: float | None, total_s: float | None) -> bool:
 
 
 def collapse_subtracks(release, album_artist: str, album: AlbumFolder, title_match_min: float = TITLE_MATCH_MIN,
-                       forced=()) -> tuple[list[DiscogsTrack], list[SubtrackDecision]]:
+                       forced=(), auto: bool = True, split=()) -> tuple[list[DiscogsTrack], list[SubtrackDecision]]:
     """The release's tracks with subtracks that were ripped as one file merged (flatten_tracklist(merge=)).
 
     forced: position tuples (a group pin) merged whatever the counts. Every other group is merged only
     when its disc's file count differs from its track count, merging EVERY unforced group on that disc
     makes them equal, and each merged track's paired file is as long as its subtracks summed (within
     max(SUBTRACK_TOLERANCE_S, SUBTRACK_TOLERANCE_FRAC * sum)). Otherwise the disc is left as it was (held
-    by the caller as before). Returns (tracks, one SubtrackDecision per group in tracklist order).
+    by the caller as before). split: base positions ("2-9") never merged automatically; auto False: no
+    automatic merging at all (forced groups still merge). Returns (tracks, one SubtrackDecision per group in tracklist order).
     """
     from .providers.discogs import flatten_tracklist, subtrack_groups
 
@@ -693,11 +695,16 @@ def collapse_subtracks(release, album_artist: str, album: AlbumFolder, title_mat
     triples, _legacy, _conflicts, holds = align_tracks_detailed(album, dtracks, title_match_min)
     held = {h.disc: h.file_count for h in holds}
     reasons: dict[int, tuple[bool, str, Path | None]] = {}
+    no_split = {b.strip().casefold() for b in split or ()}
     for k, f in enumerate(is_forced):
         if f:
             reasons[k] = (True, "pinned", None)
+        elif groups[k].base.casefold() in no_split:
+            reasons[k] = (False, "split", None)
+        elif not auto:
+            reasons[k] = (False, "merge_off", None)
     for disc in sorted({g.disc for g in groups}):
-        ks = [k for k, g in enumerate(groups) if g.disc == disc and not is_forced[k]]
+        ks = [k for k, g in enumerate(groups) if g.disc == disc and k not in reasons]
         if not ks:
             continue
         tracks_d = sum(1 for dt in dtracks if dt.disc == disc)

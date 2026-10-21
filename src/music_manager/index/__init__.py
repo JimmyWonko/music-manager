@@ -94,6 +94,12 @@ CREATE TABLE IF NOT EXISTS pins(
     mtime_ns INTEGER,
     PRIMARY KEY(album_id, path)
 );
+CREATE TABLE IF NOT EXISTS subtrack_splits(
+    album_id INTEGER NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+    release_id INTEGER NOT NULL,
+    base TEXT NOT NULL,
+    PRIMARY KEY(album_id, release_id, base)
+);
 CREATE TABLE IF NOT EXISTS cluster_moves(
     path TEXT PRIMARY KEY,
     key TEXT NOT NULL

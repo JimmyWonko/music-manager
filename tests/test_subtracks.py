@@ -290,10 +290,6 @@ def test_track_pair_positions_is_appended_last():
 
 # --- merge_subtracks setting and per-album splits ----------------------------------------------------------------
 
-SPLIT_TODO = pytest.mark.xfail(strict=True, reason="merge_subtracks / split_subtracks: not implemented yet")
-
-
-@SPLIT_TODO
 def test_merge_subtracks_setting_defaults_on_and_switches_auto_merging_off(lib):
     aid = lib.prine_id
     assert service.settings.get().merge_subtracks is True
@@ -311,7 +307,6 @@ def test_merge_subtracks_setting_defaults_on_and_switches_auto_merging_off(lib):
     assert service.settings.set(merge_subtracks=True).merge_subtracks is True
 
 
-@SPLIT_TODO
 def test_split_subtracks_undoes_an_automatic_merge_and_is_reversible(lib):
     from service_fixtures import direct
 
@@ -339,7 +334,6 @@ def test_split_subtracks_undoes_an_automatic_merge_and_is_reversible(lib):
     assert service.plan.build([aid]).albums[0].problems == []
 
 
-@SPLIT_TODO
 def test_split_subtracks_validation(lib):
     aid = lib.prine_id
     with pytest.raises(service.ValidationError):
@@ -353,7 +347,6 @@ def test_split_subtracks_validation(lib):
     assert service.match.subtrack_splits(aid) == []
 
 
-@SPLIT_TODO
 def test_settings_field_appended_last():
     import dataclasses
 

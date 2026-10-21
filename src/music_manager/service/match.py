@@ -436,6 +436,51 @@ def pin(album_id: int, file: Path, position: str = "", override_hold: bool = Fal
     return to_pin(st.index.one("SELECT * FROM pins WHERE album_id = ? AND path = ?", (album_id, str(path))))
 
 
+def split_subtracks(album_id: int, base_position: str, release_id: int | None = None) -> None:
+    """Undo an automatic subtrack merge for one group: its subtracks ("2-9a", "2-9b") stay separate release
+    tracks for this album and release (MatchView.subtrack_groups reason "split"). Stored in the index next to
+    the pins, so it survives rescans; idempotent; unsplit_subtracks reverses it. A group pin still merges.
+    release_id None: the chosen release, else the best candidate. Emits match_view_changed(album_id).
+    """
+    st = state()
+    album_record(album_id, st)
+    base = str(base_position or "").strip()
+    if not base:
+        raise ValidationError("base_position is empty", field="base_position")
+    rid = int(release_id) if release_id is not None else chosen_release_id(album_id, st)
+    if rid is None:
+        raise MMError(f"album {album_id} has no candidates: run match.find first")
+    with st.index.tx() as conn:
+        conn.execute("INSERT OR IGNORE INTO subtrack_splits(album_id, release_id, base) VALUES(?, ?, ?)",
+                     (album_id, rid, base))
+    events.match_view_changed.emit(album_id)
+
+
+def unsplit_subtracks(album_id: int, base_position: str | None = None, release_id: int | None = None) -> None:
+    """Reverse split_subtracks: one group (base_position) or every split of the album (None), for one release
+    (release_id) or all of them (None). Emits match_view_changed(album_id)."""
+    st = state()
+    album_record(album_id, st)
+    sql, args = "DELETE FROM subtrack_splits WHERE album_id = ?", [album_id]
+    if base_position is not None:
+        sql, args = sql + " AND base = ?", [*args, str(base_position).strip()]
+    if release_id is not None:
+        sql, args = sql + " AND release_id = ?", [*args, int(release_id)]
+    with st.index.tx() as conn:
+        conn.execute(sql, args)
+    events.match_view_changed.emit(album_id)
+
+
+def subtrack_splits(album_id: int, release_id: int | None = None) -> list[str]:
+    """The album's split groups (base positions), for one release or all, sorted, without repeats."""
+    st = state()
+    album_record(album_id, st)
+    sql, args = "SELECT DISTINCT base FROM subtrack_splits WHERE album_id = ?", [album_id]
+    if release_id is not None:
+        sql, args = sql + " AND release_id = ?", [album_id, int(release_id)]
+    return [r["base"] for r in st.index.query(sql + " ORDER BY base", args)]
+
+
 def unpin(album_id: int, file: Path | None = None) -> None:
     """Drop one file's pin, or every pin of the album (file None). Emits match_view_changed(album_id)."""
     st = state()

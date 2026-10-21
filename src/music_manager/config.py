@@ -43,8 +43,9 @@ class Config:
     replace_cover_art: bool | None = None
     cover_source: str | None = None
     cover_max_bytes: int | None = None
+    merge_subtracks: bool = True  # merge subtracks ripped as one file automatically (match.collapse_subtracks)
 
-    BOOLS = ("sequential_sides", "save_cover_art", "clear_other_tags")
+    BOOLS = ("sequential_sides", "save_cover_art", "clear_other_tags", "merge_subtracks")
     OPTIONAL: ClassVar[dict[str, type]] = {"embed_cover_art": bool, "replace_cover_art": bool, "cover_source": str, "cover_max_bytes": int}
 
 

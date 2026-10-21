@@ -296,7 +296,8 @@ def subtrack_reasons(decisions) -> list[MatchReason]:
                "not_needed": "the track counts already match", "ambiguous": "merging them doesn't settle the count",
                "durations_unknown": "no lengths to confirm it is one file",
                "durations_differ": "the file's length doesn't match their sum",
-               "still_held": "the disc still doesn't pair"}.get(d.reason, d.reason)
+               "still_held": "the disc still doesn't pair", "split": "split by hand",
+               "merge_off": "automatic merging is off"}.get(d.reason, d.reason)
         out.append(MatchReason("subtracks", d.merged, f"Subtracks {names} {'taken as one track' if d.merged else 'kept apart'}"
                                f": {why}"))
     return out

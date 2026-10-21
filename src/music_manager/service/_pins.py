@@ -140,6 +140,9 @@ def release_tracks(st: State, album_id: int, release_id: int, album: AlbumFolder
         key = tuple(p.casefold() for p in pin.positions)
         if len(key) > 1 and key in keys and not pin.stale and pin.path in files:
             forced.append(tuple(pin.positions))
-    dtracks, decisions = collapse_subtracks(release, release_artists(release), album, title_match_min, forced)
+    splits = [r["base"] for r in st.index.query(
+        "SELECT base FROM subtrack_splits WHERE album_id = ? AND release_id = ?", (album_id, int(release_id)))]
+    dtracks, decisions = collapse_subtracks(release, release_artists(release), album, title_match_min, forced,
+                                            auto=st.config().merge_subtracks, split=splits)
     usable, problems, overrides = resolve(st, album_id, release_id, album, dtracks, title_match_min)
     return dtracks, decisions, usable, problems, overrides

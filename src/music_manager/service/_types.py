@@ -377,7 +377,8 @@ class SubtrackGroup:
     a rip often has as ONE file. merged: they are one release track here (position "2-9", title "A / B").
 
     reason: "pinned" (a group pin), "durations_fit" (merged); "not_needed", "ambiguous", "durations_unknown",
-    "durations_differ", "still_held" (not merged; see match.collapse_subtracks).
+    "durations_differ", "still_held", "split" (match.split_subtracks), "merge_off" (settings merge_subtracks
+    False) - not merged; see match.collapse_subtracks.
     """
     disc: int
     position: str  # the base: "2-9"
@@ -542,3 +543,4 @@ class Settings:
     replace_cover_art: bool = False
     cover_source: CoverSource = "folder_first"
     cover_max_bytes: int = 0
+    merge_subtracks: bool = True  # automatic subtrack merging (2026-10-21); group pins merge either way
