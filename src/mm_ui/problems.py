@@ -562,3 +562,33 @@ def pin_conflicts(problem) -> list:
 def pin_conflict_text(c) -> str:
     why = PIN_REASONS.get(c.reason, "the engine can't use this pair ({reason}).")
     return f"{Path(c.path).name} → {c.position}: " + why.format(position=c.position, reason=c.reason)
+
+
+# ---------------------------------------------------------------- Picard tag names (2026-10-21)
+# AlbumPlan.unwritten reasons: why a tag was held back (an existing value is kept). Unknown codes show `detail`.
+UNWRITTEN_REASONS = {
+    "conflicting_barcodes": "the release's barcodes disagree",
+    "region_not_country": "Discogs gives a region, not a country",
+    "unknown_country": "Discogs' country isn't one we can name",
+    "mixed_media": "the release mixes media",
+    "no_single_type": "the release has no single release type",
+    "missing_catalog_number": "some labels have no catalog number",
+}
+UNWRITTEN_MARK = "Not written"
+
+
+def unwritten_text(u) -> str:
+    """ "Not written: barcode — the release's barcodes disagree (…detail…)"; an unknown reason shows its detail."""
+    label = UNWRITTEN_REASONS.get(getattr(u, "reason", ""))
+    why = f"{label} ({u.detail})" if label and u.detail else (label or u.detail or u.reason)
+    return f"{UNWRITTEN_MARK}: {u.field} — {why}"
+
+
+def is_rename(t) -> bool:
+    """A TagChange whose key changes (TagChange.key_before -> key_after, both present)."""
+    kb, ka = getattr(t, "key_before", None), getattr(t, "key_after", None)
+    return kb is not None and ka is not None and kb != ka
+
+
+def rename_text(t) -> str:
+    return f"{t.key_before} renamed to {t.key_after}"

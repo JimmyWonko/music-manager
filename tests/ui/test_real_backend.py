@@ -1259,3 +1259,59 @@ def test_real_subtracks_split_errors_and_merge_setting_events(real, qtbot):
     svc.settings.set(merge_subtracks=False)
     assert seen.count(aid) == 1, seen
     assert _st_row(w, "2-2a + 2-2b").text(6) == "not merged" and not w.merge_box.isChecked()
+
+
+# ---------------------------------------------------------------- Picard tag names (contract 2026-10-21)
+def test_real_picard_renames_unwritten_and_tag_settings(real, qtbot):
+    import mutagen
+    from mm_ui import problems as P
+    from mm_ui.review import ApplyDialog
+    from mm_ui.tagsettings import TagSettingsDialog
+    svc = real["svc"]
+    if not hasattr(svc.settings.get(), "migrate_tag_keys"):
+        pytest.skip("service predates Picard tag names (bfc1fb6)")
+    title, rid = "Picard Keys", 751
+    folder = real["lib"] / "Key Band" / f"[1984]  {title} [KEY{rid}]"
+    for i, t in enumerate(["One", "Two"], 1):
+        path = folder / f"{i:02d} {t}.flac"
+        tone(path)
+        f = mutagen.File(path); f["TOTALTRACKS"] = "2"; f["YEAR"] = "1984"; f.save()
+    r = release(rid, "Key Band", title, 1984, f"KEY {rid}", ["One", "Two"])
+    r["country"] = "UK & Europe"
+    r["identifiers"] = [{"type": "Barcode", "value": "0 18861 00232 7"}, {"type": "Barcode", "value": "0 18861 00233 4"}]
+    real["discogs"].releases[rid] = r
+    assert svc._c.jobs.wait(svc.library.scan().id).state.name == "DONE"
+    (row,) = [x for x in svc.albums(None, limit=50).items if x.title == title]
+    assert svc._c.jobs.wait(svc.match.find([row.id]).id).state.name == "DONE"
+    svc.match.choose(row.id, rid)
+
+    def dialog_rows():
+        plan = svc.plan.build([row.id])
+        if plan.fetch_job is not None:
+            svc._c.jobs.wait(plan.fetch_job)
+            plan = svc.plan.build([row.id])
+        d = ApplyDialog(plan); qtbot.addWidget(d)
+
+        def walk(it):
+            for i in range(it.childCount()):
+                yield it.child(i); yield from walk(it.child(i))
+        return plan, [(x.text(0), x.text(1), x.text(2)) for x in walk(d.tree.invisibleRootItem())]
+
+    plan, rows = dialog_rows()
+    (ap,) = plan.albums
+    assert {(u.field, u.reason) for u in ap.unwritten} >= {("barcode", "conflicting_barcodes"),
+                                                          ("releasecountry", "region_not_country")}, ap.unwritten
+    marks = {a: b for a, b, _c in rows if a.startswith("⚠ Not written")}
+    assert marks["⚠ Not written: barcode"].startswith("the release's barcodes disagree")
+    assert marks["⚠ Not written: releasecountry"].startswith("Discogs gives a region, not a country")
+    assert ("TOTALTRACKS renamed to TRACKTOTAL", "2", "TRACKTOTAL") in rows, rows
+    assert not any(a == "YEAR" for a, _b, _c in rows)                     # migration off
+    d = TagSettingsDialog(svc); qtbot.addWidget(d)
+    assert not any(b.isChecked() for b in d.boxes.values())
+    d.boxes["migrate_tag_keys"].setChecked(True); d.save()
+    assert svc.settings.get().migrate_tag_keys is True
+    _plan, rows = dialog_rows()
+    assert ("YEAR", "1984", "(removed)") in rows, rows
+    tags = mutagen.File(folder / "01 One.flac")
+    assert tags["YEAR"] == ["1984"] and tags["TOTALTRACKS"] == ["2"]    # nothing written before Apply
+    assert any(P.is_rename(t) for f in _plan.albums[0].files for t in f.tags)
