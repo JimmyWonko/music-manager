@@ -90,7 +90,7 @@ def test_types_are_frozen_with_the_contract_fields_and_defaults():
     assert names(service.AlbumPlan) == ["album_id", "release_id", "folder_before", "folder_after", "files", "problems",
                                         "artist", "title", "cover"]  # additive: "", "", None
     assert names(service.FileChange) == ["kind", "path_before", "path_after", "tags", "skip_reason",
-                                          "pinned"]  # pinned: additive, default False
+                                          "pinned", "merged_subtracks"]  # pinned, merged_subtracks: additive
     assert names(service.Candidate)[-3:] == ["auto_score", "found_by", "reasons"]  # additive: None, "", []
     assert names(service.Candidate)[:-3] == ["release_id", "master_id", "artist", "title", "year", "country", "label",
                                         "catno", "formats", "score", "margin", "breakdown", "alignment",

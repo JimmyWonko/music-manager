@@ -140,7 +140,8 @@ def _file_changes(t: AlbumTarget, clear_other: bool, warnings: list[str]) -> lis
         except Exception as exc:  # noqa: BLE001 - unreadable file: the apply will report it
             tags = []
             warnings.append(f"cannot read the tags of {item.source}: {exc}")
-        changes.append(FileChange("track", item.source, item.dest, tags, pinned=method == "manual"))
+        changes.append(FileChange("track", item.source, item.dest, tags, pinned=method == "manual",
+                                  merged_subtracks=list(_dt.subtracks) if _dt is not None else []))
     for item in layout.moves:
         changes.append(FileChange("extra", item.source, item.dest, []))
     for old in layout.old_playlists:

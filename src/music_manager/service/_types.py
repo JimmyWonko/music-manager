@@ -146,7 +146,7 @@ DISCOGS_CREDIT = ProviderCredit("Discogs", "Data provided by Discogs", "https://
 
 
 PinConflictReason = Literal["stale", "unknown_position", "duplicate_position", "override_hold_required",
-                            "disc_folder_mismatch"]
+                            "disc_folder_mismatch", "not_subtrack_group"]
 
 
 @dataclass(frozen=True)
@@ -157,7 +157,8 @@ class PinConflict:
     # stale: the file changed or left the album since it was pinned; unknown_position: not on the release;
     # duplicate_position: another pin names the same track; override_hold_required: the engine holds this
     # file (disc_ambiguous / disc_track_count); disc_folder_mismatch: the file sits in another disc's CD
-    # folder. The last two are used with override_hold=True.
+    # folder. Those two are used with override_hold=True. not_subtrack_group: a group pin (positions) that
+    # is not exactly one subtrack group of the release, in order (2026-10-21).
     reason: PinConflictReason
 
 
@@ -240,6 +241,7 @@ class RemoteTrack:
     title: str
     artist: str
     duration_s: float | None
+    subtracks: list[str] = field(default_factory=list)  # merged subtrack positions ["2-9a", "2-9b"] (2026-10-21)
 
 
 @dataclass(frozen=True)
@@ -353,6 +355,9 @@ class Pin:
     release_id: int  # pins apply to this release only
     override_hold: bool  # the user accepted overriding a disc hold for this file
     stale: bool  # the file changed since it was pinned: ignored (a PIN_CONFLICT) until pinned again
+    # the pinned positions: [position] for one track; a subtrack group ["2-9a", "2-9b"] for one file that is
+    # several subtracks (then position is "2-9a+2-9b"). 2026-10-21.
+    positions: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -362,6 +367,24 @@ class ManualPair:
     path: Path  # the file before the apply
     position: str
     override_hold: bool
+
+
+@dataclass(frozen=True)
+class SubtrackGroup:
+    """Release tracks sharing one base position (2-9a + 2-9b, 9.1 + 9.2, an index track's sub_tracks), which
+    a rip often has as ONE file. merged: they are one release track here (position "2-9", title "A / B").
+
+    reason: "pinned" (a group pin), "durations_fit" (merged); "not_needed", "ambiguous", "durations_unknown",
+    "durations_differ", "still_held" (not merged; see match.collapse_subtracks).
+    """
+    disc: int
+    position: str  # the base: "2-9"
+    positions: list[str]  # ["2-9a", "2-9b"]
+    titles: list[str]
+    merged: bool
+    reason: str
+    path: Path | None  # the file paired with the merged track; None when not merged (or unpaired)
+    duration_s: float | None  # summed Discogs length; None unless every subtrack lists one
 
 
 @dataclass(frozen=True)
@@ -376,6 +399,8 @@ class MatchView:
     unmatched_tracks: list[RemoteTrack]  # release tracks with no local file
     problems: list[Problem]  # what plan.build would hold this album for with this release
     pins: list[Pin] = field(default_factory=list)  # the album's pins for this release
+    # the release's subtrack groups (2-9a/2-9b ...), merged or not and why; the UI shows a merged one as one row
+    subtrack_groups: list[SubtrackGroup] = field(default_factory=list)
 
 
 # --- plans ----------------------------------------------------------------------
@@ -395,6 +420,7 @@ class FileChange:
     tags: list[TagChange]
     skip_reason: str | None = None  # None means the step runs
     pinned: bool = False  # a track paired by the user (match.pin)
+    merged_subtracks: list[str] = field(default_factory=list)  # this file is these subtracks ["2-9a", "2-9b"]
 
 
 CoverSource = Literal["folder_first", "discogs_first", "folder", "discogs"]

@@ -30,7 +30,7 @@ from ..providers.discogs import (
 from ..tags.read import normalize_barcode
 from ._common import album_folder, album_record, local_tracks
 from ._common import title_match_min as rules_title_match_min
-from ._pins import resolve as resolve_pins
+from ._pins import release_tracks
 from ._state import State, events, state
 from ._types import (
     DISCOGS_CREDIT,
@@ -167,7 +167,7 @@ def album_tracks(release: DiscogsRelease) -> list[DiscogsTrack]:
 
 
 def _remote(dt: DiscogsTrack) -> RemoteTrack:
-    return RemoteTrack(dt.position, dt.disc, dt.number, dt.title, dt.artist, dt.duration_s)
+    return RemoteTrack(dt.position, dt.disc, dt.number, dt.title, dt.artist, dt.duration_s, list(dt.subtracks))
 
 
 def alignment(album: AlbumFolder, locals_: list[LocalTrack], dtracks: list[DiscogsTrack],
@@ -284,6 +284,21 @@ def barcode_matches(search: SearchResult, release: DiscogsRelease | None, barcod
     return barcode in listed or any(b.lstrip("0") == barcode.lstrip("0") for b in listed)
 
 
+def subtrack_reasons(decisions) -> list[MatchReason]:
+    """One "subtracks" reason per subtrack group (match.SubtrackDecision), after the score's reasons."""
+    out = []
+    for d in decisions:
+        names = " + ".join(d.positions)
+        why = {"pinned": "paired by hand with one file", "durations_fit": "one file as long as both together",
+               "not_needed": "the track counts already match", "ambiguous": "merging them doesn't settle the count",
+               "durations_unknown": "no lengths to confirm it is one file",
+               "durations_differ": "the file's length doesn't match their sum",
+               "still_held": "the disc still doesn't pair"}.get(d.reason, d.reason)
+        out.append(MatchReason("subtracks", d.merged, f"Subtracks {names} {'taken as one track' if d.merged else 'kept apart'}"
+                               f": {why}"))
+    return out
+
+
 def reasons(parts: list[ScorePart], barcode: str, barcode_ok: bool | None, fetched: bool) -> list[MatchReason]:
     """Candidate.reasons: the score's parts (and the barcode) in plain words."""
     out: list[MatchReason] = []
@@ -343,21 +358,22 @@ def build_candidates(album_id: int, st: State | None = None) -> list[Candidate]:
         release = json.loads(crow["release"]) if crow["release"] else None
         pairs = None
         remote_count = None
+        decisions: list = []
         if release is not None:
             if folder is None:
                 folder = album_folder(album_id, st)
-            dtracks = album_tracks(release)
-            pins = resolve_pins(st, album_id, int(crow["release_id"]), folder, dtracks, rules_title_match_min())[0]
+            dtracks, decisions, pins, _problems, _overrides = release_tracks(
+                st, album_id, int(crow["release_id"]), folder, release, rules_title_match_min())
             pairs = alignment(folder, locals_, dtracks, pins=pins)
             remote_count = len(dtracks)
         auto = score_result(search, guess)  # exactly the --auto score
         score = service_score(auto, pairs, len(locals_), remote_count)
         bc_ok = barcode_matches(search, release, barcode)
-        scored.append((score, crow["rank"], crow, search, release, pairs, remote_count, auto, bc_ok))
+        scored.append((score, crow["rank"], crow, search, release, pairs, remote_count, auto, bc_ok, decisions))
     # equal scores: a release with the album's barcode first, then search order
     scored.sort(key=lambda x: (-round(x[0], 9), not x[8], x[1]))
     out = []
-    for i, (score, _rank, crow, search, release, pairs, remote_count, auto, bc_ok) in enumerate(scored):
+    for i, (score, _rank, crow, search, release, pairs, remote_count, auto, bc_ok, decisions) in enumerate(scored):
         margin = score - scored[i + 1][0] if i + 1 < len(scored) else None
         r_artist, r_title = split_result_title(search.get("title") or "")
         if release is not None:
@@ -386,7 +402,7 @@ def build_candidates(album_id: int, st: State | None = None) -> list[Candidate]:
             source=DISCOGS_CREDIT,
             auto_score=auto,
             found_by=search.get("_via") or ("manual" if crow["rank"] < 0 else ""),
-            reasons=reasons(parts, barcode, bc_ok, release is not None),
+            reasons=reasons(parts, barcode, bc_ok, release is not None) + subtrack_reasons(decisions),
         ))
     return out
 

@@ -41,6 +41,8 @@ from ._types import (
     Page,
     Pin,
     ProviderError,
+    SubtrackGroup,
+    TrackPair,
     ValidationError,
 )
 
@@ -375,13 +377,20 @@ def view(album_or_cluster_id: int | str, release_id: int | None = None) -> Match
     return MatchView(album_id, cluster_id, rid, True, cands, pairs,
                      [p.local for p in pairs if p.remote is None and p.local is not None],
                      [p.remote for p in pairs if p.local is None and p.remote is not None], list(target.problems),
-                     pin_list)
+                     pin_list, _subtrack_groups(target.subtracks, pairs))
+
+
+def _subtrack_groups(decisions, pairs: list[TrackPair]) -> list[SubtrackGroup]:
+    by_group = {tuple(p.remote.subtracks): p.local.path for p in pairs
+                if p.remote is not None and p.remote.subtracks and p.local is not None}
+    return [SubtrackGroup(d.disc, d.base, list(d.positions), list(d.titles), d.merged, d.reason,
+                          by_group.get(tuple(d.positions)) if d.merged else None, d.duration_s) for d in decisions]
 
 
 # --- manual pairs ------------------------------------------------------------------
 
-def pin(album_id: int, file: Path, position: str, override_hold: bool = False,
-        release_id: int | None = None) -> Pin:
+def pin(album_id: int, file: Path, position: str = "", override_hold: bool = False,
+        release_id: int | None = None, positions: list[str] | None = None) -> Pin:
     """Pair one file with one release track by hand (drag-and-drop). Index only; replaces the file's pin.
 
     release_id None: the chosen release, else the best candidate (pins apply to that release only).
@@ -390,12 +399,24 @@ def pin(album_id: int, file: Path, position: str, override_hold: bool = False,
     everything else (unknown position, two files on one track, a disc hold) is a PIN_CONFLICT in
     view / plan.build. A pin that overrides a disc hold needs override_hold=True. Emits
     match_view_changed(album_id).
+
+    positions (2026-10-21): instead of position, a subtrack group ["2-9a", "2-9b"]: this ONE file is those
+    subtracks (MatchView.subtrack_groups). The group is then merged into one track whatever the counts or
+    lengths; positions that are not exactly one group, in order, are a PIN_CONFLICT "not_subtrack_group".
+    Stored as position "2-9a+2-9b". Give position or positions (2+ entries), not both: ValidationError.
     """
     st = state()
     album_record(album_id, st)
     path = Path(file)
     if path not in {t.path for t in local_tracks(album_id, st)}:
         raise ValidationError(f"{path} is not a file of album {album_id}", field="file")
+    if positions is not None:
+        if str(position or "").strip():
+            raise ValidationError("give position or positions, not both", field="positions")
+        parts = [str(p).strip() for p in positions]
+        if len(parts) < 2 or not all(parts) or any("+" in p for p in parts):
+            raise ValidationError("positions needs two or more release positions", field="positions")
+        position = "+".join(parts)
     if not str(position or "").strip():
         raise ValidationError("position is empty", field="position")
     rid = int(release_id) if release_id is not None else chosen_release_id(album_id, st)

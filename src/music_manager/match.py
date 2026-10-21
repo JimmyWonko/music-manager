@@ -623,3 +623,123 @@ def align_tracks_detailed(
 def ambiguous_disc_files(triples: list[tuple[Path, DiscogsTrack | None, str]]) -> list[Path]:
     """The files align_tracks refused because their disc cannot be told (method "ambiguous_disc")."""
     return [local for local, _dt, method in triples if method == "ambiguous_disc"]
+
+
+# --- subtracks (2026-10-21) ----------------------------------------------------------------------------------------
+
+SUBTRACK_TOLERANCE_S = 5.0  # a merged file's length may differ from its subtracks' summed length by
+SUBTRACK_TOLERANCE_FRAC = 0.03  # max(5 s, 3 % of the sum): gaps, pre-gap and rounding of Discogs' m:ss
+
+
+@dataclass(frozen=True)
+class SubtrackDecision:
+    """Whether one subtrack group (see providers.discogs.subtrack_groups) was made one track.
+
+    reason: "pinned" (a group pin forces it), "durations_fit" (merged); "not_needed" (the disc's counts
+    already match), "ambiguous" (merging every group on the disc does not make its counts match),
+    "durations_unknown" (Discogs or the file has no length), "durations_differ" (outside the tolerance),
+    "still_held" (the disc stays held after merging) - not merged.
+    """
+    disc: int
+    base: str
+    positions: tuple[str, ...]
+    titles: tuple[str, ...]
+    merged: bool
+    reason: str
+    path: Path | None = None  # the file paired with the merged track (engine pairing, before pins)
+    duration_s: float | None = None  # the subtracks' summed Discogs length, when all are listed
+
+
+def _file_length(path: Path) -> float | None:
+    try:
+        from mutagen import File as MutagenFile
+
+        audio = MutagenFile(path)
+        length = getattr(getattr(audio, "info", None), "length", None)
+        return float(length) if length else (0.0 if audio is not None and length == 0 else None)
+    except Exception:  # noqa: BLE001 - an unreadable file just has no length
+        return None
+
+
+def subtrack_fits(file_s: float | None, total_s: float | None) -> bool:
+    if file_s is None or total_s is None:
+        return False
+    return abs(file_s - total_s) <= max(SUBTRACK_TOLERANCE_S, SUBTRACK_TOLERANCE_FRAC * total_s)
+
+
+def collapse_subtracks(release, album_artist: str, album: AlbumFolder, title_match_min: float = TITLE_MATCH_MIN,
+                       forced=()) -> tuple[list[DiscogsTrack], list[SubtrackDecision]]:
+    """The release's tracks with subtracks that were ripped as one file merged (flatten_tracklist(merge=)).
+
+    forced: position tuples (a group pin) merged whatever the counts. Every other group is merged only
+    when its disc's file count differs from its track count, merging EVERY unforced group on that disc
+    makes them equal, and each merged track's paired file is as long as its subtracks summed (within
+    max(SUBTRACK_TOLERANCE_S, SUBTRACK_TOLERANCE_FRAC * sum)). Otherwise the disc is left as it was (held
+    by the caller as before). Returns (tracks, one SubtrackDecision per group in tracklist order).
+    """
+    from .providers.discogs import flatten_tracklist, subtrack_groups
+
+    groups = subtrack_groups(release)
+    if not groups:
+        return flatten_tracklist(release, album_artist), []
+    want = {tuple(p.casefold() for p in f) for f in forced or ()}
+    is_forced = [tuple(p.casefold() for p in g.positions) in want for g in groups]
+    merge = [g.positions for g, f in zip(groups, is_forced) if f]
+
+    def total(g):
+        return sum(g.durations) if all(d is not None for d in g.durations) else None  # type: ignore[arg-type]
+
+    dtracks = flatten_tracklist(release, album_artist, merge)
+    triples, _legacy, _conflicts, holds = align_tracks_detailed(album, dtracks, title_match_min)
+    held = {h.disc: h.file_count for h in holds}
+    reasons: dict[int, tuple[bool, str, Path | None]] = {}
+    for k, f in enumerate(is_forced):
+        if f:
+            reasons[k] = (True, "pinned", None)
+    for disc in sorted({g.disc for g in groups}):
+        ks = [k for k, g in enumerate(groups) if g.disc == disc and not is_forced[k]]
+        if not ks:
+            continue
+        tracks_d = sum(1 for dt in dtracks if dt.disc == disc)
+        files_d = held.get(disc, sum(1 for _p, dt, _m in triples if dt is not None and dt.disc == disc))
+
+        def settle(reason, merged=False, paths=None, ks=ks):
+            for k in ks:
+                reasons[k] = (merged, reason, (paths or {}).get(k))
+
+        if files_d == tracks_d and disc not in held:
+            settle("not_needed")
+            continue
+        if tracks_d - sum(len(groups[k].positions) - 1 for k in ks) != files_d:
+            settle("ambiguous")
+            continue
+        if any(total(groups[k]) is None for k in ks):
+            settle("durations_unknown")
+            continue
+        trial = flatten_tracklist(release, album_artist, merge + [groups[k].positions for k in ks])
+        t_triples, _l, _c, t_holds = align_tracks_detailed(album, trial, title_match_min)
+        if any(h.disc == disc for h in t_holds):
+            settle("still_held")
+            continue
+        paths: dict[int, Path] = {}
+        verdict = "durations_fit"
+        for k in ks:
+            key = groups[k].positions
+            local = next((p for p, dt, _m in t_triples if dt is not None and dt.subtracks == key), None)
+            length = _file_length(local) if local is not None else None
+            if local is None or length is None:
+                verdict = "durations_unknown"
+                break
+            if not subtrack_fits(length, total(groups[k])):
+                verdict = "durations_differ"
+                break
+            paths[k] = local
+        if verdict != "durations_fit":
+            settle(verdict)
+            continue
+        settle(verdict, True, paths)
+        merge += [groups[k].positions for k in ks]
+    final = flatten_tracklist(release, album_artist, merge) if len(merge) > sum(is_forced) else dtracks
+    decisions = [SubtrackDecision(g.disc, g.base, g.positions, g.titles, *reasons[k], duration_s=total(g))
+                 for k, g in enumerate(groups)]
+    return final, decisions

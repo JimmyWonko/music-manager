@@ -11,15 +11,8 @@ from service_fixtures import Library, fixture_release, make_album, search_result
 
 from music_manager import service
 from music_manager.fs import AlbumFolder
-from music_manager.providers.discogs import flatten_tracklist
-
-try:  # not implemented yet: every test is a strict xfail until the implementation commit
-    from music_manager.match import collapse_subtracks
-    from music_manager.providers.discogs import subtrack_groups
-except ImportError:
-    collapse_subtracks = subtrack_groups = None
-
-TODO = pytest.mark.xfail(strict=True, reason="subtracks: not implemented yet")
+from music_manager.match import collapse_subtracks
+from music_manager.providers.discogs import flatten_tracklist, subtrack_groups
 
 PRINE = 4054414
 TIMED = 4054415  # the same tracklist with durations that fit the one file
@@ -63,14 +56,12 @@ def test_fixture_is_the_trimmed_real_release():
     assert all(not t["duration"] for t in rel["tracklist"])  # Discogs lists no durations for 4054414
 
 
-@TODO
 def test_subtrack_groups_finds_letter_suffixes():
     [g] = subtrack_groups(prine())
     assert (g.disc, g.base, g.positions, g.titles) == (2, "2-9", ("2-9a", "2-9b"), (HEY, JAMBA))
     assert g.durations == (None, None)
 
 
-@TODO
 def test_subtrack_groups_finds_index_sub_tracks_and_dotted_positions():
     rel = {"tracklist": [
         {"position": "1", "type_": "track", "title": "One", "duration": "3:00"},
@@ -91,12 +82,10 @@ def test_subtrack_groups_finds_index_sub_tracks_and_dotted_positions():
     assert merged[1].duration_s == 150 and merged[2].duration_s is None and merged[1].position == "2"
 
 
-@TODO
 def test_vinyl_side_letters_are_not_subtracks():
     assert subtrack_groups(fixture_release("vinyl_lp")) == []
 
 
-@TODO
 def test_flatten_merge_keeps_discogs_numbers():
     rel = prine()
     plain = flatten_tracklist(rel, "John Prine")
@@ -118,7 +107,6 @@ def _album(tmp_path, rel, merge=True):
     return folder
 
 
-@TODO
 @pytest.mark.parametrize(("rel", "reason", "merged"), [
     (timed(prine()), "durations_fit", True),
     (prine(), "durations_unknown", False),
@@ -132,7 +120,6 @@ def test_collapse_only_when_counts_and_durations_fit(tmp_path, rel, reason, merg
     assert len(dtracks) == (24 if merged else 25)
 
 
-@TODO
 def test_no_collapse_when_counts_already_match(tmp_path):
     rel = timed(prine())
     album = folder_of(_album(tmp_path, rel, merge=False))
@@ -140,7 +127,6 @@ def test_no_collapse_when_counts_already_match(tmp_path):
     assert (d.reason, d.merged, len(dtracks)) == ("not_needed", False, 25)
 
 
-@TODO
 def test_ambiguous_when_merging_every_group_overshoots(tmp_path):
     rel = timed(prine())
     rel["tracklist"] = [dict(t, position={"2-12": "2-12a", "2-13": "2-12b"}.get(t["position"], t["position"]))
@@ -177,7 +163,6 @@ def _file(lib, prefix):
     return next(p for p in sorted(lib.prine.iterdir()) if p.name.startswith(prefix))
 
 
-@TODO
 def test_timed_release_collapses_into_plan_view_and_score(lib):
     aid = lib.prine_id
     cands = {c.release_id: c for c in service.match.candidates(aid)}
@@ -209,7 +194,6 @@ def test_timed_release_collapses_into_plan_view_and_score(lib):
     assert ten_tags["title"] == "Quiet Man"
 
 
-@TODO
 @pytest.mark.parametrize(("rid", "reason"), [(PRINE, "durations_unknown"), (SLOW, "durations_differ")])
 def test_untimed_or_misfit_release_keeps_the_hold(lib, rid, reason):
     view = service.match.view(lib.prine_id, rid)
@@ -221,7 +205,6 @@ def test_untimed_or_misfit_release_keeps_the_hold(lib, rid, reason):
     assert "disc_track_count" in [p.kind for p in service.plan.build([lib.prine_id]).albums[0].problems]
 
 
-@TODO
 def test_a_group_pin_maps_one_file_to_the_subtracks(lib):
     aid, f = lib.prine_id, _file(lib, "2-09")
     pin = service.match.pin(aid, f, positions=["2-9a", "2-9b"], release_id=PRINE)
@@ -241,7 +224,6 @@ def test_a_group_pin_maps_one_file_to_the_subtracks(lib):
     assert {t.key: t.after for t in nine.tags}["title"] == MERGED
 
 
-@TODO
 def test_a_single_position_pin_still_works_with_subtracks(lib):
     service.match.choose(lib.prine_id, TIMED)
     f = _file(lib, "2-10")
@@ -249,7 +231,6 @@ def test_a_single_position_pin_still_works_with_subtracks(lib):
     assert service.match.view(lib.prine_id).problems == []
 
 
-@TODO
 @pytest.mark.parametrize("positions", [["2-9a", "2-10"], ["2-9a", "2-9a"], ["2-9b", "2-9a"], ["2-9a", "9z"]])
 def test_a_group_pin_that_is_not_one_subtrack_group_is_a_pin_conflict(lib, positions):
     aid = lib.prine_id
@@ -260,7 +241,6 @@ def test_a_group_pin_that_is_not_one_subtrack_group_is_a_pin_conflict(lib, posit
     assert [g.merged for g in view.subtrack_groups] == [False]
 
 
-@TODO
 def test_pin_argument_validation(lib):
     aid, f = lib.prine_id, _file(lib, "2-09")
     with pytest.raises(service.ValidationError):
@@ -273,7 +253,6 @@ def test_pin_argument_validation(lib):
     assert single.positions == ["2-9a"]
 
 
-@TODO
 def test_appended_fields_keep_their_order():
     import dataclasses
 
