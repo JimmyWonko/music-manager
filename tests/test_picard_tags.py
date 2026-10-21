@@ -380,14 +380,11 @@ def test_plan_shows_picard_keys_renames_and_flags(tmp_path):
 
 # --- structured unwritten fields (Pixel, 2026-10-21) -----------------------------------------------------------------
 
-UNWRITTEN = pytest.mark.xfail(strict=True, reason="AlbumPlan.unwritten / UnwrittenField not built yet")
-
 
 def _unwritten(rel):
     return [(u.field, u.reason) for u in fields_of(rel).unwritten]
 
 
-@UNWRITTEN
 @pytest.mark.parametrize(("changes", "expected"), [
     ({"identifiers": [{"type": "Barcode", "value": "111"}, {"type": "Barcode", "value": "222"}]},
      [("barcode", "conflicting_barcodes")]),
@@ -406,14 +403,12 @@ def test_held_back_fields_are_structured(changes, expected):
     assert _unwritten(release(**changes)) == expected
 
 
-@UNWRITTEN
 def test_unwritten_field_detail_matches_the_note():
     f = fields_of(release(country="UK & Europe"))
     [u] = f.unwritten
     assert u.detail and u.detail in f.notes[0]
 
 
-@UNWRITTEN
 def test_plan_lists_unwritten_fields_and_keeps_warnings(tmp_path):
     import dataclasses
 

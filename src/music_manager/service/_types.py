@@ -468,6 +468,15 @@ class CoverDefaults:
 
 
 @dataclass(frozen=True)
+class UnwrittenField:
+    """A tag plan.build holds back because Discogs is ambiguous (the same text is in Plan.warnings)."""
+    field: str   # canonical name: barcode, releasecountry, media, releasetype, catalognumber
+    reason: str  # stable code: conflicting_barcodes, region_not_country, unknown_country, mixed_media,
+    # no_single_type, missing_catalog_number
+    detail: str  # human-readable
+
+
+@dataclass(frozen=True)
 class AlbumPlan:
     album_id: int
     release_id: int
@@ -479,6 +488,7 @@ class AlbumPlan:
     # for loose tracks (AlbumRow.loose_tracks) the folder's name and ""
     title: str = ""
     cover: CoverArt | None = None  # front cover plan.apply embeds (FileChange.tags has "cover_art" per file)
+    unwritten: list[UnwrittenField] = field(default_factory=list)  # 2026-10-21: tags held back, and why
 
 
 @dataclass(frozen=True)

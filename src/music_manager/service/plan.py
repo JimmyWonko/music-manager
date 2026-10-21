@@ -41,6 +41,7 @@ from ._types import (
     Problem,
     ProblemKind,
     TagChange,
+    UnwrittenField,
 )
 
 COVER_NAME = "folder.jpg"
@@ -124,14 +125,18 @@ def _size(path: Path) -> int:
 
 # --- build ---------------------------------------------------------------------------
 
-def _file_changes(t: AlbumTarget, clear_other: bool, warnings: list[str], migrate: bool = False) -> list[FileChange]:
+def _file_changes(t: AlbumTarget, clear_other: bool, warnings: list[str], migrate: bool = False,
+                  unwritten: list[UnwrittenField] | None = None) -> list[FileChange]:
     layout = t.layout
     assert layout is not None
     changes: list[FileChange] = []
     for item in layout.tracks:  # the apply writes item.meta: the same choice as the preview
         item.meta["migrate_legacy_keys"] = migrate
-    for note in release_info(t.release, t.dtracks, t.original_year).tags.notes:
+    held = release_info(t.release, t.dtracks, t.original_year).tags
+    for note in held.notes:
         warnings.append(f"{t.album.path.name}: {note}")
+    if unwritten is not None:
+        unwritten += [UnwrittenField(u.field, u.reason, u.detail) for u in held.unwritten]
     by_source = {item.source: item for item in layout.tracks}
     for local, _dt, method in layout.pairs:
         item = by_source.get(local)
@@ -298,7 +303,8 @@ def build(album_ids: list[int], template: str | None = None,
     for t in targets:
         problems = [p for p in t.problems if not (p.kind is ProblemKind.TRACK_MISMATCH and t.album_id in allowed)]
         problems += cross.get(t.album_id, [])
-        changes = _file_changes(t, cfg.clear_other_tags, warnings, cfg.migrate_tag_keys)
+        unwritten: list[UnwrittenField] = []
+        changes = _file_changes(t, cfg.clear_other_tags, warnings, cfg.migrate_tag_keys, unwritten)
         choice = _cover_for(st, t, opts, warnings)
         if choice.pending_url and not problems:  # held albums download nothing
             cover_wanted.append((t.album_id, choice.pending_url))
@@ -332,7 +338,7 @@ def build(album_ids: list[int], template: str | None = None,
                 cover_url = url
                 covers += 1
         ap = AlbumPlan(t.album_id, t.release_id, t.album.path, t.target, changes, problems, *_names(t),
-                       cover=choice.art if embed is not None else None)
+                       cover=choice.art if embed is not None else None, unwritten=unwritten)
         plans[t.album_id] = ap
         art_path = [choice.art.path] if embed is not None and choice.art.path else []
         records.append(_AlbumRecord(t, ap, _fingerprint(t, art_path), cover_url, embed))

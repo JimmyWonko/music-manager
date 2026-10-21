@@ -288,10 +288,16 @@ class DiscChoice:
 
 
 @dataclass(frozen=True)
+class UnwrittenField:
+    field: str; reason: str; detail: str  # canonical tag name, stable reason code, human-readable text
+
+
+@dataclass(frozen=True)
 class AlbumPlan:
     album_id: int; release_id: int; folder_before: Path; folder_after: Path
     files: list[FileChange]; problems: list[Problem]   # any problem blocks apply for this album
     artist: str = ""; title: str = ""                  # the release's ("" when unknown, e.g. an old journal)
+    unwritten: list[UnwrittenField] = field(default_factory=list)  # 2026-10-21: tags held back, and why
 
 
 @dataclass(frozen=True)
