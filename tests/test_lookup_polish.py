@@ -9,7 +9,6 @@ from music_manager import service
 from music_manager.match import guess_from_album_dir
 from music_manager.service import JobState, MatchStatus
 
-xfail = pytest.mark.xfail(strict=True, reason="lookup polish not implemented yet")
 BARCODE = "5012345678900"
 
 
@@ -28,6 +27,8 @@ def tag_barcode(folder, value, key="BARCODE"):
     from mutagen import File
 
     for f in sorted(folder.iterdir()):
+        if not f.is_file() or f.suffix not in (".flac", ".mp3", ".ogg"):
+            continue
         audio = File(f)
         if audio is None:
             continue
@@ -43,7 +44,6 @@ def reason(cand, field):
 
 # --- the guess ---------------------------------------------------------------------------
 
-@xfail
 @pytest.mark.parametrize("key", ["BARCODE", "UPC", "EAN"])
 def test_guess_reads_a_barcode_tag_as_digits(sample, tmp_path, key):
     album = tmp_path / "Band - Album"
@@ -67,7 +67,6 @@ def test_guess_ignores_a_barcode_that_is_not_one(sample, tmp_path):
 
 # --- the Discogs client ---------------------------------------------------------------------
 
-@xfail
 def test_client_barcode_and_text_searches_use_cached_get():
     from music_manager.providers.discogs import Discogs
 
@@ -87,7 +86,6 @@ def test_client_barcode_and_text_searches_use_cached_get():
 
 # --- find: fallbacks and found_by -----------------------------------------------------------
 
-@xfail
 def test_barcode_search_comes_first(lib):
     tape = lib.album_id(lib.tape)
     tag_barcode(lib.tape, BARCODE)
@@ -100,12 +98,11 @@ def test_barcode_search_comes_first(lib):
     assert reason(cand, "barcode").ok and BARCODE in reason(cand, "barcode").text
 
 
-@xfail
 def test_catno_then_title_only_fallbacks(lib):
     side = lib.album_id(lib.side)
     tape = lib.album_id(lib.tape)
     lib.discogs.searches["side story"] = []
-    lib.discogs.text_searches["the testers side story"] = [search_result(lib.vinyl)]
+    lib.discogs.text_searches["side story"] = [search_result(lib.vinyl)]
     lib.discogs.text_searches["tape loops"] = [search_result(lib.cassette)]
     lib.find(side, tape)
     assert service.match.candidates(side)[0].found_by == "text"
@@ -117,7 +114,6 @@ def test_catno_then_title_only_fallbacks(lib):
     assert service.match.candidates(double)[0].found_by == "catno"
 
 
-@xfail
 def test_artist_album_hits_say_so(lib):
     d = lib.album_id(lib.double)
     lib.find(d)
@@ -128,7 +124,6 @@ def test_artist_album_hits_say_so(lib):
 
 # --- reasons -----------------------------------------------------------------------------------
 
-@xfail
 def test_reasons_explain_the_score(lib):
     d = lib.album_id(lib.double)
     lib.find(d)
@@ -144,7 +139,6 @@ def test_reasons_explain_the_score(lib):
     assert not reason(other, "catno").ok and not reason(other, "year").ok
 
 
-@xfail
 def test_barcode_match_breaks_a_score_tie(lib):
     d = lib.album_id(lib.double)
     tag_barcode(lib.double, BARCODE)
@@ -161,7 +155,6 @@ def test_barcode_match_breaks_a_score_tie(lib):
 
 # --- manual text search ------------------------------------------------------------------------
 
-@xfail
 def test_manual_search_adds_candidates(lib):
     tape = lib.album_id(lib.tape)
     lib.find(tape)
@@ -174,7 +167,6 @@ def test_manual_search_adds_candidates(lib):
     assert service.library.album(tape).status is MatchStatus.NEEDS_REVIEW
 
 
-@xfail
 def test_manual_search_by_barcode_url_and_empty(lib):
     tape = lib.album_id(lib.tape)
     lib.discogs.barcode_searches[BARCODE] = [search_result(lib.cassette)]
@@ -188,7 +180,6 @@ def test_manual_search_by_barcode_url_and_empty(lib):
         service.match.search(tape, "   ")
 
 
-@xfail
 def test_manual_search_with_no_hits_fails_the_job_and_keeps_status(lib):
     tape = lib.album_id(lib.tape)
     before = service.library.album(tape).status

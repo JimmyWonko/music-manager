@@ -21,7 +21,7 @@ from .providers.discogs import (
     is_side_position,
     split_result_title,
 )
-from .tags.read import read_disc_number, read_easy_tags
+from .tags.read import read_barcode, read_disc_number, read_easy_tags
 
 JUNK_BITS = re.compile(
     r"""(?ix)
@@ -115,6 +115,9 @@ def guess_from_album_dir(album_dir: Path, tracks: list[Path]) -> dict[str, str]:
         "originalyear": year4(tags.get("originaldate")) or parsed.get("originalyear", ""),
         "catno": parsed.get("catno", ""),
     }
+    barcode = read_barcode(tracks[0]) if tracks else ""
+    if barcode:  # only when tagged: the --auto score never uses it
+        guess["barcode"] = barcode
     return guess
 
 
