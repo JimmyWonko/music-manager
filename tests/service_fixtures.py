@@ -32,6 +32,9 @@ class FakeDiscogs:
 
     def __init__(self):
         self.searches: dict[str, list[dict]] = {}
+        self.barcode_searches: dict[str, list[dict]] = {}  # digits -> results (search_barcode)
+        self.text_searches: dict[str, list[dict]] = {}  # casefolded q -> results (search_text)
+        self.catno_searches: dict[str, list[dict]] = {}  # catno -> results (search_releases with only catno)
         self.releases: dict[int, dict] = {}
         self.masters: dict[int, dict] = {}
         self.images: dict[str, bytes] = {}
@@ -41,7 +44,17 @@ class FakeDiscogs:
 
     def search_releases(self, artist, album, catno="", year=""):
         self.calls.append(("search", artist, album, catno, year))
+        if not artist and not album and catno:
+            return copy.deepcopy(self.catno_searches.get(catno, []))
         return copy.deepcopy(self.searches.get((album or "").casefold(), []))
+
+    def search_barcode(self, barcode):
+        self.calls.append(("barcode", barcode))
+        return copy.deepcopy(self.barcode_searches.get(barcode, []))
+
+    def search_text(self, query, year=""):
+        self.calls.append(("text", query))
+        return copy.deepcopy(self.text_searches.get(query.casefold(), []))
 
     def release(self, release_id):
         self.calls.append(("release", release_id))
