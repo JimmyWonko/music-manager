@@ -1326,7 +1326,7 @@ class FakeContract:
 
     # ================================================================ plans
     def _build(self, album_ids: list[int], template: str | None = None,
-               allow_track_mismatch: set[int] = frozenset()) -> Plan:
+               allow_track_mismatch: set[int] = frozenset(), allow_encoding_drop: set[int] = frozenset()) -> Plan:
         text = self._template_text(template)
         layouts, aps, moves, tags = {}, [], 0, 0
         not_fetched = []

@@ -240,7 +240,7 @@ def test_service_holds_and_allow_track_mismatch_does_not_override(svc):
     assert "disc_track_count" in kinds, kinds
     [problem] = [p for p in plan.albums[0].problems if p.kind == "disc_track_count"]
     assert len(problem.paths) == 13 and all(p.parent.name == "CD2" for p in problem.paths)
-    assert service.ProblemKind("disc_track_count") is list(service.ProblemKind)[-2]  # pin_conflict came later
+    assert service.ProblemKind("disc_track_count") is list(service.ProblemKind)[-3]  # pin_conflict, encoding_dropped came later
     with pytest.raises(service.MMError):
         service.plan.apply(plan.id)
     assert tree(root) == before

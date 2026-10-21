@@ -43,7 +43,6 @@ def test_id3_version_per_container(sample, ext, extra, version):
 
 # --- 2. v2.3 encodings ---------------------------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="severity/transliteration not built yet")
 def test_v23_defaults_to_utf16_and_latin1_is_opt_in(sample):
     from mutagen.id3 import Encoding
 
@@ -61,7 +60,6 @@ def test_v23_defaults_to_utf16_and_latin1_is_opt_in(sample):
     assert str(id3_of(f)["TIT2"]) == "Söng"
 
 
-@pytest.mark.xfail(strict=True, reason="severity/transliteration not built yet")
 def test_latin1_losses_names_fields_and_characters():
     from music_manager.tags.id3 import latin1_losses
 
@@ -69,7 +67,6 @@ def test_latin1_losses_names_fields_and_characters():
         ("title", "Söng 日本", "日本", "dropped", None), ("genre", "J-ポップ", "ポップ", "dropped", None)]
 
 
-@pytest.mark.xfail(strict=True, reason="severity/transliteration not built yet")
 @pytest.mark.parametrize("name", ["Björk", "Motörhead", "Sigur Rós", "Ærøskøbing"])
 def test_latin1_safe_values_are_untouched(name):
     from music_manager.tags.id3 import latin1_value
@@ -77,7 +74,6 @@ def test_latin1_safe_values_are_untouched(name):
     assert latin1_value(name) == (None, name)
 
 
-@pytest.mark.xfail(strict=True, reason="severity/transliteration not built yet")
 @pytest.mark.parametrize(("value", "proposed"), [("Łódź", "Lódz"), ("Dvořák “live”", 'Dvorák "live"'),
                                                ("Œuvre — 2", "OEuvre -- 2")])
 def test_only_unencodable_latin_characters_are_transliterated(value, proposed):
@@ -87,7 +83,6 @@ def test_only_unencodable_latin_characters_are_transliterated(value, proposed):
     assert latin1_value(value) == ("transliterated", proposed)
 
 
-@pytest.mark.xfail(strict=True, reason="severity/transliteration not built yet")
 @pytest.mark.parametrize("value", ["日本", "Кино", "Söng 日本"])
 def test_characters_without_a_sensible_substitute_drop_the_field(value):
     from music_manager.tags.id3 import latin1_value
@@ -95,7 +90,6 @@ def test_characters_without_a_sensible_substitute_drop_the_field(value):
     assert latin1_value(value) == ("dropped", None)
 
 
-@pytest.mark.xfail(strict=True, reason="severity/transliteration not built yet")
 def test_without_unidecode_every_unencodable_character_drops(monkeypatch):
     import builtins
 
@@ -194,7 +188,6 @@ def test_unknown_hash_is_refused():
 
 # --- the service ---------------------------------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="severity/transliteration not built yet")
 def test_settings_are_appended_with_defaults(tmp_path):
     from service_fixtures import Library
 
@@ -220,9 +213,9 @@ def test_settings_are_appended_with_defaults(tmp_path):
         service.reset()
 
 
-@pytest.mark.xfail(strict=True, reason="severity/transliteration not built yet")
 def test_plan_lists_latin1_losses_and_junk(tmp_path):
     from service_fixtures import Library, make_album
+    pytest.importorskip("unidecode")   # the transliterated catno; the no-unidecode drop path is covered separately
 
     from music_manager import service
 

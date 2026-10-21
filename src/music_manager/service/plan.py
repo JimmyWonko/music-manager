@@ -181,8 +181,13 @@ def _file_changes(t: AlbumTarget, clear_other: bool, warnings: list[str], migrat
         item.meta["write_styles"], item.meta["styles_in_genre"] = styles
         item.meta["id3_v23"], item.meta["id3_latin1"] = id3
         v23 = _is_v23(item.source, id3[0])
-        if id3[1] and v23 and losses is not None:
-            losses += [EncodingLoss(item.source, f, v, lost) for f, v, lost in latin1_losses(tag_values(item.meta))]
+        item.meta["keep_fields"] = []
+        if id3[1] and v23:
+            found = [EncodingLoss(item.source, f, v, lost, sev, new)
+                     for f, v, lost, sev, new in latin1_losses(tag_values(item.meta))]
+            item.meta["keep_fields"] = sorted({x.field for x in found if x.severity == "dropped"})
+            if losses is not None:
+                losses += found
     held = release_info(t.release, t.dtracks, t.original_year).tags
     for note in held.notes:
         warnings.append(f"{t.album.path.name}: {note}")
@@ -308,7 +313,7 @@ def _names(t: AlbumTarget) -> tuple[str, str]:
 
 
 def build(album_ids: list[int], template: str | None = None,
-          allow_track_mismatch: set[int] = frozenset()) -> Plan:
+          allow_track_mismatch: set[int] = frozenset(), allow_encoding_drop: set[int] = frozenset()) -> Plan:
     """Everything plan.apply would do, file by file, with every problem. Read-only (never writes a status).
 
     Uses each album's chosen release, else its best candidate. Never calls
@@ -358,9 +363,17 @@ def build(album_ids: list[int], template: str | None = None,
         losses: list[EncodingLoss] = []
         changes = _file_changes(t, cfg.clear_other_tags, warnings, cfg.migrate_tag_keys, unwritten,
                                (cfg.write_styles, cfg.styles_in_genre), (cfg.id3v23_mp3, cfg.id3_latin1), losses)
+        dropped = [x for x in losses if x.severity == "dropped"]
         if losses:
-            warnings.append(f"{t.album.path.name}: {len(losses)} tag value(s) lose characters as Latin-1 "
-                            "(Settings.id3_latin1): see AlbumPlan.encoding_losses")
+            warnings.append(f"{t.album.path.name}: {len(losses) - len(dropped)} tag value(s) transliterated and "
+                            f"{len(dropped)} not written as Latin-1 (Settings.id3_latin1): see AlbumPlan.encoding_losses")
+        if dropped and t.album_id not in {int(a) for a in allow_encoding_drop}:
+            problems.append(Problem(
+                ProblemKind.ENCODING_DROPPED,
+                f"{len(dropped)} tag value(s) have characters Latin-1 can't hold and no sensible substitute "
+                f"({', '.join(sorted({x.field for x in dropped}))}): those fields would not be written. "
+                "Turn off id3_latin1, or apply with allow_encoding_drop to keep the files' current values",
+                sorted({x.path for x in dropped})))
         junk = _junk_left_behind(t.album.path, t.root, t.target, {c.path_before for c in changes})
         choice = _cover_for(st, t, opts, warnings)
         if choice.pending_url and not problems:  # held albums download nothing
@@ -398,7 +411,8 @@ def build(album_ids: list[int], template: str | None = None,
                        cover=choice.art if embed is not None else None, unwritten=unwritten, junk=junk,
                        encoding_losses=losses, junk_moving=_junk_moving(changes),
                        id3v23_files=sum(1 for c in changes if c.kind == "track" and not c.skip_reason
-                                        and _is_v23(c.path_before, cfg.id3v23_mp3)))
+                                        and _is_v23(c.path_before, cfg.id3v23_mp3)),
+                       encoding_transliterated=len(losses) - len(dropped), encoding_dropped=len(dropped))
         plans[t.album_id] = ap
         art_path = [choice.art.path] if embed is not None and choice.art.path else []
         records.append(_AlbumRecord(t, ap, _fingerprint(t, art_path), cover_url, embed))

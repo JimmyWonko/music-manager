@@ -112,6 +112,8 @@ class ProblemKind(StrEnum):
     DISC_FOLDER_MISMATCH = "disc_folder_mismatch"  # destination puts tracks in another disc's CD folder
     DISC_TRACK_COUNT = "disc_track_count"  # a disc's file and track counts differ, titles don't settle it (paths)
     PIN_CONFLICT = "pin_conflict"  # a manual pin (match.pin) can't be used as it is (paths: its files)
+    ENCODING_DROPPED = "encoding_dropped"  # Latin-1 (id3_latin1) can't hold some values (paths): plan.build
+    # allow_encoding_drop applies the album without those fields
 
 
 # --- jobs ---------------------------------------------------------------------
@@ -480,11 +482,15 @@ class UnwrittenField:
 
 @dataclass(frozen=True)
 class EncodingLoss:
-    """A tag value Latin-1 can't hold (Settings.id3_latin1 on an ID3v2.3 file): lost characters become "?"."""
+    """A tag value Latin-1 can't hold as it is (Settings.id3_latin1 on an ID3v2.3 file). "transliterated": only
+    the unencodable characters are replaced (Łódź -> Lódz); "dropped": some character has no sensible substitute
+    (Kanji, Cyrillic), the field is not written (the file keeps its value) and the album is held."""
     path: Path   # the track, as FileChange.path_before
     field: str   # canonical tag name (title, artist, genre, ...)
     value: str   # the value that would be written
-    lost: str    # the characters that would be lost, in order
+    lost: str    # the characters Latin-1 can't hold, in order
+    severity: Literal["transliterated", "dropped"] = "dropped"  # dropped: not written, the album is held
+    proposed_value: str | None = None  # what is written when transliterated; None when dropped
 
 
 @dataclass(frozen=True)
@@ -504,6 +510,8 @@ class AlbumPlan:
     encoding_losses: list[EncodingLoss] = field(default_factory=list)  # Latin-1 losses, before anything is written
     junk_moving: list[Path] = field(default_factory=list)  # junk files (fs.JUNK_NAMES) that move with the album
     id3v23_files: int = 0  # tracks written as ID3v2.3 under the current settings (WAV/AIFF; MP3 with id3v23_mp3)
+    encoding_transliterated: int = 0  # EncodingLoss entries with severity "transliterated"
+    encoding_dropped: int = 0  # ... "dropped" (ProblemKind.ENCODING_DROPPED holds the album)
 
 
 @dataclass(frozen=True)

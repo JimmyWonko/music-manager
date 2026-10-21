@@ -130,6 +130,7 @@ def _replace_set(path: Path, meta: TrackMeta, previous: str | None) -> set[str]:
         replace |= ORIGINAL_FIELDS
     if not meta.get("write_styles"):
         replace.discard("style")  # styles are opt-in: an existing STYLE is left alone
+    replace -= set(meta.get("keep_fields") or ())  # e.g. a Latin-1 "dropped" value: the file keeps its own
     return replace
 
 

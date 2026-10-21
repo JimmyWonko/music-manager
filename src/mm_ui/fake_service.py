@@ -232,6 +232,7 @@ class ProblemKind(StrEnum):
     DISC_FOLDER_MISMATCH = "disc_folder_mismatch"   # destination puts tracks in another disc's CD folder; never overridden
     DISC_TRACK_COUNT = "disc_track_count"   # 1566b36: a disc's file/track counts differ, titles don't settle it; never overridden
     PIN_CONFLICT = "pin_conflict"           # c2fcf25: a manual pin that can't be used (paths: its file)
+    ENCODING_DROPPED = "encoding_dropped"   # tag batch: Latin-1 can't hold some values (plan.build allow_encoding_drop)
 # Cross-device moves are not a problem: they are allowed, and every file appears in `files`.
 
 
@@ -291,6 +292,7 @@ class DiscChoice:
 @dataclass(frozen=True)
 class EncodingLoss:
     path: Path; field: str; value: str; lost: str  # the track, canonical tag, value, characters lost
+    severity: str = "dropped"; proposed_value: str | None = None  # "transliterated" (amber) / "dropped" (red)
 
 
 @dataclass(frozen=True)
@@ -309,6 +311,7 @@ class AlbumPlan:
     encoding_losses: list[EncodingLoss] = field(default_factory=list)  # tag batch: Latin-1 losses
     junk_moving: list[Path] = field(default_factory=list)          # tag batch: junk files moving with the album
     id3v23_files: int = 0                                          # tag batch: tracks written as ID3v2.3
+    encoding_transliterated: int = 0; encoding_dropped: int = 0    # tag batch: EncodingLoss totals
 
 
 @dataclass(frozen=True)
