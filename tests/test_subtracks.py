@@ -265,10 +265,6 @@ def test_appended_fields_keep_their_order():
                                             "duration_s"]
 
 
-PAIR_TODO = pytest.mark.xfail(strict=True, reason="TrackPair.method 'subtracks' / positions: not implemented yet")
-
-
-@PAIR_TODO
 @pytest.mark.parametrize("how", ["auto", "pin"])
 def test_a_pair_with_merged_subtracks_has_method_subtracks_and_positions(lib, how):
     aid, f = lib.prine_id, _file(lib, "2-09")
@@ -285,7 +281,6 @@ def test_a_pair_with_merged_subtracks_has_method_subtracks_and_positions(lib, ho
     assert [p.positions for p in cand.alignment if p.method == "subtracks"] == [["2-9a", "2-9b"]]
 
 
-@PAIR_TODO
 def test_track_pair_positions_is_appended_last():
     import dataclasses
 

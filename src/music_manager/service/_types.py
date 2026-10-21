@@ -246,12 +246,14 @@ class RemoteTrack:
 
 @dataclass(frozen=True)
 class TrackPair:
-    method: Literal["number", "side", "title", "position", "manual", "unmatched"]  # manual: match.pin
+    # manual: match.pin; subtracks: the file is merged subtracks (automatic or a group pin), see positions
+    method: Literal["number", "side", "title", "position", "manual", "unmatched", "subtracks"]
     local: LocalTrack | None  # None: Discogs track with no local file
     remote: RemoteTrack | None  # None: local file with no Discogs track
     title_similarity: float
     duration_delta_s: float | None
     ok: bool
+    positions: list[str] = field(default_factory=list)  # method "subtracks": ["2-9a", "2-9b"]; else [] (2026-10-21)
 
 
 FoundBy = Literal["barcode", "artist_album", "catno", "album", "text", "manual", "manual_search", ""]

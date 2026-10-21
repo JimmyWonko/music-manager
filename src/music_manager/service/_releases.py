@@ -191,6 +191,9 @@ def alignment(album: AlbumFolder, locals_: list[LocalTrack], dtracks: list[Disco
             delta = round(local.duration_s - dt.duration_s, 3)
         ok = sim >= title_match_min or (delta is not None and abs(delta) <= DURATION_TOLERANCE_S)
         ok = ok or method == "manual"  # the user paired it
+        if dt.subtracks:  # merged subtracks: lengths checked (match.collapse_subtracks) or a group pin
+            pairs.append(TrackPair("subtracks", local, _remote(dt), round(sim, 4), delta, True, list(dt.subtracks)))
+            continue
         pairs.append(TrackPair(method, local, _remote(dt), round(sim, 4), delta, ok))
     for dt in dtracks:
         if id(dt) not in used:
