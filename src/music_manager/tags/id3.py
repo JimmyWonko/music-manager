@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from mutagen.id3 import ID3, TALB, TCON, TDOR, TDRC, TIT2, TPE1, TPE2, TPOS, TPUB, TRCK, TXXX
+from mutagen.id3 import ID3, TALB, TCON, TDOR, TDRC, TIT2, TMED, TPE1, TPE2, TPOS, TPUB, TRCK, TSO2, TSOP, TSST, TXXX
 
 from .fields import TrackMeta, is_protected_key, tag_values
 
@@ -17,6 +17,10 @@ ID3_TEXT_FRAMES = {
     "originaldate": ("TDOR", TDOR),
     "label": ("TPUB", TPUB),
     "genre": ("TCON", TCON),
+    "media": ("TMED", TMED),
+    "discsubtitle": ("TSST", TSST),
+    "artistsort": ("TSOP", TSOP),
+    "albumartistsort": ("TSO2", TSO2),
 }
 
 
@@ -28,11 +32,18 @@ ID3_TXXX_ALIASES = {
     "label": ("LABEL", "PUBLISHER", "ORGANIZATION"),
     "tracknumber": ("TRACKTOTAL", "TOTALTRACKS"),
     "discnumber": ("DISCTOTAL", "TOTALDISCS"),
+    "albumartistsort": ("ALBUMARTISTSORT",),  # Picard moves it to TSO2 too
 }
 ID3_TXXX_FIELDS = {
     "catalognumber": ("CATALOGNUMBER", ("CATALOG",)),
+    "barcode": ("BARCODE", ()),
+    "releasecountry": ("MusicBrainz Album Release Country", ()),
+    "releasetype": ("MusicBrainz Album Type", ()),
+    "releasestatus": ("MusicBrainz Album Status", ()),
+    "style": ("STYLE", ()),
     "discogs_release_id": ("DISCOGS_RELEASE_ID", ()),
     "discogs_master_id": ("DISCOGS_MASTER_ID", ()),
+    "discogs_artist_id": ("DISCOGS_ARTIST_ID", ()),
     "discogs_position": ("DISCOGS_POSITION", ()),
 }
 ID3_PROTECTED_FRAMES = {"TSSE", "TENC", "TLEN", "TFLT", "TSRC", "TDEN", "TOWN"}

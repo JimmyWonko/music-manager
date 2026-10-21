@@ -44,8 +44,9 @@ class Config:
     cover_source: str | None = None
     cover_max_bytes: int | None = None
     merge_subtracks: bool = True  # merge subtracks ripped as one file automatically (match.collapse_subtracks)
+    migrate_tag_keys: bool = False  # drop tag keys earlier versions wrote that Picard doesn't (YEAR)
 
-    BOOLS = ("sequential_sides", "save_cover_art", "clear_other_tags", "merge_subtracks")
+    BOOLS = ("sequential_sides", "save_cover_art", "clear_other_tags", "merge_subtracks", "migrate_tag_keys")
     OPTIONAL: ClassVar[dict[str, type]] = {"embed_cover_art": bool, "replace_cover_art": bool, "cover_source": str, "cover_max_bytes": int}
 
 

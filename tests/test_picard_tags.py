@@ -8,8 +8,6 @@ import pytest
 
 from music_manager.tags.write import write_tags
 
-TODO = pytest.mark.xfail(strict=True, reason="Picard tag names: not implemented yet")
-
 
 def full_meta(**extra):
     meta = {
@@ -32,7 +30,7 @@ def raw(path):
 
     audio = File(path)
     out = {}
-    for key in audio.tags.keys():
+    for key in audio.tags.keys():  # noqa: SIM118 - a Vorbis comment iterates (key, value) pairs
         value = audio.tags[key]
         if hasattr(value, "text"):
             out[key] = [str(v) for v in value.text]
@@ -58,7 +56,6 @@ def ci(tags: dict, key: str):
 
 # --- per format keys ---------------------------------------------------------------------------------------------
 
-@TODO
 @pytest.mark.parametrize("ext", ["flac", "ogg", "opus"])
 def test_vorbis_keys_are_picards(sample, ext):
     f = sample(ext)
@@ -77,7 +74,6 @@ def test_vorbis_keys_are_picards(sample, ext):
     assert "YEAR" not in t  # Picard writes no YEAR; it is not created any more
 
 
-@TODO
 def test_id3_frames_are_picards(sample):
     f = sample("mp3")
     write_tags(f, full_meta())
@@ -93,7 +89,6 @@ def test_id3_frames_are_picards(sample):
     assert t["TXXX:DISCOGS_RELEASE_ID"] == ["4054414"] and t["TXXX:DISCOGS_ARTIST_ID"] == ["274724"]
 
 
-@TODO
 def test_mp4_atoms_are_picards(sample):
     f = sample("m4a")
     write_tags(f, full_meta())
@@ -110,7 +105,6 @@ def test_mp4_atoms_are_picards(sample):
     assert t[ff + "ORIGINALDATE"] == ["1981"] and t[ff + "DISCOGS_ARTIST_ID"] == ["274724"]
 
 
-@TODO
 def test_apev2_keys_are_picards(sample):
     f = sample("wv")
     write_tags(f, full_meta())
@@ -127,7 +121,6 @@ def test_apev2_keys_are_picards(sample):
     assert "tracktotal" not in keys and "disctotal" not in keys
 
 
-@TODO
 def test_asf_attributes_are_picards(sample):
     f = sample("wma")
     write_tags(f, full_meta())
@@ -142,7 +135,6 @@ def test_asf_attributes_are_picards(sample):
     assert t["STYLE"] == ["Folk Rock", "Country Rock"] and t["DISCOGS_ARTIST_ID"] == ["274724"]
 
 
-@TODO
 @pytest.mark.parametrize("ext", ["flac", "mp3", "m4a", "wv", "wma"])
 def test_sort_names_are_never_invented_and_unmanaged_tags_survive(sample, ext):
     from music_manager.tags.read import read_easy_tags
@@ -213,7 +205,6 @@ def fields_of(rel):
     return release_tag_fields(rel, flatten_tracklist(rel, release_artists(rel)))
 
 
-@TODO
 def test_release_fields_from_the_prine_release():
     f = fields_of(release())
     assert (f.barcode, f.media, f.releasecountry, f.releasetype, f.releasestatus) == (
@@ -225,13 +216,11 @@ def test_release_fields_from_the_prine_release():
     assert f.notes == []
 
 
-@TODO
 def test_two_different_barcodes_are_not_written_and_flagged():
     f = fields_of(release(identifiers=[{"type": "Barcode", "value": "111"}, {"type": "Barcode", "value": "222"}]))
     assert f.barcode is None and any("barcode" in n.casefold() for n in f.notes)
 
 
-@TODO
 @pytest.mark.parametrize(("country", "code"), [("US", "US"), ("UK", "GB"), ("Germany", "DE"), ("Europe", "XE"),
                                                 ("Worldwide", "XW"), ("Japan", "JP")])
 def test_countries_map_to_iso_codes(country, code):
@@ -239,14 +228,12 @@ def test_countries_map_to_iso_codes(country, code):
     assert f.releasecountry == code and f.notes == []
 
 
-@TODO
 @pytest.mark.parametrize("country", ["UK & Europe", "USA & Canada", "Benelux", "Unknown"])
 def test_country_regions_are_not_written_and_flagged(country):
     f = fields_of(release(country=country))
     assert f.releasecountry is None and any("country" in n.casefold() for n in f.notes)
 
 
-@TODO
 @pytest.mark.parametrize(("formats", "media"), [
     ([{"name": "Vinyl", "qty": "1", "descriptions": ["LP", "Album", '12"']}], '12" Vinyl'),
     ([{"name": "Vinyl", "qty": "1", "descriptions": ['7"', "Single"]}], '7" Vinyl'),
@@ -259,13 +246,11 @@ def test_media_from_formats(formats, media):
     assert fields_of(release(formats=formats)).media == media
 
 
-@TODO
 def test_mixed_media_is_not_written_and_flagged():
     f = fields_of(release(formats=[{"name": "CD", "qty": "1"}, {"name": "DVD", "qty": "1"}]))
     assert f.media is None and any("media" in n.casefold() for n in f.notes)
 
 
-@TODO
 @pytest.mark.parametrize(("descriptions", "kind", "noted"), [
     (["Album"], ["album"], False), (["LP", "Album"], ["album"], False), (["EP"], ["ep"], False),
     (["Single"], ["single"], False), (["Maxi-Single"], ["single"], False),
@@ -277,7 +262,6 @@ def test_release_type_rules(descriptions, kind, noted):
     assert f.releasetype == kind and any("type" in n.casefold() for n in f.notes) == noted
 
 
-@TODO
 @pytest.mark.parametrize(("descriptions", "status"), [(["Album", "Promo"], "promotion"),
                                                       (["Unofficial Release"], "bootleg"), (["Album"], None)])
 def test_release_status_rules(descriptions, status):
@@ -285,7 +269,6 @@ def test_release_status_rules(descriptions, status):
     assert f.releasestatus == status
 
 
-@TODO
 def test_labels_and_catalog_numbers_are_parallel_multi_values():
     f = fields_of(release(labels=[{"name": "A", "catno": "A-1"}, {"name": "B", "catno": "B-2"},
                                   {"name": "A", "catno": "A-1"}]))
@@ -297,13 +280,11 @@ def test_labels_and_catalog_numbers_are_parallel_multi_values():
     assert any("catalog" in n.casefold() for n in f.notes)
 
 
-@TODO
 def test_genre_is_discogs_genres_and_style_is_discogs_styles():
     f = fields_of(release(genres=["Rock", "Pop"], styles=["Indie Rock", "Shoegaze", "Dream Pop"]))
     assert f.genres == ["Rock", "Pop"] and f.styles == ["Indie Rock", "Shoegaze", "Dream Pop"]
 
 
-@TODO
 @pytest.mark.parametrize("tracklist", [
     [{"position": "1-1", "type_": "track", "title": "One"}, {"position": "2-1", "type_": "track", "title": "Two"}],
     [{"position": "", "type_": "heading", "title": "Side A"}, {"position": "1-1", "type_": "track", "title": "One"},
@@ -316,7 +297,6 @@ def test_disc_subtitles_only_when_every_disc_has_one_leading_heading(tracklist):
 
 # --- previews: explicit renames and the opt-in migration -----------------------------------------------------------
 
-@TODO
 def test_a_key_rename_is_an_explicit_preview_change(sample):
     from mutagen.flac import FLAC
 
@@ -330,7 +310,6 @@ def test_a_key_rename_is_an_explicit_preview_change(sample):
     assert (c.before, c.after, c.key_before, c.key_after) == ("12", "12", "TOTALTRACKS", "TRACKTOTAL")
 
 
-@TODO
 def test_year_written_earlier_is_kept_up_to_date_unless_migrating(sample):
     from mutagen.flac import FLAC
 
@@ -350,7 +329,6 @@ def test_year_written_earlier_is_kept_up_to_date_unless_migrating(sample):
 
 # --- the service ---------------------------------------------------------------------------------------------------
 
-@TODO
 def test_settings_and_types_are_appended(tmp_path):
     import dataclasses
 
@@ -370,7 +348,6 @@ def test_settings_and_types_are_appended(tmp_path):
         service.reset()
 
 
-@TODO
 def test_plan_shows_picard_keys_renames_and_flags(tmp_path):
     from mutagen.flac import FLAC
     from service_fixtures import Library
@@ -381,7 +358,7 @@ def test_plan_shows_picard_keys_renames_and_flags(tmp_path):
     lib.multi["identifiers"] = [{"type": "Barcode", "value": "111"}, {"type": "Barcode", "value": "222"}]
     lib.start(tmp_path)
     try:
-        first = sorted(lib.double.glob("*.flac"))[0]
+        first = min(lib.double.glob("*.flac"))
         audio = FLAC(first)
         audio["TOTALTRACKS"] = "2"
         audio.save()

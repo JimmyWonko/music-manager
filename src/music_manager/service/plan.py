@@ -9,11 +9,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .. import coverart as cover_engine
-from ..apply import AlbumApplyError, execute_layout
+from ..apply import AlbumApplyError, execute_layout, release_info
 from ..fs import collect_albums, file_sha256
 from ..journal import Journal
 from ..playlists import playlist_path
-from ..tags.write import preview_tags
+from ..tags.write import preview_tag_changes
 from . import coverart
 from ._common import album_record, cluster_guess, is_loose_tracks, now_utc, set_status
 from ._ops import journal_dir, record_operation
@@ -124,10 +124,14 @@ def _size(path: Path) -> int:
 
 # --- build ---------------------------------------------------------------------------
 
-def _file_changes(t: AlbumTarget, clear_other: bool, warnings: list[str]) -> list[FileChange]:
+def _file_changes(t: AlbumTarget, clear_other: bool, warnings: list[str], migrate: bool = False) -> list[FileChange]:
     layout = t.layout
     assert layout is not None
     changes: list[FileChange] = []
+    for item in layout.tracks:  # the apply writes item.meta: the same choice as the preview
+        item.meta["migrate_legacy_keys"] = migrate
+    for note in release_info(t.release, t.dtracks, t.original_year).tags.notes:
+        warnings.append(f"{t.album.path.name}: {note}")
     by_source = {item.source: item for item in layout.tracks}
     for local, _dt, method in layout.pairs:
         item = by_source.get(local)
@@ -136,7 +140,8 @@ def _file_changes(t: AlbumTarget, clear_other: bool, warnings: list[str]) -> lis
                                       skip_reason="no matching Discogs track: left in place, not tagged or moved"))
             continue
         try:
-            tags = [TagChange(k, b, a) for k, b, a in preview_tags(item.source, item.meta, clear_other)]
+            tags = [TagChange(c.key, c.before, c.after, c.key_before, c.key_after)
+                    for c in preview_tag_changes(item.source, item.meta, clear_other)]
         except Exception as exc:  # noqa: BLE001 - unreadable file: the apply will report it
             tags = []
             warnings.append(f"cannot read the tags of {item.source}: {exc}")
@@ -293,7 +298,7 @@ def build(album_ids: list[int], template: str | None = None,
     for t in targets:
         problems = [p for p in t.problems if not (p.kind is ProblemKind.TRACK_MISMATCH and t.album_id in allowed)]
         problems += cross.get(t.album_id, [])
-        changes = _file_changes(t, cfg.clear_other_tags, warnings)
+        changes = _file_changes(t, cfg.clear_other_tags, warnings, cfg.migrate_tag_keys)
         choice = _cover_for(st, t, opts, warnings)
         if choice.pending_url and not problems:  # held albums download nothing
             cover_wanted.append((t.album_id, choice.pending_url))

@@ -59,6 +59,7 @@ from .providers.discogs import (
     release_catno,
     release_discs,
 )
+from .tagmap import ReleaseTags, release_tag_fields
 from .tags.fields import TrackMeta
 from .tags.snapshot import capture_tags
 from .tags.write import write_tags
@@ -142,6 +143,7 @@ class ReleaseInfo:
     discs: int
     master_id: int
     by_disc: dict[int, list[DiscogsTrack]]
+    tags: ReleaseTags = field(default_factory=ReleaseTags)  # Picard-style album tags (tagmap, 2026-10-21)
 
 
 def release_info(release: DiscogsRelease, dtracks: list[DiscogsTrack], original_year: str) -> ReleaseInfo:
@@ -169,12 +171,14 @@ def release_info(release: DiscogsRelease, dtracks: list[DiscogsTrack], original_
         discs=release_discs(release, dtracks),
         master_id=release.get("master_id") or 0,
         by_disc=by_disc,
+        tags=release_tag_fields(release, dtracks),
     )
 
 
 def track_meta(release: DiscogsRelease, info: ReleaseInfo, dt: DiscogsTrack, dtracks: list[DiscogsTrack]) -> TrackMeta:
     """The tags write_tags writes for one track of the release."""
     disc_tracks = info.by_disc.get(dt.disc, dtracks)
+    tags = info.tags
     return {
         "artist": dt.artist or info.album_artist,
         "albumartist": info.album_artist,
@@ -186,9 +190,18 @@ def track_meta(release: DiscogsRelease, info: ReleaseInfo, dt: DiscogsTrack, dtr
         "disctotal": info.discs,
         "date": str(release.get("released") or info.release_year or ""),
         "originaldate": info.reissue_original,
-        "label": info.label,
-        "catalognumber": format_catalog(info.catno) or "",
-        "genre": info.genre,
+        # Picard conventions (tagmap): every label and catalog number, Discogs genres as genre, styles as style
+        "label": tags.labels or info.label,
+        "catalognumber": tags.catalognumbers or format_catalog(info.catno) or "",
+        "genre": tags.genres if (tags.genres or tags.styles) else info.genre,
+        "style": tags.styles or None,
+        "barcode": tags.barcode,
+        "media": tags.media,
+        "releasecountry": tags.releasecountry,
+        "releasetype": tags.releasetype,
+        "releasestatus": tags.releasestatus,
+        "discsubtitle": tags.discsubtitles.get(dt.disc),
+        "artist_id": tags.artist_ids or None,
         "release_id": release.get("id"),
         "master_id": info.master_id,
         "position": dt.position,

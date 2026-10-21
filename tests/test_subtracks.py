@@ -350,7 +350,7 @@ def test_split_subtracks_validation(lib):
 def test_settings_field_appended_last():
     import dataclasses
 
-    assert [f.name for f in dataclasses.fields(service.Settings)][-1] == "merge_subtracks"
+    assert [f.name for f in dataclasses.fields(service.Settings)][-2:] == ["merge_subtracks", "migrate_tag_keys"]
 
 
 # --- review fixes (Pixel, a04475f) -------------------------------------------------------------------------------

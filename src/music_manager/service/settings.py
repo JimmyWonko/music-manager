@@ -21,7 +21,8 @@ def get() -> Settings:
                     sequential_sides=cfg.sequential_sides, save_cover_art=cfg.save_cover_art,
                     clear_other_tags=cfg.clear_other_tags, embed_cover_art=cover.embed_cover_art,
                     replace_cover_art=cover.replace_cover_art, cover_source=cover.cover_source,
-                    cover_max_bytes=cover.cover_max_bytes, merge_subtracks=cfg.merge_subtracks)
+                    cover_max_bytes=cover.cover_max_bytes, merge_subtracks=cfg.merge_subtracks,
+                    migrate_tag_keys=cfg.migrate_tag_keys)
 
 
 def set(**changes) -> Settings:  # noqa: A001 - contract name
@@ -50,7 +51,7 @@ def set(**changes) -> Settings:  # noqa: A001 - contract name
         if not any(t.id == tid for t in all_templates(st)):
             raise ValidationError(f"No template {tid!r}", field="active_template")
         values["active_template"] = tid
-    for key in ("sequential_sides", "save_cover_art", "clear_other_tags", "merge_subtracks"):
+    for key in ("sequential_sides", "save_cover_art", "clear_other_tags", "merge_subtracks", "migrate_tag_keys"):
         if key in changes:
             if not isinstance(changes[key], bool):
                 raise ValidationError(f"{key} must be True or False", field=key)
