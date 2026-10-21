@@ -1,6 +1,7 @@
 """Tag settings (contract "Picard tag names (2026-10-21)"): three opt-in switches, all off by default.
 
-- migrate_tag_keys: also remove keys earlier versions wrote (a Vorbis YEAR); shows in the plan first.
+- migrate_tag_keys: remove keys Picard doesn't write (today a Vorbis YEAR); shows in the plan first. Alias
+  renames (TOTALTRACKS -> TRACKTOTAL) happen regardless.
 - write_styles: write Discogs styles as STYLE (off: genres only, an existing STYLE is left alone).
 - styles_in_genre: append the styles to GENRE. The contract keeps it independent of write_styles.
 Saving only changes settings: plan.build reads them, nothing is written to any file before Apply."""
@@ -18,13 +19,14 @@ from PySide6.QtWidgets import (
 from .backend import as_backend
 
 LABELS = {
-    "migrate_tag_keys": "Rename old tag keys to Picard names (shown in preview first)",
+    "migrate_tag_keys": "Remove tag keys Picard doesn't write (e.g. Vorbis YEAR)",
     "write_styles": "Write Discogs styles",
     "styles_in_genre": "Add styles to Genre",
 }
 TIPS = {
-    "migrate_tag_keys": "Also removes tag keys earlier versions wrote, such as a Vorbis YEAR. Every key change "
-                        "shows in the plan before Apply; undo restores the old keys.",
+    "migrate_tag_keys": "Removes keys earlier versions wrote that Picard doesn't (today a Vorbis YEAR). Each "
+                        "removal shows in the plan before Apply; undo restores them. Alias keys such as "
+                        "TOTALTRACKS are renamed to the Picard name either way.",
     "write_styles": "Discogs styles (Southern Rock, Classic Rock…) as a STYLE tag. Off: GENRE gets the Discogs "
                     "genres only and an existing STYLE is left alone.",
     "styles_in_genre": "Append the styles to GENRE after the genres, for players that only read Genre. Works "

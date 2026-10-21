@@ -68,7 +68,7 @@ def test_unknown_country_label_and_text_helpers(fake):
 def test_tag_settings_default_off_independent_and_saved_only_on_save(fake, qtbot):
     d = TagSettingsDialog(fake); qtbot.addWidget(d)
     assert [d.boxes[k].text() for k in KEYS] == [LABELS[k] for k in KEYS]
-    assert LABELS["migrate_tag_keys"] == "Rename old tag keys to Picard names (shown in preview first)"
+    assert LABELS["migrate_tag_keys"] == "Remove tag keys Picard doesn't write (e.g. Vorbis YEAR)"
     assert not any(d.boxes[k].isChecked() for k in KEYS) and all(d.boxes[k].isEnabled() for k in KEYS)
     d.boxes["styles_in_genre"].setChecked(True)          # independent of write_styles (contract)
     assert d.boxes["styles_in_genre"].isEnabled() and not d.boxes["write_styles"].isChecked()
