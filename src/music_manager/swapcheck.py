@@ -12,9 +12,8 @@ last apply journal recorded, are secondary evidence.
 Lengths alone never flag (2026-10-21): Discogs lengths are often rounded or from another pressing. A
 "swap" needs the titles to favour the other disc too (Jaro-Winkler, TITLE_MARGIN): the title the last apply
 journal recorded before it re-tagged the file, else the file's title tag. Lengths that favour another disc
-while the titles don't give "unsure" (reported, not flagged). A folder/tag/cue disagreement is flagged
-only when the file's length and title both clearly fit one of the discs its sources name; otherwise the
-album is "unsure" too.
+while the titles don't give "unsure" (reported, not flagged). This rule is for swaps only: "disagree"
+(below) comes from the folder, tag and cue/m3u contradicting each other and needs no lengths.
 
 Strictly read-only: audio files are opened for reading only, nothing is tagged, moved or
 indexed, no journal is written and the Discogs cache is only read unless cache writes are
@@ -290,43 +289,15 @@ def check_album(album: AlbumFolder, source: ReleaseSource, journals: JournalFact
 
     A disagreement makes the status "disagree" unless the lengths already flagged the album.
     """
-    releases = releases if releases is not None else {}
     result = _check_lengths(album, source, journals, releases)
     result.disagreements = disagreements(album)
-    if result.disagreements and not result.flagged and not _disagreement_confirmed(result, releases):
-        result.status = "unsure"
-        result.reason = (f"{len(result.disagreements)} file(s) sit in a disc folder that their disc tag or the "
-                         "album's cue/m3u files contradict, but their lengths and titles don't clearly fit one disc")
-    elif result.disagreements and not result.flagged:
+    if result.disagreements and not result.flagged:
         if result.status not in ("ok", "inconclusive", "single disc") and result.reason:
             result.notes.append(f"length check {result.status}: {result.reason}")
         result.status = "disagree"
         result.reason = (f"{len(result.disagreements)} file(s) sit in a disc folder that their disc tag or "
                          "the album's cue/m3u files contradict")
     return result
-
-
-def _disagreement_confirmed(result: AlbumCheck, releases: dict) -> bool:
-    """Does some disagreeing file's length AND title clearly fit one of the discs its sources name?"""
-    release = releases.get(result.release_id)
-    if release is None or isinstance(release, Exception):
-        return False
-    at = {(dt.disc, dt.number): dt for dt in flatten_tracklist(release, release_artists(release))}
-    for e in result.disagreements:
-        f = read_facts(e.path)
-        named = sorted({d for d in (e.folder_disc, e.tag_disc, *e.sidecar_discs) if d is not None})
-        if f.number is None or f.length_s is None or not f.title or len(named) < 2:
-            continue
-        cands = [(d, at[(d, f.number)]) for d in named if (d, f.number) in at]
-        if len(cands) < 2:
-            continue
-        by_len = sorted(cands, key=lambda c: abs(f.length_s - (c[1].duration_s or 1e9)))
-        by_title = sorted(cands, key=lambda c: -title_similarity(f.title, c[1].title))
-        len_gap = abs(f.length_s - (by_len[1][1].duration_s or 1e9)) - abs(f.length_s - (by_len[0][1].duration_s or 1e9))
-        title_gap = title_similarity(f.title, by_title[0][1].title) - title_similarity(f.title, by_title[1][1].title)
-        if by_len[0][0] == by_title[0][0] and len_gap >= SWAP_MARGIN_S and title_gap >= TITLE_MARGIN:
-            return True
-    return False
 
 
 def _check_lengths(album: AlbumFolder, source: ReleaseSource, journals: JournalFacts,
