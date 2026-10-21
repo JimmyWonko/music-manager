@@ -557,20 +557,35 @@ def _contract_classes(code, with_partial=False):
     return (out, partial) if with_partial else out
 
 
+# Contract "Subtracks (2026-10-21)" lists its appended fields in prose only (no python blocks yet): the same
+# fields, in the order the section gives (each appended last). Applied only where a block doesn't have them.
+SUBTRACK_FIELDS = {"RemoteTrack": ["subtracks"], "TrackPair": ["positions"], "FileChange": ["merged_subtracks"],
+                   "Pin": ["positions"], "MatchView": ["subtrack_groups"], "Settings": ["merge_subtracks"]}
+SUBTRACK_GROUP = ["disc", "position", "positions", "titles", "merged", "reason", "path", "duration_s"]
+
+
+def _add_subtrack_fields(classes):
+    for name, extra in SUBTRACK_FIELDS.items():
+        kind, members = classes[name]
+        classes[name] = (kind, members + [f for f in extra if f not in members])
+    classes.setdefault("SubtrackGroup", ("fields", SUBTRACK_GROUP))
+
+
 @pytest.mark.skipif(not CONTRACT.is_file(), reason="contract not present")
 def test_mock_types_match_contract_exactly():
     import dataclasses
     import mm_ui.fake_service as T
     classes, partial = _contract_classes(_contract_code(), with_partial=True)
+    _add_subtrack_fields(classes)
     assert {"AlbumSort", "Destination", "Template", "TemplatePreview", "Collision", "Settings"} <= set(classes)
     assert classes["AlbumRow"][1][-3:] == ["held_for", "loose_tracks", "cluster_id"]   # d6ac2f3, c334bbf
     assert classes["Album"][1][-3:] == ["cluster_id", "tracks", "extras"]
-    assert classes["Cluster"][1][-2:] == ["album_id", "kind"] and classes["MatchView"][1][-2:] == ["problems", "pins"]
+    assert classes["Cluster"][1][-2:] == ["album_id", "kind"] and classes["MatchView"][1][-3:] == ["problems", "pins", "subtrack_groups"]
     assert {"ClusterRow", "Pin", "ManualPair", "PinConflict"} <= set(classes)                      # c2fcf25, 1f7b340
     assert classes["Problem"][1][-1] == "pin_conflicts" and classes["PinConflict"][1] == ["path", "position", "reason"]
-    assert classes["FileChange"][1][-1] == "pinned" and classes["JobKind"][1][-1] == "CLUSTER"
+    assert classes["FileChange"][1][-2:] == ["pinned", "merged_subtracks"] and classes["JobKind"][1][-1] == "CLUSTER"
     assert classes["ClusterFile"][1] == ["path", "disc", "number", "title", "duration_s", "album", "artist"]
-    assert classes["FileChange"][1][-2] == "skip_reason" and classes["Plan"][1][-2:] == ["skipped", "fetch_job"]
+    assert classes["FileChange"][1][-3] == "skip_reason" and classes["Plan"][1][-2:] == ["skipped", "fetch_job"]
     assert "RELEASE_NOT_FETCHED" in classes["ProblemKind"][1]
     assert T.MatchStatus.HELD.value == "held"
     assert [m.name for m in T.MatchStatus][-1] == "HELD"

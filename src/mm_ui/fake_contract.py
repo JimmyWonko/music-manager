@@ -251,7 +251,7 @@ class FakeContract:
             "AlbumFilter", "AlbumSort", "MatchStatus", "JobState", "JobKind", "Job", "Page", "Template",
             "TemplatePreview", "Collision", "Destination", "Settings", "Operation", "AutoRules", "Problem", "ProblemKind", "AlbumPlan", "Plan", "MMError", "NotFound",
             "PlanStale", "ValidationError", "ProviderError", "ConfigError", "Cluster", "ClusterFile", "MatchView",
-            "ClusterRow", "Pin", "ManualPair", "PinConflict")})
+            "ClusterRow", "Pin", "ManualPair", "PinConflict", "SubtrackGroup", "TrackPair", "RemoteTrack")})
         self._ids = itertools.count(100_000)
         self._jobs: dict[int, Job] = {}
         self._plans: dict[int, Plan] = {}
@@ -274,7 +274,10 @@ class FakeContract:
         self.match = _NS(view=self._view, clusters=self._match_clusters, pin=self._pin, unpin=self._unpin,
                          pins=self._pins_of, find=self._find, candidates=self._candidates, choose=self.fake.choose,
                          destination=self._destination, skip=self.fake.skip, manual=self._manual,
-                         auto_rules=lambda: T.AutoRules(), auto_accept=self._auto_accept)
+                         auto_rules=lambda: T.AutoRules(), auto_accept=self._auto_accept,
+                         split_subtracks=self._split_subtracks, unsplit_subtracks=self._unsplit_subtracks,
+                         subtrack_splits=self._subtrack_splits)
+        self._splits: dict[int, set[tuple[int, str]]] = {}   # album -> {(release id, base)} (2026-10-21)
         self.provider = _NS(submit_link=self.fake.submit_link)
         self.plan = _NS(build=self._build, apply=self._apply)
         self.journal = _NS(manual_pairs=self._manual_pairs, list=self._journal_list, undo_plan=self._undo_plan, undo=self._undo)
@@ -669,17 +672,26 @@ class FakeContract:
         chosen = self.fake._chosen.get(album_id)
         return chosen if chosen in [c.release_id for c in cands] else (cands[0].release_id if cands else None)
 
-    def _pin(self, album_id: int, file, position: str, override_hold: bool = False, release_id=None) -> Pin:
+    def _pin(self, album_id: int, file, position: str = "", override_hold: bool = False, release_id=None,
+             positions=None) -> Pin:
         a = self._album(album_id)
         path = Path(file)
         if path not in {t.path for t in a.tracks}:
             raise ValidationError(f"{path} is not a file of album {album_id}", field="file")
+        group: list[str] = []
+        if positions is not None:                     # 2026-10-21: a subtrack group pin
+            if str(position or "").strip():
+                raise ValidationError("give position or positions, not both", field="positions")
+            group = [str(x).strip() for x in positions]
+            if len(group) < 2 or not all(group) or any("+" in x for x in group):
+                raise ValidationError("positions needs two or more release positions", field="positions")
+            position = "+".join(group)
         if not str(position or "").strip():
             raise ValidationError("position is empty", field="position")
         rid = self._release_for(album_id, release_id)
         if rid is None:
             raise MMError(f"album {album_id} has no candidates: run match.find first")
-        pin = Pin(path, str(position).strip(), rid, bool(override_hold), False)
+        pin = Pin(path, str(position).strip(), rid, bool(override_hold), False, group or [str(position).strip()])
         self._pins.setdefault(album_id, {})[path] = pin
         self.fake.events.match_view_changed.emit(album_id)
         return pin
@@ -782,6 +794,8 @@ class FakeContract:
         if cand is None:
             return MatchView(aid, cid, None, False, cands, [], list(a.tracks), [], [])
         pins = [p for p in self._pins_of(aid) if p.release_id == rid]
+        if rid in self.fake._subtrack_releases:
+            return self._subtrack_view(a, cid, cands, cand, pins)
         if not cand.fetched or not cand.alignment:
             return MatchView(aid, cid, rid, False, cands, [], list(a.tracks), [], [], pins)
         pairs, pin_problems, _ = self._apply_pins(a, cand, list(cand.alignment))
@@ -793,6 +807,170 @@ class FakeContract:
         return MatchView(aid, cid, rid, True, cands, pairs,
                          [x.local for x in pairs if x.local is not None and x.remote is None],
                          [x.remote for x in pairs if x.remote is not None and x.local is None], problems, pins)
+
+    # ---------------------------------------------------------------- subtracks (2026-10-21)
+    def _split_subtracks(self, album_id: int, base_position: str, release_id=None) -> None:
+        self._album(album_id)
+        base = str(base_position or "").strip()
+        if not base:
+            raise ValidationError("base_position is empty", field="base_position")
+        rid = self._release_for(album_id, release_id)
+        if rid is None:
+            raise MMError(f"album {album_id} has no candidates: run match.find first")
+        self._splits.setdefault(album_id, set()).add((rid, base))
+        self.fake.events.match_view_changed.emit(album_id)
+
+    def _unsplit_subtracks(self, album_id: int, base_position=None, release_id=None) -> None:
+        self._album(album_id)
+        keep = {(r, b) for r, b in self._splits.get(album_id, set())
+                if not ((base_position is None or b == str(base_position).strip())
+                        and (release_id is None or r == int(release_id)))}
+        self._splits[album_id] = keep
+        self.fake.events.match_view_changed.emit(album_id)
+
+    def _subtrack_splits(self, album_id: int, release_id=None) -> list[str]:
+        self._album(album_id)
+        return sorted({b for r, b in self._splits.get(album_id, set()) if release_id is None or r == int(release_id)})
+
+    @staticmethod
+    def _sub_key(position: str) -> tuple[int, int, str]:
+        d, _, rest = position.partition("-")
+        m = re.match(r"(\d+)([a-z]*)$", rest)
+        return int(d), int(m.group(1)), m.group(2)
+
+    def _subtrack_view(self, album, cid, cands, cand, pins) -> MatchView:
+        """MOCK of match.view with match.collapse_subtracks for a release with subtracks: groups are runs of
+        lettered positions sharing a base; files pair on (disc, number); a disc whose file and track counts
+        still differ is held (DISC_TRACK_COUNT) and left unpaired."""
+        rid, artist = cand.release_id, cand.artist
+        raw = self.fake._subtrack_releases[rid]
+        groups: dict[str, list] = {}
+        for pos, title, secs in raw:
+            d, n, suf = self._sub_key(pos)
+            if suf:
+                groups.setdefault(f"{d}-{n}", []).append((pos, title, secs))
+        files = sorted(album.tracks, key=lambda t: (t.disc, t.number or 0))
+        problems, group_pin = [], {}
+        def conflict(pin, reason, why):
+            problems.append(Problem(ProblemKind.PIN_CONFLICT, f"Manual pair {pin.path.name} -> {pin.position}: {why}",
+                                    [pin.path], pin_conflicts=[T.PinConflict(pin.path, pin.position, reason)]))
+        single = []
+        for pin in pins:
+            if len(pin.positions) > 1:
+                base = next((b for b, g in groups.items() if [x[0] for x in g] == pin.positions), None)
+                if base is None:
+                    conflict(pin, "not_subtrack_group", "these positions are not one subtrack group of the release")
+                else:
+                    group_pin[base] = pin
+            else:
+                single.append(pin)
+        splits = {b for r, b in self._splits.get(album.id, set()) if r == rid}
+        n_files = {d: sum(1 for t in files if t.disc == d) for d in {t.disc for t in files}}
+        n_tracks: dict[int, int] = {}
+        for pos, _t, _s in raw:
+            n_tracks[self._sub_key(pos)[0]] = n_tracks.get(self._sub_key(pos)[0], 0) + 1
+        decided: dict[str, tuple[bool, str]] = {}
+        for base, g in groups.items():
+            d = self._sub_key(g[0][0])[0]
+            if base in group_pin:
+                decided[base] = (True, "pinned")
+            elif not self._settings.merge_subtracks:
+                decided[base] = (False, "merge_off")
+            elif base in splits:
+                decided[base] = (False, "split")
+            elif n_files.get(d, 0) == n_tracks.get(d, 0):
+                decided[base] = (False, "not_needed")
+            elif n_tracks[d] - sum(len(x) - 1 for x in groups.values() if self._sub_key(x[0][0])[0] == d) \
+                    != n_files.get(d, 0):
+                decided[base] = (False, "ambiguous")
+            elif any(s is None for _p, _t, s in g):
+                decided[base] = (False, "durations_unknown")
+            else:
+                _d, num, _ = self._sub_key(g[0][0])
+                f = next((t for t in files if t.disc == d and t.number == num), None)
+                total = sum(s for _p, _t, s in g)
+                fits = f is not None and f.duration_s is not None and abs(f.duration_s - total) <= max(5.0, .03 * total)
+                decided[base] = (True, "durations_fit") if fits else (False, "durations_differ")
+        remotes: list = []
+        seen = set()
+        for pos, title, secs in raw:
+            d, n, suf = self._sub_key(pos)
+            base = f"{d}-{n}"
+            if suf and decided.get(base, (False, ""))[0]:
+                if base in seen:
+                    continue
+                seen.add(base)
+                g = groups[base]
+                dur = None if any(s is None for _p, _t, s in g) else sum(s for _p, _t, s in g)
+                remotes.append(T.RemoteTrack(base, d, n, " / ".join(t for _p, t, _s in g), artist, dur,
+                                             [p for p, _t, _s in g]))
+            else:
+                remotes.append(T.RemoteTrack(pos, d, n, title, artist, secs))
+        by_pos = {rt.position: rt for rt in remotes}
+        held_discs = set()
+        for d in sorted(n_tracks):
+            disc_files = [t.path for t in files if t.disc == d]
+            m = sum(1 for rt in remotes if rt.disc == d)
+            if len(disc_files) != m:
+                held_discs.add(d)
+                msg = T.disc_count_message(album.folder, d, disc_files, m)
+                hint = [g for b, g in groups.items() if self._sub_key(g[0][0])[0] == d and not decided[b][0]]
+                for g in hint:
+                    msg += (f". Subtracks {' + '.join(p for p, _t, _s in g)} may be one file "
+                            f"({' / '.join(t for _p, t, _s in g)}): pin it to the group")
+                problems.append(Problem(ProblemKind.DISC_TRACK_COUNT, msg, disc_files))
+        pinned_to: dict[Path, tuple] = {}
+        for base, pin in group_pin.items():
+            pinned_to[pin.path] = ("group", by_pos[base])
+        for pin in single:
+            rt = by_pos.get(pin.position)
+            if rt is None:
+                conflict(pin, "unknown_position", f"release {rid} has no track {pin.position}")
+            elif rt.disc in held_discs and not pin.override_hold:
+                conflict(pin, "override_hold_required",
+                         "this overrides a disc hold; pair it again with override_hold=True")
+            else:
+                pinned_to[pin.path] = ("manual", rt)
+        taken = {id(v[1]) for v in pinned_to.values()}
+        pairs = []
+        used_files = set(pinned_to)
+        for rt in remotes:
+            hit = next((p for p, v in pinned_to.items() if v[1] is rt), None)
+            if hit is not None:
+                lt = next(t for t in files if t.path == hit)
+                how = "subtracks" if rt.subtracks else "manual"
+                pairs.append(T.TrackPair(how, lt, rt, 1.0 if how == "subtracks" else 0.5,
+                                         None if rt.duration_s is None else lt.duration_s - rt.duration_s, True,
+                                         list(rt.subtracks)))
+                continue
+            lt = None
+            if rt.disc not in held_discs and id(rt) not in taken:
+                lt = next((t for t in files if t.disc == rt.disc and t.number == rt.number
+                           and t.path not in used_files), None)
+            if lt is None:
+                pairs.append(T.TrackPair("unmatched", None, rt, 0.0, None, False))
+                continue
+            used_files.add(lt.path)
+            delta = None if rt.duration_s is None else lt.duration_s - rt.duration_s
+            if rt.subtracks:
+                pairs.append(T.TrackPair("subtracks", lt, rt, 1.0, delta, True, list(rt.subtracks)))
+            else:
+                sim = T._tsim(lt.title, rt.title)
+                pairs.append(T.TrackPair("number", lt, rt, sim, delta, sim >= T.TITLE_MATCH_MIN))
+        for t in files:
+            if t.path not in {p.local.path for p in pairs if p.local is not None}:
+                pairs.append(T.TrackPair("unmatched", t, None, 0.0, None, False))
+        paired = {tuple(p.positions): p.local.path for p in pairs if p.positions and p.local is not None}
+        sg = []
+        for base, g in groups.items():
+            merged, reason = decided[base]
+            pos = [p for p, _t, _s in g]
+            dur = None if any(s is None for _p, _t, s in g) else sum(s for _p, _t, s in g)
+            sg.append(T.SubtrackGroup(self._sub_key(pos[0])[0], base, pos, [t for _p, t, _s in g], merged, reason,
+                                      paired.get(tuple(pos)) if merged else None, dur))
+        return MatchView(album.id, cid, rid, True, cands, pairs,
+                         [x.local for x in pairs if x.local is not None and x.remote is None],
+                         [x.remote for x in pairs if x.remote is not None and x.local is None], problems, pins, sg)
 
     def _manual_pairs(self, operation_id: int) -> list:
         return list(self._manual_ops.get(operation_id, []))
@@ -1086,6 +1264,8 @@ class FakeContract:
         for k, v in changes.items():
             if k not in known:
                 raise ValidationError(f"Unknown setting {k}", field=k)
+        if "merge_subtracks" in changes and not isinstance(changes["merge_subtracks"], bool):
+            raise ValidationError("merge_subtracks must be true or false", field="merge_subtracks")
         if "active_template" in changes and not any(t.id == changes["active_template"] for t in self._tpl_list()):
             raise ValidationError(f"No template {changes['active_template']!r}", field="active_template")
         self._settings = replace(self._settings, **changes)

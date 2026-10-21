@@ -52,6 +52,7 @@ class LocalTrack:
 @dataclass(frozen=True)
 class RemoteTrack:
     position: str; disc: int; number: int; title: str; artist: str; duration_s: float | None
+    subtracks: list[str] = field(default_factory=list)   # 2026-10-21: merged subtrack positions ["2-9a", "2-9b"]
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ class TrackPair:
     method: str                         # Literal["number", "side", "title", "position", "unmatched"]
     local: LocalTrack | None; remote: RemoteTrack | None
     title_similarity: float; duration_delta_s: float | None; ok: bool
+    positions: list[str] = field(default_factory=list)   # 2026-10-21: method "subtracks": ["2-9a", "2-9b"]
 
 
 SEARCH_SHARE, TRACK_COUNT_WEIGHT, DURATIONS_WEIGHT = 0.75, 0.20, 0.05   # contract "Scoring" (4dc5e69)
@@ -125,6 +127,20 @@ class Pin:                  # c2fcf25: a manual pair
     release_id: int
     override_hold: bool
     stale: bool
+    positions: list[str] = field(default_factory=list)   # 2026-10-21: [position], or a subtrack group
+
+
+@dataclass(frozen=True)
+class SubtrackGroup:        # 2026-10-21: release tracks sharing one base position (2-9a + 2-9b)
+    disc: int
+    position: str           # the base: "2-9"
+    positions: list[str]    # ["2-9a", "2-9b"]
+    titles: list[str]
+    merged: bool
+    reason: str             # pinned | durations_fit | not_needed | ambiguous | durations_unknown | durations_differ
+    #                         | still_held | split | merge_off
+    path: Path | None       # the file paired with the merged track; None when not merged
+    duration_s: float | None  # summed Discogs length; None unless every subtrack lists one
 
 
 @dataclass(frozen=True)
@@ -147,6 +163,7 @@ class MatchView:
     unmatched_tracks: list[RemoteTrack]
     problems: list[Problem]
     pins: list[Pin] = field(default_factory=list)   # c2fcf25: the album's pins for this release
+    subtrack_groups: list[SubtrackGroup] = field(default_factory=list)   # 2026-10-21
 
 
 @dataclass(frozen=True)
@@ -196,6 +213,7 @@ class FileChange:
     kind: str; path_before: Path; path_after: Path; tags: list[TagChange]
     skip_reason: str | None = None     # None means the step runs; skipped steps count toward nothing
     pinned: bool = False               # c2fcf25: this track was paired by hand (match.pin)
+    merged_subtracks: list[str] = field(default_factory=list)   # 2026-10-21: this file is these subtracks
 
 
 class ProblemKind(StrEnum):
@@ -220,6 +238,7 @@ class PinConflict:          # 1f7b340: why one pin isn't used
     path: Path
     position: str
     reason: str             # stale | unknown_position | duplicate_position | override_hold_required | disc_folder_mismatch
+    #                         | not_subtrack_group (2026-10-21)
 
 
 @dataclass(frozen=True)
@@ -341,6 +360,7 @@ class Settings:
     sequential_sides: bool = False          # True: 1..n instead of A1/B1 for vinyl and cassette
     save_cover_art: bool = True             # folder.jpg from the chosen release
     clear_other_tags: bool = False
+    merge_subtracks: bool = True            # 2026-10-21: merge subtracks ripped as one file automatically
 
 
 # ---------------------------------------------------------------- errors
@@ -688,6 +708,7 @@ class FakeService(QObject):
         self._layout_problems: dict[int, tuple] = {}       # MOCK: (layout_problem, reason, subfolders) (68cf4d7)
         self._sidecars: dict[int, dict] = {}               # MOCK: album -> {file: (cue/m3u, its disc)}
         self._tracklists: dict[int, list[RemoteTrack]] = {}   # MOCK: releases with an explicit (multi-disc) tracklist
+        self._subtrack_releases: dict[int, list] = {}   # MOCK 2026-10-21: release -> [(position, title, secs)]
         self._file_tags: dict[Path, tuple[str, str]] = {}   # MOCK: file -> (artist, album) tags, for clustering
         self._rid = rid
         self._tid = tid
@@ -723,6 +744,62 @@ class FakeService(QObject):
         self._sidecars[aid] = {folder / f"{rel}.flac": (folder / side, disc)
                                for side, disc, rels in sidecars for rel in rels}
         return aid
+
+    def add_subtrack_album(self, artist: str, title: str, year: str, catno: str,
+                           tracks: list[tuple[str, str, float | None]], files: list[tuple[str, float]],
+                           score: float = 0.97) -> int:
+        """MOCK (2026-10-21 "Subtracks"): an album whose one, fetched candidate lists subtracks.
+        tracks: (Discogs position "2-9a", title, seconds or None) in release order; files: (path relative to the
+        album folder, seconds). FakeContract pairs it on (disc, number) and merges groups like collapse_subtracks."""
+        aid = next(self._ids)
+        folder = LIBRARY_ROOT / artist / f"{year} - {title}"
+        lt = []
+        for rel, secs in files:
+            path = folder / f"{rel}.flac"
+            m = _NUM.match(path.stem)
+            fm = _DISC_DIR.match(path.parent.name)
+            lt.append(LocalTrack(next(self._tid), path, int(fm.group(1)) if fm else 1, int(m.group(2)) if m else None,
+                                 _title_of(path.stem) or path.stem, float(secs)))
+        rid = next(self._rid)
+        self._subtrack_releases[rid] = list(tracks)
+        discs = len({p.split("-")[0] for p, _t, _s in tracks})
+        parts = [ScorePart("album", .40, 1.0, title, title, True), ScorePart("artist", .35, 1.0, artist, artist, True),
+                 ScorePart("catno", .18, 1.0, catno, catno, True), ScorePart("year", .07, 1.0, year, year, True)]
+        cand = Candidate(rid, None, artist, title, year, "US", "Mock Label", catno, [f"{discs}xCD"], score, None,
+                         parts, None, None, None, None, True, DISCOGS, auto_score=score)
+        self._albums[aid] = Album(aid, folder, artist, title, year, catno, len(lt), MatchStatus.NEEDS_REVIEW, score,
+                                  None, artist, SCANNED_AT + timedelta(minutes=aid), [], tracks=lt, extras=[])
+        self._cands[aid] = [cand]
+        return aid
+
+    def add_prine_subtracks(self, lengths: bool = False) -> int:
+        """MOCK modeled on Discogs 4054414, John Prine "The Singing Mailman Delivers" (2CD): disc 2 lists
+        2-9a "Hey Good Lookin'" and 2-9b "Jambalaya (On The Bayou)", ripped as ONE file, so 24 files for
+        25 tracks. lengths=False (as on Discogs): no durations, the group can't be merged automatically and
+        disc 2 stays held until a file is pinned to the group. lengths=True: Discogs-style lengths that sum
+        to the file's, so the group merges automatically (reason durations_fit)."""
+        d1 = ["Sour Grapes", "Illegal Smile", "Paradise", "Hello In There", "Souvenirs", "Quiet Man",
+              "Sam Stone", "Great Society Conflict Veteran's Blues", "Frying Pan", "Blue Umbrella", "A Good Time"]
+        d2 = [("1", "Spanish Pipedream"), ("2", "Twistin' Mabel"), ("3", "Pretty Good"), ("4", "Donald And Lydia"),
+              ("5", "Flashback Blues"), ("6", "Angel From Montgomery"), ("7", "Your Flag Decal Won't Get You Into Heaven Anymore"),
+              ("8", "Uwanta B. Lindasa"), ("9a", "Hey Good Lookin'"), ("9b", "Jambalaya (On The Bayou)"),
+              ("10", "Billy The Bum"), ("11", "The Great Compromise"), ("12", "Everybody"), ("13", "Late John Garfield Blues")]
+        def secs(i: int) -> float:
+            return 150.0 + 7 * i
+        tracks = [(f"1-{i}", t, secs(i) if lengths else None) for i, t in enumerate(d1, 1)]
+        tracks += [(f"2-{p}", t, (100.0 if p == "9a" else 95.0 if p == "9b" else secs(20 + k)) if lengths else None)
+                   for k, (p, t) in enumerate(d2)]
+        files = [(f"CD1/{i:02d} {t}", secs(i)) for i, t in enumerate(d1, 1)]
+        k = 0
+        for p, t in d2:
+            if p == "9b":
+                k += 1
+                continue
+            name = "Hey Good Lookin' - Jambalaya" if p == "9a" else t
+            files.append((f"CD2/{int(p.rstrip('ab')):02d} {name}", 196.0 if p == "9a" else secs(20 + k)))
+            k += 1
+        title = "The Singing Mailman Delivers" + ("" if not lengths else " (lengths listed)")
+        return self.add_subtrack_album("John Prine", title, "2011", "OBR-012", tracks, files)
 
     def add_layout_album(self, folder: Path, artist: str, title: str, year: str, catno: str, files: list[str],
                          layout_problem: str = "", candidate: bool = True, score: float = 0.93,
