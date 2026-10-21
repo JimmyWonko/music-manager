@@ -351,3 +351,80 @@ def test_settings_field_appended_last():
     import dataclasses
 
     assert [f.name for f in dataclasses.fields(service.Settings)][-1] == "merge_subtracks"
+
+
+# --- review fixes (Pixel, a04475f) -------------------------------------------------------------------------------
+
+REVIEW_TODO = pytest.mark.xfail(strict=True, reason="review fixes: not implemented yet")
+
+
+@REVIEW_TODO
+@pytest.mark.parametrize("base", ["2-99", "2-10", "9"])
+def test_split_rejects_a_base_that_is_not_a_subtrack_group(lib, base):
+    with pytest.raises(service.ValidationError) as err:
+        service.match.split_subtracks(lib.prine_id, base, release_id=TIMED)
+    assert err.value.field == "base_position"
+    assert service.match.subtrack_splits(lib.prine_id) == []
+
+
+@REVIEW_TODO
+def test_split_rejects_a_release_that_is_not_a_candidate(lib):
+    with pytest.raises(service.NotFound):
+        service.match.split_subtracks(lib.prine_id, "2-9", release_id=123456789)
+
+
+@pytest.mark.parametrize("call", ["split", pytest.param("unsplit", marks=REVIEW_TODO)])
+@pytest.mark.parametrize("base", ["", "   "])
+def test_split_and_unsplit_reject_an_empty_base_alike(lib, call, base):
+    fn = service.match.split_subtracks if call == "split" else service.match.unsplit_subtracks
+    with pytest.raises(service.ValidationError) as err:
+        fn(lib.prine_id, base)
+    assert err.value.field == "base_position"
+
+
+def test_split_and_unsplit_trim_the_base(lib):
+    aid = lib.prine_id
+    service.match.split_subtracks(aid, " 2-9 ", release_id=TIMED)
+    assert service.match.subtrack_splits(aid) == ["2-9"]
+    service.match.unsplit_subtracks(aid, " 2-9", release_id=TIMED)
+    assert service.match.subtrack_splits(aid) == []
+
+
+@REVIEW_TODO
+def test_split_base_is_case_insensitive_for_letter_bases(lib):
+    # a base with letters ("Disc2-9A"-like spellings) matches whatever the case, and is stored as Discogs spells it
+    from music_manager.service._state import state
+
+    st = state()
+    row = st.index.one("SELECT release FROM candidates WHERE album_id = ? AND release_id = ?", (lib.prine_id, TIMED))
+    import json
+
+    rel = json.loads(row["release"])
+    for t in rel["tracklist"]:
+        if t["position"] in ("2-9a", "2-9b"):
+            t["position"] = "Disc2-9" + t["position"][-1].upper()
+    with st.index.tx() as conn:
+        conn.execute("UPDATE candidates SET release = ? WHERE album_id = ? AND release_id = ?",
+                     (json.dumps(rel), lib.prine_id, TIMED))
+    [g] = subtrack_groups(rel)
+    service.match.split_subtracks(lib.prine_id, g.base.lower(), release_id=TIMED)
+    assert service.match.subtrack_splits(lib.prine_id) == [g.base]
+    assert service.match.view(lib.prine_id, TIMED).subtrack_groups[0].reason == "split"
+    service.match.unsplit_subtracks(lib.prine_id, g.base.upper(), release_id=TIMED)
+    assert service.match.subtrack_splits(lib.prine_id) == []
+
+
+@REVIEW_TODO
+def test_changing_merge_subtracks_emits_match_view_changed_per_affected_album(lib):
+    from service_fixtures import direct
+
+    seen = []
+    direct(service.events.match_view_changed, seen.append)
+    service.settings.set(merge_subtracks=True)  # unchanged: nothing
+    assert seen == []
+    service.settings.set(merge_subtracks=False)
+    assert seen == [lib.prine_id]  # only albums with a fetched candidate that has subtrack groups
+    service.settings.set(clear_other_tags=True)
+    assert seen == [lib.prine_id]
+    service.settings.set(merge_subtracks=True)
+    assert seen == [lib.prine_id, lib.prine_id]
