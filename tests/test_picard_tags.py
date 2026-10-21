@@ -15,7 +15,7 @@ def full_meta(**extra):
         "track": 3, "tracktotal": 12, "disc": 1, "disctotal": 2,
         "date": "1999-04-01", "originaldate": "1981",
         "label": ["Label A", "Label B"], "catalognumber": ["A-1", "B 2"],
-        "genre": ["Rock", "Folk, World, & Country"], "style": ["Folk Rock", "Country Rock"],
+        "genre": ["Rock", "Folk, World, & Country"], "style": ["Folk Rock", "Country Rock"], "write_styles": True,
         "barcode": "094012004026", "media": "CD", "releasecountry": "US",
         "releasetype": ["album", "compilation"], "releasestatus": "official", "discsubtitle": "Live",
         "release_id": 4054414, "master_id": 2967655, "artist_id": ["274724"], "position": "1-3",
@@ -433,5 +433,74 @@ def test_plan_lists_unwritten_fields_and_keeps_warnings(tmp_path):
             ("barcode", "conflicting_barcodes"), ("releasecountry", "region_not_country")}
         assert all(isinstance(u, service.UnwrittenField) and u.detail for u in ap.unwritten)
         assert any("barcode" in w.casefold() for w in plan.warnings)  # warnings kept
+    finally:
+        service.reset()
+
+
+# --- styles are opt-in (Jimmy, 2026-10-21) ---------------------------------------------------------------------------
+
+STYLES = pytest.mark.xfail(strict=True, reason="write_styles / styles_in_genre not built yet")
+
+
+@STYLES
+@pytest.mark.parametrize("ext", ["flac", "mp3", "m4a"])
+def test_styles_off_writes_genres_only_and_leaves_an_existing_style_alone(sample, ext):
+    f = sample(ext)
+    write_tags(f, full_meta(style=["Old Style"]))  # write_styles=True: a STYLE from earlier
+    meta = full_meta(write_styles=False, release_id=999)  # off, even across a release change
+    write_tags(f, meta)
+    t = {k.upper().removeprefix("----:COM.APPLE.ITUNES:").removeprefix("TXXX:"): v for k, v in raw(f).items()}
+    assert t["STYLE"] == ["Old Style"]
+    genre = t.get("GENRE") or t.get("TCON") or t.get("\xa9GEN")
+    assert genre == ["Rock", "Folk, World, & Country"]
+
+
+@STYLES
+def test_styles_off_does_not_create_style(sample):
+    f = sample("flac")
+    write_tags(f, full_meta(write_styles=False))
+    assert "STYLE" not in {k.upper() for k in raw(f)}
+
+
+@STYLES
+def test_styles_in_genre_appends_styles_to_genre(sample):
+    f = sample("flac")
+    write_tags(f, full_meta(styles_in_genre=True, style=["Folk Rock", "Rock"]))
+    t = {k.upper(): v for k, v in raw(f).items()}
+    assert t["GENRE"] == ["Rock", "Folk, World, & Country", "Folk Rock"]  # duplicates dropped
+    assert t["STYLE"] == ["Folk Rock", "Rock"]
+
+
+@STYLES
+def test_style_settings_are_appended_and_reach_the_plan(tmp_path):
+    import dataclasses
+
+    from service_fixtures import Library
+
+    from music_manager import service
+
+    lib = Library(tmp_path)
+    lib.multi["genres"], lib.multi["styles"] = ["Rock"], ["Southern Rock", "Classic Rock"]
+    lib.start(tmp_path)
+    try:
+        assert [f.name for f in dataclasses.fields(service.Settings)][-2:] == ["write_styles", "styles_in_genre"]
+        s = service.settings.get()
+        assert (s.write_styles, s.styles_in_genre) == (False, False)
+        with pytest.raises(service.ValidationError):
+            service.settings.set(write_styles="yes")
+        service.jobs.wait(service.library.scan().id)
+        aid = lib.album_id(lib.double)
+        lib.find(aid)
+        service.match.choose(aid, lib.multi["id"])
+
+        def tags():
+            [ap] = service.plan.build([aid]).albums
+            return {t.key: t.after for t in ap.files[0].tags}
+
+        off = tags()
+        assert "style" not in off and "Southern Rock" not in str(off.get("genre"))
+        service.settings.set(write_styles=True, styles_in_genre=True)
+        on = tags()
+        assert "Southern Rock" in str(on["style"]) and "Southern Rock" in str(on["genre"])
     finally:
         service.reset()
