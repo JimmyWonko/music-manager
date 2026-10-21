@@ -239,6 +239,10 @@ class _NS:
         self.__dict__.update(fns)
 
 
+# MOCK: alias keys the engine renames to their Picard name (contract "Picard tag names (2026-10-21)")
+TAG_ALIASES = {"TOTALTRACKS": "TRACKTOTAL", "TOTALDISCS": "DISCTOTAL", "CATALOG": "CATALOGNUMBER"}
+
+
 class FakeContract:
     """Contract facade over a FakeService instance."""
 
@@ -251,7 +255,7 @@ class FakeContract:
             "AlbumFilter", "AlbumSort", "MatchStatus", "JobState", "JobKind", "Job", "Page", "Template",
             "TemplatePreview", "Collision", "Destination", "Settings", "Operation", "AutoRules", "Problem", "ProblemKind", "AlbumPlan", "Plan", "MMError", "NotFound",
             "PlanStale", "ValidationError", "ProviderError", "ConfigError", "Cluster", "ClusterFile", "MatchView",
-            "ClusterRow", "Pin", "ManualPair", "PinConflict", "SubtrackGroup", "TrackPair", "RemoteTrack")})
+            "ClusterRow", "Pin", "ManualPair", "PinConflict", "SubtrackGroup", "TrackPair", "RemoteTrack", "TagChange", "UnwrittenField")})
         self._ids = itertools.count(100_000)
         self._jobs: dict[int, Job] = {}
         self._plans: dict[int, Plan] = {}
@@ -289,6 +293,11 @@ class FakeContract:
         self._announced: set[int] = set()     # finished jobs whose job_finished has been emitted
         # MOCK: extra problems per album id, added by plan.build and match.destination (UI work only)
         self.mock_problems: dict[int, list[Problem]] = {}
+        # MOCK (contract "Picard tag names (2026-10-21)"): keys an album's files already carry ({"TOTALTRACKS": "3"});
+        # aliases are renamed to the Picard key, a Vorbis YEAR is removed only with Settings.migrate_tag_keys
+        self.mock_tag_keys: dict[int, dict[str, str]] = {}
+        # MOCK: AlbumPlan.unwritten per album (also a Plan.warnings line each); empty for held albums
+        self.mock_unwritten: dict[int, list] = {}
         # MOCK: files edited since their apply -> FILE_CHANGED on undo, that step is skipped
         self.mock_changed: dict[Path, str] = {}
         # Contract "Release fetching in plan.build": build never fetches. An unfetched or stale (> 6 h) chosen
@@ -1362,6 +1371,7 @@ class FakeContract:
                 numbers = {t.path: (str(rt.number), str(rt.disc)) for t, rt in zip(album.tracks, multi[0])
                            if rt is not None}
             fcs = []
+            keys_now = self.mock_tag_keys.get(aid, {})
             for before, after in files:
                 t = next(t for t in album.tracks if t.path == before)
                 num, disc = numbers[before]
@@ -1373,10 +1383,13 @@ class FakeContract:
                       TagChange("DISCOGS_RELEASE_ID", None, str(cand.release_id))])
                 if before in pinned:
                     tc = [replace(x, after=pinned[before]) if x.key == "DISCOGS_POSITION" else x for x in tc]
+                tc += self._key_changes(keys_now)
                 fcs.append(FileChange("track", before, after, tc, pinned=before in pinned))
                 tags += len(tc)
             moves += len(fcs)
-            aps.append(AlbumPlan(aid, cand.release_id, album.folder, folder, fcs, problems, *self._plan_names(album, cand)))
+            unwritten = [] if problems else [replace(u, folder=album.folder) for u in self.mock_unwritten.get(aid, [])]
+            aps.append(AlbumPlan(aid, cand.release_id, album.folder, folder, fcs, problems, *self._plan_names(album, cand),
+                                 unwritten=unwritten))
         wanted = [(ap.album_id, ap.release_id) for ap, err in not_fetched if err is None]
         fetch_job = self._fetch_job(wanted) if wanted else None
         pending = []
@@ -1387,7 +1400,7 @@ class FakeContract:
         not_fetched = pending
         order = {aid: i for i, aid in enumerate(album_ids)}
         aps = sorted(aps + not_fetched, key=lambda ap: order[ap.album_id])
-        warnings = []
+        warnings = [f"{u.folder or ap.folder_before}: {u.field}: {u.detail}" for ap in aps for u in ap.unwritten]
         if not_fetched:
             warnings.append(f"{len(not_fetched)} release(s) are being fetched from Discogs (job {fetch_job}): build "
                             "the plan again when it finishes" if fetch_job is not None
@@ -1516,11 +1529,36 @@ class FakeContract:
         self._op_plans[op.id] = plan
         return op
 
+    def _key_changes(self, keys: dict[str, str]) -> list:
+        """MOCK of the engine's explicit key changes: an alias becomes the Picard key (value unchanged: a pure
+        rename, before == after); a Vorbis YEAR is removed only with migrate_tag_keys (else kept, not shown)."""
+        out = []
+        for old, value in keys.items():
+            if old in TAG_ALIASES:
+                new = TAG_ALIASES[old]
+                out.append(TagChange(new.lower(), value, value, old, new))
+            elif old == "YEAR" and self._settings.migrate_tag_keys:
+                out.append(TagChange("year", value, None, "YEAR", None, migration=True))
+        return out
+
+    def add_picard_demo(self, album_id: int) -> None:
+        """MOCK: give an album legacy keys and held-back fields (contract "Picard tag names (2026-10-21)")."""
+        self.mock_tag_keys[album_id] = {"TOTALTRACKS": "12", "YEAR": "1984"}
+        U = T.UnwrittenField
+        self.mock_unwritten[album_id] = [
+            U("barcode", "conflicting_barcodes", "the Barcode identifiers give 0 18861 00232 7 and 0 18861 00233 4"),
+            U("releasecountry", "region_not_country", "\"UK & Europe\" is a region, not a country"),
+            U("media", "mixed_media", "the formats name CD and Vinyl"),
+            U("releasetype", "no_single_type", "the formats describe Album and EP"),
+            U("catalognumber", "missing_catalog_number", "SST Records has no catalog number (\"none\")"),
+            U("releasestatus", "some_future_code", "Discogs lists this release as a test pressing"),
+        ]
+
     @staticmethod
     def _reverse(plan: Plan, new_id: int) -> Plan:
         aps = [AlbumPlan(ap.album_id, ap.release_id, ap.folder_after, ap.folder_before,
                          [FileChange(f.kind, f.path_after, f.path_before,
-                                     [TagChange(t.key, t.after, t.before) for t in f.tags]) for f in ap.files], [],
+                                     [TagChange(t.key, t.after, t.before, t.key_after, t.key_before, t.migration) for t in f.tags]) for f in ap.files], [],
                          ap.artist, ap.title)
                for ap in plan.albums]
         return Plan(new_id, aps, [], plan.files_to_move, plan.tags_to_write, 0)

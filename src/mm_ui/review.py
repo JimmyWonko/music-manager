@@ -321,7 +321,9 @@ class ReviewWindow(QMainWindow):
         line = QFrame(); line.setFrameShape(QFrame.HLine); cl.addWidget(line); cl.addLayout(bottom)
         self.setCentralWidget(central)
         self.menuBar().addMenu("&Library").addAction("History && undo…", self.show_history)
-        self.menuBar().addMenu("&Settings").addAction("File naming…", self.show_naming)
+        sm = self.menuBar().addMenu("&Settings")
+        sm.addAction("File naming…", self.show_naming)
+        sm.addAction("Tags…", self.show_tag_settings)
         self.menuBar().addMenu("&Help").addAction("About", self.show_about)
 
         # wiring
@@ -807,6 +809,13 @@ class ReviewWindow(QMainWindow):
             self.render()              # the After line and its problems follow the template
         return r
 
+    def show_tag_settings(self):
+        from .tagsettings import TagSettingsDialog
+        r = TagSettingsDialog(self.svc, self).exec()
+        if self.album_id is not None:
+            self.render()
+        return r
+
     def show_about(self):
         QMessageBox.about(self, f"About {DISPLAY_NAME}",
                           f"<p><b>{DISPLAY_NAME}</b> (prototype · {self.svc.label})<br><small>{self.svc.label_detail}</small></p><p>{DISCOGS_NOTICE}</p>"
@@ -814,6 +823,8 @@ class ReviewWindow(QMainWindow):
 
 
 GREY = "#888"
+RENAME = "#1f5fa8"      # a tag key renamed to its Picard name
+UNWRITTEN = "#8a6d00"   # a tag held back (AlbumPlan.unwritten)
 
 
 def _rel_to(path, folder) -> str:
@@ -1088,7 +1099,32 @@ class ApplyDialog(QDialog):
                     fi.setForeground(c, QBrush(QColor("#8a6d00")))
             top.addChild(fi)
             for t in f.tags:
-                fi.addChild(QTreeWidgetItem([t.key, t.before or "(none)", t.after or "(removed)"]))
+                if P.is_rename(t):                # Picard key names: the file's key changes
+                    value = t.after if t.after == t.before else f"{t.before or '(none)'} → {t.after or '(removed)'}"
+                    ti = QTreeWidgetItem([P.rename_text(t), value or "(none)", t.key_after])
+                    ti.setData(0, Qt.UserRole, "rename")
+                    ti.setToolTip(0, f"Tag key {t.key_before} becomes {t.key_after} (the Picard name); "
+                                     "undo restores the old key")
+                    for c in range(3):
+                        ti.setForeground(c, QBrush(QColor(RENAME)))
+                    fi.addChild(ti)
+                else:
+                    key = t.key_before if t.after is None and getattr(t, "key_before", None) else t.key
+                    ti = QTreeWidgetItem([key, t.before or "(none)", t.after or P.removed_text(t)])
+                    if t.after is None and getattr(t, "migration", False):
+                        ti.setToolTip(2, "Removed because “Remove tag keys Picard doesn't write” is on; "
+                                         "undo restores it")
+                    fi.addChild(ti)
+        for u in getattr(ap, "unwritten", None) or []:
+            ui = QTreeWidgetItem([f"⚠ {P.UNWRITTEN_MARK}: {u.field}", P.unwritten_text(u).split(" — ", 1)[1],
+                                  "existing value kept"])
+            ui.setData(0, Qt.UserRole, "unwritten")
+            where = getattr(u, "folder", None) or ap.folder_before
+            ui.setToolTip(0, f"{P.unwritten_text(u)}\n{where}"); ui.setToolTip(1, f"{u.detail}\n{where}")
+            font = ui.font(0); font.setItalic(True)
+            for c in range(3):
+                ui.setForeground(c, QBrush(QColor(UNWRITTEN))); ui.setFont(c, font)
+            top.addChild(ui)
         for p in ap.problems:
             if self.undo and P.kind_of(p) != P.LEGACY:
                 continue                       # shown as skipped steps instead
