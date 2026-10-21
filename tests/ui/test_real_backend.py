@@ -19,8 +19,12 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog
+from ui_env import (  # MM_TEST_BASSLINE overrides (e.g. a git-archive of a pinned commit)
+    BACKEND_PATH,
+    BASSLINE,
+    SUITE_BACKEND,
+)
 
-from ui_env import BACKEND_PATH, BASSLINE, SUITE_BACKEND   # MM_TEST_BASSLINE overrides (e.g. a git-archive of a pinned commit)
 from mm_ui import backend as B
 
 SRC = BASSLINE / "src"
@@ -201,6 +205,7 @@ def test_real_template_unknown_function_field(real):
 def test_real_review_apply_then_history_undo(real, qtbot, monkeypatch):
     """build (off the UI thread) -> apply -> undo through the UI on synthetic FLACs; files and tags on disk."""
     import mutagen
+
     from mm_ui.history import HistoryDialog
     from mm_ui.review import ApplyDialog, ReviewWindow
     svc, flac = real["svc"], real["flac"]
@@ -339,6 +344,7 @@ def _age_releases(monkeypatch, seconds):
 def test_real_plan_build_never_fetches_and_reuses_fetch_job(real, monkeypatch):
     """(1) RELEASE_NOT_FETCHED, (2) Plan.fetch_job last field + same id while running, (4) no Discogs in build."""
     import dataclasses
+
     from mm_ui import problems as P
     svc = real["svc"]; _needs_fetch_job(svc)
     T = svc.types
@@ -721,6 +727,7 @@ def test_real_types_match_the_mock(real):
     """Problem's new fields, DiscConflict / DiscChoice / DiscFolderMismatch (exported from music_manager.service)
     and ProblemKind (same names and values, and now the same order) match the mock."""
     import dataclasses
+
     from mm_ui import fake_service as FS
     T = real["svc"].types
     for name in ("Problem", "DiscConflict", "DiscChoice", "DiscFolderMismatch"):
@@ -755,6 +762,7 @@ def test_real_disc_conflicts_reason_and_choices(real, qtbot):
 def test_real_sources_disagree_folder_tag_and_m3u(real, qtbot):
     """A CD2 folder file tagged disc 1 and listed by CD1's playlist: held, never paired by the tags."""
     import mutagen
+
     from mm_ui import problems as P
     from mm_ui.review import ApplyDialog, ReviewWindow
     svc = real["svc"]
@@ -1112,3 +1120,142 @@ def test_real_pin_over_disc_hold_asks_then_overrides(real, qtbot):
     got = {rel.child(i).text(0): (rel.child(i).text(3), rel.child(i).text(6)) for i in range(rel.childCount())}
     assert got["2-1"] == ("01 Four,Five.flac", f"✓ {MANUAL}")
     assert not any(P.kind_of(p) == P.PIN_CONFLICT for p in w.view.problems)
+
+
+# ---------------------------------------------------------------- Discogs sub-tracks (contract 2026-10-21)
+def _needs_subtracks(svc):
+    if getattr(svc.match, "split_subtracks", None) is None:
+        pytest.skip("service predates sub-tracks (a04475f)")
+
+
+def _subtrack_album(real, title, rid, lengths):
+    """A small Prine-like 2CD: disc 2 lists 2-2a + 2-2b, ripped as ONE file (5 files, 6 tracks).
+    lengths=False: no Discogs lengths for the sub-tracks (as on Discogs 4054414)."""
+    svc = real["svc"]
+    _needs_subtracks(svc)
+    folder = real["lib"] / "John Prine" / f"[2011]  {title} [OBR{rid}]"
+    for rel, secs in (("CD1/01 Sour Grapes", 1), ("CD1/02 Paradise", 1), ("CD2/01 Sam Stone", 1),
+                      ("CD2/02 Hey Good Lookin' - Jambalaya", 2), ("CD2/03 Everybody", 1)):
+        tone(folder / f"{rel}.flac", secs)
+    tracks = [("1-1", "Sour Grapes"), ("1-2", "Paradise"), ("2-1", "Sam Stone"), ("2-2a", "Hey Good Lookin'"),
+              ("2-2b", "Jambalaya (On The Bayou)"), ("2-3", "Everybody")]
+    r = release(rid, "John Prine", title, 2011, f"OBR {rid}", [t for _p, t in tracks])
+    for tr, (pos, _t) in zip(r["tracklist"], tracks):
+        tr["position"] = pos
+        if not lengths and pos in ("2-2a", "2-2b"):
+            tr["duration"] = ""
+    r["formats"] = [{"name": "CD", "qty": "2"}]
+    real["discogs"].releases[rid] = r
+    assert svc._c.jobs.wait(svc.library.scan().id).state.name == "DONE"
+    (row,) = [x for x in svc.albums(None, limit=50).items if x.title == title]
+    assert svc._c.jobs.wait(svc.match.find([row.id]).id).state.name == "DONE"
+    svc.match.choose(row.id, rid)
+    plan = svc.plan.build([row.id])
+    if plan.fetch_job is not None:
+        assert svc._c.jobs.wait(plan.fetch_job).state.name == "DONE"
+    w = _match_window(svc, real["qtbot"])
+    w.select(f"album-{row.id}")
+    assert w.view.fetched
+    return row.id, folder, w
+
+
+def _st_row(w, label):
+    def walk(it):
+        for i in range(it.childCount()):
+            yield it.child(i); yield from walk(it.child(i))
+    return next((it for it in walk(w.tracks.invisibleRootItem()) if it.text(0) == label), None)
+
+
+def test_real_subtrack_types_match_the_mock(real):
+    import dataclasses
+
+    from mm_ui import fake_service as FS
+    T = real["svc"].types
+    _needs_subtracks(real["svc"])
+
+    def names(c):
+        return [f.name for f in dataclasses.fields(c)]
+    assert names(T.SubtrackGroup) == names(FS.SubtrackGroup)
+    for cls, last in (("TrackPair", "positions"), ("RemoteTrack", "subtracks"), ("Pin", "positions"),
+                      ("MatchView", "subtrack_groups"), ("Settings", "merge_subtracks"),
+                      ("FileChange", "merged_subtracks")):
+        assert names(getattr(T, cls))[-1] == last == names(getattr(FS, cls))[-1], cls
+    assert real["svc"].settings.get().merge_subtracks is True
+
+
+def test_real_subtracks_held_then_pinned_by_drop(real, qtbot):
+    from mm_ui import problems as P
+    from mm_ui.match import MANUAL
+    real["qtbot"] = qtbot
+    svc = real["svc"]
+    aid, folder, w = _subtrack_album(real, "Mailman Held", 741, lengths=False)
+    (g,) = w.view.subtrack_groups
+    assert (g.position, g.positions, g.merged, g.reason) == ("2-2", ["2-2a", "2-2b"], False, "durations_unknown")
+    row = _st_row(w, "2-2a + 2-2b")
+    assert row is not None and row.text(1) == "Hey Good Lookin' / Jambalaya (On The Bayou)"
+    assert row.text(2) == "lengths unknown" and row.text(6) == "not merged"
+    assert any(P.kind_of(p) == P.DISC_TRACK_COUNT for p in w.view.problems)
+    medley = folder / "CD2" / "02 Hey Good Lookin' - Jambalaya.flac"
+    w.drop_right(str(medley), row)
+    assert not w.told, w.told
+    assert [(p.path, p.positions) for p in svc.match.pins(aid)] == [(medley, ["2-2a", "2-2b"])]
+    row = _st_row(w, "2-2a + 2-2b")
+    assert row.text(3) == medley.name and row.text(6) == f"✓ {MANUAL} 2a + 2b"
+    assert not any(P.kind_of(p) == P.DISC_TRACK_COUNT for p in w.view.problems), w.view.problems
+    pr = next(p for p in w.view.pairs if p.local is not None and p.local.path == medley)
+    assert pr.method == "subtracks" and pr.positions == ["2-2a", "2-2b"]
+
+
+def test_real_subtracks_auto_merged_split_undo_and_setting(real, qtbot):
+    from mm_ui import problems as P
+    real["qtbot"] = qtbot
+    svc = real["svc"]
+    aid, _folder, w = _subtrack_album(real, "Mailman Merged", 742, lengths=True)
+    row = _st_row(w, "2-2a + 2-2b")
+    assert row is not None and row.text(6) == "merged 2a + 2b", [g for g in w.view.subtrack_groups]
+    assert row.text(3) == "02 Hey Good Lookin' - Jambalaya.flac"
+    w.tracks.setCurrentItem(row)
+    assert w.split_btn.isEnabled()
+    w.split_btn.click()
+    assert svc.match.subtrack_splits(aid) == ["2-2"]
+    row = _st_row(w, "2-2a + 2-2b")
+    assert row.text(6) == "split" and any(P.kind_of(p) == P.DISC_TRACK_COUNT for p in w.view.problems)
+    w.tracks.setCurrentItem(row)
+    w.unsplit_btn.click()
+    assert svc.match.subtrack_splits(aid) == [] and _st_row(w, "2-2a + 2-2b").text(6) == "merged 2a + 2b"
+    assert w.merge_box.isChecked() and w.merge_box.isEnabled()
+    w.merge_box.setChecked(False)
+    assert svc.settings.get().merge_subtracks is False
+    assert _st_row(w, "2-2a + 2-2b").text(6) == "not merged"
+    assert w.view.subtrack_groups[0].reason == "merge_off"
+
+
+def test_real_subtracks_split_errors_and_merge_setting_events(real, qtbot):
+    real["qtbot"] = qtbot
+    svc = real["svc"]
+    aid, _folder, w = _subtrack_album(real, "Mailman Events", 743, lengths=True)
+    m, T = svc.match, svc.types
+    for blank in ("", "  "):
+        with pytest.raises(T.ValidationError) as e:
+            m.split_subtracks(aid, blank)
+        assert e.value.field == "base_position"
+        with pytest.raises(T.ValidationError):
+            m.unsplit_subtracks(aid, blank)
+    with pytest.raises(T.ValidationError) as e:
+        m.split_subtracks(aid, "2-99")
+    assert e.value.field == "base_position" and "2-2" in str(e.value)
+    with pytest.raises(T.NotFound):
+        m.split_subtracks(10**6, "2-2")
+    with pytest.raises(T.NotFound):
+        m.split_subtracks(aid, "2-2", release_id=1)
+    m.split_subtracks(aid, " 2-2 ")
+    assert m.subtrack_splits(aid) == ["2-2"] and _st_row(w, "2-2a + 2-2b").text(6) == "split"   # via the event
+    m.unsplit_subtracks(aid)
+    assert m.subtrack_splits(aid) == [] and _st_row(w, "2-2a + 2-2b").text(6) == "merged 2a + 2b"
+    seen = []
+    svc.events.match_view_changed.connect(seen.append)
+    svc.settings.set(merge_subtracks=True)
+    assert seen == []
+    svc.settings.set(merge_subtracks=False)
+    assert seen.count(aid) == 1, seen
+    assert _st_row(w, "2-2a + 2-2b").text(6) == "not merged" and not w.merge_box.isChecked()
