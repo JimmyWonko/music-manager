@@ -21,8 +21,18 @@ ASF_FIELDS: dict[str, tuple[str, tuple[str, ...]]] = {
     "label": ("WM/Publisher", ()),
     "catalognumber": ("WM/CatalogNo", ()),
     "genre": ("WM/Genre", ()),
+    "style": ("STYLE", ()),
+    "barcode": ("WM/Barcode", ()),
+    "media": ("WM/Media", ()),
+    "releasecountry": ("MusicBrainz/Album Release Country", ()),
+    "releasetype": ("MusicBrainz/Album Type", ()),
+    "releasestatus": ("MusicBrainz/Album Status", ()),
+    "discsubtitle": ("WM/SetSubTitle", ()),
+    "artistsort": ("WM/ArtistSortOrder", ()),
+    "albumartistsort": ("WM/AlbumArtistSortOrder", ()),
     "discogs_release_id": ("DISCOGS_RELEASE_ID", ()),
     "discogs_master_id": ("DISCOGS_MASTER_ID", ()),
+    "discogs_artist_id": ("DISCOGS_ARTIST_ID", ()),
     "discogs_position": ("DISCOGS_POSITION", ()),
 }
 

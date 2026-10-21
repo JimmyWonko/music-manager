@@ -206,6 +206,7 @@ class Page:
 @dataclass(frozen=True)
 class TagChange:
     key: str; before: str | None; after: str | None
+    key_before: str | None = None; key_after: str | None = None  # 2026-10-21: the file's own key (renames)
 
 
 @dataclass(frozen=True)
@@ -287,10 +288,16 @@ class DiscChoice:
 
 
 @dataclass(frozen=True)
+class UnwrittenField:
+    field: str; reason: str; detail: str  # canonical tag name, stable reason code, human-readable text
+
+
+@dataclass(frozen=True)
 class AlbumPlan:
     album_id: int; release_id: int; folder_before: Path; folder_after: Path
     files: list[FileChange]; problems: list[Problem]   # any problem blocks apply for this album
     artist: str = ""; title: str = ""                  # the release's ("" when unknown, e.g. an old journal)
+    unwritten: list[UnwrittenField] = field(default_factory=list)  # 2026-10-21: tags held back, and why
 
 
 @dataclass(frozen=True)
@@ -361,6 +368,9 @@ class Settings:
     save_cover_art: bool = True             # folder.jpg from the chosen release
     clear_other_tags: bool = False
     merge_subtracks: bool = True            # 2026-10-21: merge subtracks ripped as one file automatically
+    migrate_tag_keys: bool = False          # 2026-10-21: also drop tag keys earlier versions wrote (Vorbis YEAR)
+    write_styles: bool = False              # 2026-10-21: Discogs styles as STYLE (off: genres only)
+    styles_in_genre: bool = False           # 2026-10-21: also append the styles to GENRE
 
 
 # ---------------------------------------------------------------- errors

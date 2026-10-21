@@ -75,6 +75,7 @@ from ._types import (
     Template,
     TemplatePreview,
     TrackPair,
+    UnwrittenField,
     ValidationError,
 )
 
@@ -84,6 +85,6 @@ __all__ = [
     "MMError", "ManualPair", "MatchReason", "MatchStatus", "MatchView", "NotFound", "Operation", "Page", "Pin", "PinConflict", "Plan", "PlanStale", "Problem",
     "ProblemKind",
     "ProviderCredit", "ProviderError", "RemoteTrack", "ScorePart", "Settings", "SubtrackGroup", "TagChange", "Template",
-    "TemplatePreview", "TrackPair", "ValidationError", "configure", "coverart", "events", "jobs", "journal", "library", "match",
+    "TemplatePreview", "TrackPair", "UnwrittenField", "ValidationError", "configure", "coverart", "events", "jobs", "journal", "library", "match",
     "plan", "provider", "reset", "settings", "templates",
 ]

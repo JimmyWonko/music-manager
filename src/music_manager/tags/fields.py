@@ -21,12 +21,26 @@ class TrackMeta(TypedDict):
     disctotal: int
     date: str
     originaldate: str
-    label: str
-    catalognumber: str
-    genre: str
+    label: str | list[str]  # several: parallel multi-values with catalognumber (tagmap)
+    catalognumber: str | list[str]
+    genre: str | list[str]
     release_id: int | None
     master_id: int
     position: NotRequired[str]
+    # Picard tag names (2026-10-21); missing or None: not written (an existing value is kept)
+    style: NotRequired[list[str] | str | None]
+    barcode: NotRequired[str | None]
+    media: NotRequired[str | None]
+    releasecountry: NotRequired[str | None]
+    releasetype: NotRequired[list[str] | str | None]
+    releasestatus: NotRequired[str | None]
+    discsubtitle: NotRequired[str | None]
+    artistsort: NotRequired[str | None]
+    albumartistsort: NotRequired[str | None]
+    artist_id: NotRequired[list[str] | str | None]  # the release artists' Discogs ids
+    write_styles: NotRequired[bool]  # write STYLE (Discogs styles); off: STYLE is neither written nor cleared
+    styles_in_genre: NotRequired[bool]  # also append the styles to GENRE
+    migrate_legacy_keys: NotRequired[bool]  # also drop keys earlier versions wrote that Picard doesn't (YEAR)
 
 
 # ---------------------------------------------------------------------------
@@ -46,12 +60,17 @@ class TrackMeta(TypedDict):
 # ratings, embedded cue/log) are still kept.
 # ---------------------------------------------------------------------------
 
-ALWAYS_REPLACED = {"discogs_release_id", "discogs_master_id", "discogs_position"}
+ALWAYS_REPLACED = {"discogs_release_id", "discogs_master_id", "discogs_position", "discogs_artist_id"}
+
+# Fields written as multi-values (one value per entry: Vorbis comments, ID3v2.4 lists, MP4 lists, APE
+# null-separated, ASF repeated attributes), as Picard writes them.
+MULTI_FIELDS = {"label", "catalognumber", "genre", "style", "releasetype", "discogs_artist_id"}
 
 
 # When a file already carries a different DISCOGS_RELEASE_ID, these values
 # came from that other release, so they are replaced even by "no value".
-RELEASE_FIELDS = {"date", "year", "originaldate", "originalyear", "label", "catalognumber", "genre"}
+RELEASE_FIELDS = {"date", "year", "originaldate", "originalyear", "label", "catalognumber", "genre", "style",
+                  "barcode", "media", "releasecountry", "releasetype", "releasestatus", "discsubtitle"}
 ORIGINAL_FIELDS = {"originaldate", "originalyear"}
 
 PROTECTED_SUBSTRINGS = (
@@ -104,8 +123,14 @@ def clean_date(value: str | int | None) -> str:
     return f"{year}-{month}-{day}"
 
 
-def tag_values(meta: TrackMeta) -> dict[str, str | None]:
-    """meta -> canonical field values as text; None means 'no value'."""
+def _multi(value) -> list[str] | None:
+    items = value if isinstance(value, (list, tuple)) else [value]
+    out = [str(v).strip() for v in items if v is not None and str(v).strip()]
+    return out or None
+
+
+def tag_values(meta: TrackMeta) -> dict:
+    """meta -> canonical field values as text (a list for MULTI_FIELDS); None means 'no value'."""
 
     def text(value) -> str | None:
         if value is None:
@@ -113,6 +138,11 @@ def tag_values(meta: TrackMeta) -> dict[str, str | None]:
         value = str(value).strip()
         return value if value and value != "0" else None
 
+    genre, style = _multi(meta.get("genre")), _multi(meta.get("style"))
+    if meta.get("styles_in_genre") and style:
+        genre = list(dict.fromkeys([*(genre or []), *style]))
+    if not meta.get("write_styles"):
+        style = None
     date = clean_date(meta.get("date"))
     original = clean_date(meta.get("originaldate"))
     return {
@@ -128,13 +158,32 @@ def tag_values(meta: TrackMeta) -> dict[str, str | None]:
         "year": text(year4(date)),
         "originaldate": text(original),
         "originalyear": text(year4(original)),
-        "label": text(meta.get("label")),
-        "catalognumber": text(meta.get("catalognumber")),
-        "genre": text(meta.get("genre")),
+        "label": _multi(meta.get("label")),
+        "catalognumber": _multi(meta.get("catalognumber")),
+        "genre": genre,
+        "style": style,
+        "barcode": text(meta.get("barcode")),
+        "media": text(meta.get("media")),
+        "releasecountry": text(meta.get("releasecountry")),
+        "releasetype": _multi(meta.get("releasetype")),
+        "releasestatus": text(meta.get("releasestatus")),
+        "discsubtitle": text(meta.get("discsubtitle")),
+        "artistsort": text(meta.get("artistsort")),
+        "albumartistsort": text(meta.get("albumartistsort")),
         "discogs_release_id": text(meta.get("release_id")),
         "discogs_master_id": text(meta.get("master_id")),
+        "discogs_artist_id": _multi(meta.get("artist_id")),
         "discogs_position": text(meta.get("position")),
     }
+
+
+def legacy_year(tags, meta: TrackMeta, key: str = "YEAR") -> tuple[bool, bool]:
+    """(write YEAR, clear YEAR): Picard writes no YEAR. Earlier versions did: one already there is kept up to
+    date, unless meta asks to migrate (then it is removed); none is created."""
+    present = any(k.casefold() == key.casefold() for k in tags.keys())  # noqa: SIM118 - VComment iterates pairs
+    if meta.get("migrate_legacy_keys"):
+        return False, present
+    return present, False
 
 
 def _apply_fields(tags, fields, values: dict, clear_other: bool, clearable, replace: set[str]) -> list[str]:

@@ -45,15 +45,17 @@ def _value_text(value) -> str:
     return str(value)
 
 
-def tag_text_map(tags) -> dict[str, str]:
+def tag_text_map(tags, keys: dict[str, str] | None = None) -> dict[str, str]:
     """{key: text} for every text field in a mutagen tag container (protected/binary fields skipped).
 
     Keys are always lowercase: the canonical field name where known (title,
-    tracknumber, ...), else the container's own key casefolded ("txxx:my tag").
+    tracknumber, ...), else the container's own key casefolded ("txxx:my tag"). keys: filled with each
+    name's key as the container spells it ("TOTALTRACKS", "TXXX:CATALOGNUMBER"), for rename previews.
     """
     out: dict[str, str] = {}
     if tags is None:
         return out
+    vorbis = hasattr(tags, "vendor")  # mutagen lowercases Vorbis comment names
     for key in list(tags.keys()):
         if is_protected_key(key) or key.upper().startswith(("APIC", "COVR", "PRIV", "GEOB", "MCDI", "UFID")):
             continue
@@ -69,4 +71,6 @@ def tag_text_map(tags) -> dict[str, str]:
             while name in out and out[name] != text:
                 name, n = f"{lower}#{n}", n + 1
         out[name] = text
+        if keys is not None:
+            keys[name] = key.upper() if vorbis else key  # Vorbis names are case-insensitive: Picard's upper case
     return out

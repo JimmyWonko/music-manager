@@ -21,8 +21,18 @@ MP4_FIELDS: dict[str, tuple[str, tuple[str, ...]]] = {
     "label": (FF + "LABEL", (FF + "publisher",)),
     "catalognumber": (FF + "CATALOGNUMBER", ()),
     "genre": ("\xa9gen", ("gnre",)),
+    "style": (FF + "STYLE", ()),
+    "barcode": (FF + "BARCODE", ()),
+    "media": (FF + "MEDIA", ()),
+    "releasecountry": (FF + "MusicBrainz Album Release Country", ()),
+    "releasetype": (FF + "MusicBrainz Album Type", ()),
+    "releasestatus": (FF + "MusicBrainz Album Status", ()),
+    "discsubtitle": (FF + "DISCSUBTITLE", ()),
+    "artistsort": ("soar", ()),
+    "albumartistsort": ("soaa", ()),
     "discogs_release_id": (FF + "DISCOGS_RELEASE_ID", ()),
     "discogs_master_id": (FF + "DISCOGS_MASTER_ID", ()),
+    "discogs_artist_id": (FF + "DISCOGS_ARTIST_ID", ()),
     "discogs_position": (FF + "DISCOGS_POSITION", ()),
 }
 MP4_TEXT_ATOMS = {"aART", "soal", "soar", "soaa", "sonm", "soco", "desc", "ldes", "cprt", "gnre", "cpil", "tmpo", "purl", "egid"}
@@ -40,9 +50,9 @@ def _write_mp4_tags(audio, meta: TrackMeta, clear_other: bool, replace: set[str]
         if value is None:
             values[name] = None
         elif key.startswith("----:"):
-            values[name] = [MP4FreeForm(value.encode("utf-8"))]
+            values[name] = [MP4FreeForm(v.encode("utf-8")) for v in (value if isinstance(value, list) else [value])]
         else:
-            values[name] = [value]
+            values[name] = value if isinstance(value, list) else [value]
     values["tracknumber"] = [(int(meta["track"]), int(meta.get("tracktotal") or 0))]
     values["discnumber"] = [(int(meta["disc"]), int(meta.get("disctotal") or 0))]
 

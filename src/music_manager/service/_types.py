@@ -413,6 +413,10 @@ class TagChange:
     key: str
     before: str | None
     after: str | None
+    # the key as the file spells it before / after (None: absent); differing keys are a rename, e.g.
+    # TOTALTRACKS -> TRACKTOTAL, shown even when the value stays the same (2026-10-21)
+    key_before: str | None = None
+    key_after: str | None = None
 
 
 @dataclass(frozen=True)
@@ -464,6 +468,15 @@ class CoverDefaults:
 
 
 @dataclass(frozen=True)
+class UnwrittenField:
+    """A tag plan.build holds back because Discogs is ambiguous (the same text is in Plan.warnings)."""
+    field: str   # canonical name: barcode, releasecountry, media, releasetype, catalognumber
+    reason: str  # stable code: conflicting_barcodes, region_not_country, unknown_country, mixed_media,
+    # no_single_type, missing_catalog_number
+    detail: str  # human-readable
+
+
+@dataclass(frozen=True)
 class AlbumPlan:
     album_id: int
     release_id: int
@@ -475,6 +488,7 @@ class AlbumPlan:
     # for loose tracks (AlbumRow.loose_tracks) the folder's name and ""
     title: str = ""
     cover: CoverArt | None = None  # front cover plan.apply embeds (FileChange.tags has "cover_art" per file)
+    unwritten: list[UnwrittenField] = field(default_factory=list)  # 2026-10-21: tags held back, and why
 
 
 @dataclass(frozen=True)
@@ -544,3 +558,7 @@ class Settings:
     cover_source: CoverSource = "folder_first"
     cover_max_bytes: int = 0
     merge_subtracks: bool = True  # automatic subtrack merging (2026-10-21); group pins merge either way
+    # also remove keys earlier versions wrote that Picard doesn't (Vorbis YEAR), shown in the plan (2026-10-21)
+    migrate_tag_keys: bool = False
+    write_styles: bool = False  # 2026-10-21: write Discogs styles as STYLE (off: genres only)
+    styles_in_genre: bool = False  # also append the styles to GENRE

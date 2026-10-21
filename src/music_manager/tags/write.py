@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from mutagen import File as MutagenFile
@@ -120,6 +121,8 @@ def _replace_set(path: Path, meta: TrackMeta, previous: str | None) -> set[str]:
         # Not a reissue: drop an original date an earlier run of this tool
         # wrote. Files never tagged by this tool keep theirs.
         replace |= ORIGINAL_FIELDS
+    if not meta.get("write_styles"):
+        replace.discard("style")  # styles are opt-in: an existing STYLE is left alone
     return replace
 
 
@@ -169,6 +172,36 @@ def _write_tags_file(path: Path, meta: TrackMeta, clear_other: bool = False, dry
     return removed
 
 
+@dataclass(frozen=True)
+class TagPreview:
+    """One changed tag: key is the canonical name (title, tracktotal, ...) or the format's own key;
+    key_before / key_after: the key as the file spells it before / after (None: absent). A rename
+    (TOTALTRACKS -> TRACKTOTAL) is a change even when the text stays the same."""
+    key: str
+    before: str | None
+    after: str | None
+    key_before: str | None
+    key_after: str | None
+
+
+def preview_tag_changes(path: Path, meta: TrackMeta, clear_other: bool = False) -> list[TagPreview]:
+    """What write_tags would change, without saving, with each tag's key before and after."""
+    replace = _replace_set(path, meta, None)
+    get_tags, apply, _save = _open_for_tagging(path)
+    keys_before: dict[str, str] = {}
+    keys_after: dict[str, str] = {}
+    before = tag_text_map(get_tags(), keys_before)
+    apply(meta, clear_other, replace)
+    after = tag_text_map(get_tags(), keys_after)
+    changes = []
+    for key in list(before) + [k for k in after if k not in before]:
+        old, new = before.get(key), after.get(key)
+        kb, ka = keys_before.get(key), keys_after.get(key)
+        if old != new or kb != ka:
+            changes.append(TagPreview(key, old, new, kb, ka))
+    return changes
+
+
 def preview_tags(path: Path, meta: TrackMeta, clear_other: bool = False) -> list[tuple[str, str | None, str | None]]:
     """What write_tags would change, without saving: (key, before, after) per changed tag.
 
@@ -176,14 +209,4 @@ def preview_tags(path: Path, meta: TrackMeta, clear_other: bool = False) -> list
     name where the format's key maps to one (title, tracknumber, ...), else
     the format's own key. None means absent / removed.
     """
-    replace = _replace_set(path, meta, None)
-    get_tags, apply, _save = _open_for_tagging(path)
-    before = tag_text_map(get_tags())
-    apply(meta, clear_other, replace)
-    after = tag_text_map(get_tags())
-    changes = []
-    for key in list(before) + [k for k in after if k not in before]:
-        old, new = before.get(key), after.get(key)
-        if old != new:
-            changes.append((key, old, new))
-    return changes
+    return [(c.key, c.before, c.after) for c in preview_tag_changes(path, meta, clear_other) if c.before != c.after]

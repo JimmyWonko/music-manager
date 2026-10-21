@@ -22,6 +22,16 @@ APE_FIELDS: dict[str, tuple[str, tuple[str, ...]]] = {
     "label": ("Label", ("ORGANIZATION", "PUBLISHER")),
     "catalognumber": ("CatalogNumber", ("CATALOG",)),
     "genre": ("Genre", ()),
+    # Picard's spellings (picard/formats/apev2.py; names it has no entry for are title-cased)
+    "style": ("Style", ()),
+    "barcode": ("Barcode", ()),
+    "media": ("Media", ()),
+    "releasecountry": ("Releasecountry", ()),
+    "releasetype": ("MUSICBRAINZ_ALBUMTYPE", ()),
+    "releasestatus": ("MUSICBRAINZ_ALBUMSTATUS", ()),
+    "discsubtitle": ("DiscSubtitle", ()),
+    "artistsort": ("Artistsort", ()),
+    "albumartistsort": ("Albumartistsort", ()),
 }
 
 

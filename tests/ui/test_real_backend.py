@@ -1177,7 +1177,7 @@ def test_real_subtrack_types_match_the_mock(real):
         return [f.name for f in dataclasses.fields(c)]
     assert names(T.SubtrackGroup) == names(FS.SubtrackGroup)
     for cls, last in (("TrackPair", "positions"), ("RemoteTrack", "subtracks"), ("Pin", "positions"),
-                      ("MatchView", "subtrack_groups"), ("Settings", "merge_subtracks"),
+                      ("MatchView", "subtrack_groups"), ("Settings", "styles_in_genre"),
                       ("FileChange", "merged_subtracks")):
         assert names(getattr(T, cls))[-1] == last == names(getattr(FS, cls))[-1], cls
     assert real["svc"].settings.get().merge_subtracks is True
