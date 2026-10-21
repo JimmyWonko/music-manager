@@ -29,8 +29,14 @@ from ..coverart import EmbedCover, embed_front
 from ..fs import COPY_CHUNK
 from .ape import _write_ape
 from .asf import _write_asf
-from .fields import ALWAYS_REPLACED, ORIGINAL_FIELDS, RELEASE_FIELDS, TrackMeta, tag_values
-from .id3 import _apply_id3
+from .fields import (
+    ALWAYS_REPLACED,
+    ORIGINAL_FIELDS,
+    RELEASE_FIELDS,
+    TrackMeta,
+    tag_values,
+)
+from .id3 import _apply_id3, prepare_v23
 from .mp4 import _write_mp4_tags
 from .read import already_tagged
 from .textmap import tag_text_map
@@ -124,16 +130,27 @@ def _replace_set(path: Path, meta: TrackMeta, previous: str | None) -> set[str]:
         replace |= ORIGINAL_FIELDS
     if not meta.get("write_styles"):
         replace.discard("style")  # styles are opt-in: an existing STYLE is left alone
+    replace -= set(meta.get("keep_fields") or ())  # e.g. a Latin-1 "dropped" value: the file keeps its own
     return replace
 
 
-def _open_for_tagging(path: Path):
+def _id3_saver(tags, meta: TrackMeta, v23: bool, save):
+    """save(v2_version) after preparing v2.3 encodings (see tags.id3.prepare_v23)."""
+    def run():
+        if v23:
+            prepare_v23(tags, bool(meta.get("id3_latin1")))
+        save(3 if v23 else 4)
+    return run
+
+
+def _open_for_tagging(path: Path, meta: TrackMeta | None = None):
     """Load path for tagging: (current tag container getter, apply(meta, clear_other, replace), save)."""
     suffix = path.suffix.lower()
     if suffix == ".mp3":
         # ID3 only: works for tag-only or damaged files the MP3 parser rejects.
         id3 = _load_id3_for_mp3(path)
-        return (lambda: id3), (lambda m, c, r: _apply_id3(id3, m, c, r)), (lambda: id3.save(path, v2_version=4))
+        return (lambda: id3), (lambda m, c, r: _apply_id3(id3, m, c, r)), _id3_saver(
+            id3, meta or {}, bool((meta or {}).get("id3_v23")), lambda v: id3.save(path, v2_version=v))
 
     audio = MutagenFile(path)
     if audio is None:
@@ -142,8 +159,9 @@ def _open_for_tagging(path: Path):
     if isinstance(audio, (WAVE, AIFF, MP3)):
         if audio.tags is None:
             audio.add_tags()
-        return (lambda: audio.tags), (lambda m, c, r: _apply_id3(audio.tags, m, c, r)), (
-            lambda: audio.save(v2_version=4))
+        v23 = not isinstance(audio, MP3) or bool((meta or {}).get("id3_v23"))  # WAV/AIFF: always v2.3
+        return (lambda: audio.tags), (lambda m, c, r: _apply_id3(audio.tags, m, c, r)), _id3_saver(
+            audio.tags, meta or {}, v23, lambda v: audio.save(v2_version=v))
     if isinstance(audio, MP4):
         writer = _write_mp4_tags
     elif isinstance(audio, ASF):
@@ -166,7 +184,7 @@ def _write_tags_file(path: Path, meta: TrackMeta, clear_other: bool = False, dry
     read and the changes are computed, but nothing is saved.
     """
     replace = _replace_set(path, meta, previous)
-    _tags, apply, save = _open_for_tagging(path)
+    _tags, apply, save = _open_for_tagging(path, meta)
     removed = apply(meta, clear_other, replace)
     if not dry_run:
         save()

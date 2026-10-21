@@ -9,10 +9,13 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .. import coverart as cover_engine
+from .. import moves as moves_mod
 from ..apply import AlbumApplyError, execute_layout, release_info
-from ..fs import collect_albums, file_sha256
+from ..fs import collect_albums, file_sha256, is_junk_file, junk_files
 from ..journal import Journal
 from ..playlists import playlist_path
+from ..tags.fields import tag_values
+from ..tags.id3 import latin1_losses
 from ..tags.write import preview_tag_changes
 from . import coverart
 from ._common import album_record, cluster_guess, is_loose_tracks, now_utc, set_status
@@ -29,6 +32,7 @@ from ._state import State, events, state
 from ._types import (
     AlbumPlan,
     CoverDefaults,
+    EncodingLoss,
     FileChange,
     Job,
     JobKind,
@@ -44,6 +48,7 @@ from ._types import (
     UnwrittenField,
 )
 
+V23_SUFFIXES = (".wav", ".aif", ".aiff")  # always ID3v2.3 (tags.write); MP3 only with Settings.id3v23_mp3
 COVER_NAME = "folder.jpg"
 COVER_STEMS = ("cover", "folder", "front")
 
@@ -125,14 +130,64 @@ def _size(path: Path) -> int:
 
 # --- build ---------------------------------------------------------------------------
 
+def _is_v23(path: Path, id3v23_mp3: bool) -> bool:
+    """Is path written as ID3v2.3 (tags.write): WAV/AIFF always, MP3 with Settings.id3v23_mp3."""
+    suffix = path.suffix.lower()
+    return suffix in V23_SUFFIXES or (suffix == ".mp3" and id3v23_mp3)
+
+
+def _junk_moving(changes: list[FileChange]) -> list[Path]:
+    """The junk files (fs.is_junk_file) the plan moves with the album: extra files, and those inside moved
+    folders, sorted."""
+    out: list[Path] = []
+    for c in changes:
+        if c.kind != "extra":
+            continue
+        if c.path_before.is_dir() and not c.path_before.is_symlink():
+            out += [p for p in c.path_before.rglob("*") if is_junk_file(p)]
+        elif is_junk_file(c.path_before):
+            out.append(c.path_before)
+    return sorted(out)
+
+
+def _junk_left_behind(album: Path, root: Path | None, target: Path, moving: set[Path]) -> list[Path]:
+    """The junk files (fs.junk_files) apply's cleanup would trash: in the album folder (those not moving with
+    it) and in each parent that holds nothing else, up to (not including) the library root, never in the
+    album's new folder or its parents."""
+    out = [p for p in junk_files(album) if p not in moving]
+    keep = {target, *target.parents}
+    current = album
+    while root is not None and root in current.parent.parents and current.parent not in keep:
+        parent = current.parent
+        try:
+            if any(p != current and not is_junk_file(p) for p in parent.iterdir()):
+                break
+        except OSError:
+            break
+        out += junk_files(parent)
+        current = parent
+    return out
+
+
 def _file_changes(t: AlbumTarget, clear_other: bool, warnings: list[str], migrate: bool = False,
-                  unwritten: list[UnwrittenField] | None = None, styles: tuple[bool, bool] = (False, False)) -> list[FileChange]:
+                  unwritten: list[UnwrittenField] | None = None, styles: tuple[bool, bool] = (False, False),
+                  id3: tuple[bool, bool] = (False, False),
+                  losses: list[EncodingLoss] | None = None) -> list[FileChange]:
     layout = t.layout
     assert layout is not None
     changes: list[FileChange] = []
     for item in layout.tracks:  # the apply writes item.meta: the same choice as the preview
         item.meta["migrate_legacy_keys"] = migrate
         item.meta["write_styles"], item.meta["styles_in_genre"] = styles
+        item.meta["id3_v23"], item.meta["id3_latin1"] = id3
+        v23 = _is_v23(item.source, id3[0])
+        item.meta["keep_fields"] = []
+        if id3[1] and v23:
+            found = [EncodingLoss(item.source, f, v, lost, sev, new)
+                     for f, v, lost, sev, new in latin1_losses(tag_values(item.meta))]
+            item.meta["keep_fields"] = sorted({x.field for x in found if x.severity == "dropped"})
+            if losses is not None:
+                losses += found
     held = release_info(t.release, t.dtracks, t.original_year).tags
     for note in held.notes:
         warnings.append(f"{t.album.path.name}: {note}")
@@ -258,7 +313,7 @@ def _names(t: AlbumTarget) -> tuple[str, str]:
 
 
 def build(album_ids: list[int], template: str | None = None,
-          allow_track_mismatch: set[int] = frozenset()) -> Plan:
+          allow_track_mismatch: set[int] = frozenset(), allow_encoding_drop: set[int] = frozenset()) -> Plan:
     """Everything plan.apply would do, file by file, with every problem. Read-only (never writes a status).
 
     Uses each album's chosen release, else its best candidate. Never calls
@@ -305,8 +360,24 @@ def build(album_ids: list[int], template: str | None = None,
         problems = [p for p in t.problems if not (p.kind is ProblemKind.TRACK_MISMATCH and t.album_id in allowed)]
         problems += cross.get(t.album_id, [])
         unwritten: list[UnwrittenField] = []
+        losses: list[EncodingLoss] = []
         changes = _file_changes(t, cfg.clear_other_tags, warnings, cfg.migrate_tag_keys, unwritten,
-                               (cfg.write_styles, cfg.styles_in_genre))
+                               (cfg.write_styles, cfg.styles_in_genre), (cfg.id3v23_mp3, cfg.id3_latin1), losses)
+        dropped = [x for x in losses if x.severity == "dropped"]
+        drop_ok = {int(a) for a in allow_encoding_drop}
+        if losses:
+            held = " (album held: allow_encoding_drop to apply)" if dropped and t.album_id not in drop_ok else ""
+            warnings.append(f"{t.album.path.name}: Latin-1 (Settings.id3_latin1): {len(losses) - len(dropped)} tag "
+                            f"value(s) transliterated, {len(dropped)} dropped and not written (existing value kept)"
+                            f"{held}: see AlbumPlan.encoding_losses")
+        if dropped and t.album_id not in drop_ok:
+            problems.append(Problem(
+                ProblemKind.ENCODING_DROPPED,
+                f"{len(dropped)} tag value(s) have characters Latin-1 can't hold and no sensible substitute "
+                f"({', '.join(sorted({x.field for x in dropped}))}): those fields would not be written. "
+                "Turn off id3_latin1, or apply with allow_encoding_drop to keep the files' current values",
+                sorted({x.path for x in dropped})))
+        junk = _junk_left_behind(t.album.path, t.root, t.target, {c.path_before for c in changes})
         choice = _cover_for(st, t, opts, warnings)
         if choice.pending_url and not problems:  # held albums download nothing
             cover_wanted.append((t.album_id, choice.pending_url))
@@ -340,7 +411,11 @@ def build(album_ids: list[int], template: str | None = None,
                 cover_url = url
                 covers += 1
         ap = AlbumPlan(t.album_id, t.release_id, t.album.path, t.target, changes, problems, *_names(t),
-                       cover=choice.art if embed is not None else None, unwritten=unwritten)
+                       cover=choice.art if embed is not None else None, unwritten=unwritten, junk=junk,
+                       encoding_losses=losses, junk_moving=_junk_moving(changes),
+                       id3v23_files=sum(1 for c in changes if c.kind == "track" and not c.skip_reason
+                                        and _is_v23(c.path_before, cfg.id3v23_mp3)),
+                       encoding_transliterated=len(losses) - len(dropped), encoding_dropped=len(dropped))
         plans[t.album_id] = ap
         art_path = [choice.art.path] if embed is not None and choice.art.path else []
         records.append(_AlbumRecord(t, ap, _fingerprint(t, art_path), cover_url, embed))
@@ -492,6 +567,7 @@ def apply(plan_id: int) -> Job:
                     journal = Journal("apply", journal_dir(st))
                 t = r.target
                 assert t.layout is not None
+                moves_mod.VERIFY_HASH = st.config().verify_hash  # cross-drive copies (Settings.verify_hash)
                 try:
                     done = execute_layout(
                         t.layout, dry_run=False, clear_other=rec.clear_other, scan_root=t.root, journal=journal,

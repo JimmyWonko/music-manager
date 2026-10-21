@@ -287,7 +287,8 @@ class FakeContract:
         self.journal = _NS(manual_pairs=self._manual_pairs, list=self._journal_list, undo_plan=self._undo_plan, undo=self._undo)
         self.templates = _NS(list=self._tpl_list, save=self._tpl_save, delete=self._tpl_delete,
                              preview=self._tpl_preview)
-        self.settings = _NS(get=lambda: self._settings, set=self._settings_set)
+        self.settings = _NS(get=lambda: self._settings, set=self._settings_set,
+                            verify_hashes_available=lambda: ["sha256"])  # MOCK: no optional xxhash
         self.jobs = _NS(get=self._job_get, cancel=lambda job_id: None, pause=lambda job_id: None,
                          resume=lambda job_id: None, wait=self._job_wait, idle=self._jobs_idle)
         self._announced: set[int] = set()     # finished jobs whose job_finished has been emitted
@@ -1309,7 +1310,9 @@ class FakeContract:
                 raise ValidationError(f"Unknown setting {k}", field=k)
         if "merge_subtracks" in changes and not isinstance(changes["merge_subtracks"], bool):
             raise ValidationError("merge_subtracks must be true or false", field="merge_subtracks")
-        for key in ("migrate_tag_keys", "write_styles", "styles_in_genre"):
+        if "verify_hash" in changes and changes["verify_hash"] not in ("sha256", "xxhash"):
+            raise ValidationError("verify_hash must be sha256 or xxhash", field="verify_hash")
+        for key in ("migrate_tag_keys", "write_styles", "styles_in_genre", "id3v23_mp3", "id3_latin1"):
             if key in changes and not isinstance(changes[key], bool):
                 raise ValidationError(f"{key} must be true or false", field=key)
         if "active_template" in changes and not any(t.id == changes["active_template"] for t in self._tpl_list()):
@@ -1323,7 +1326,7 @@ class FakeContract:
 
     # ================================================================ plans
     def _build(self, album_ids: list[int], template: str | None = None,
-               allow_track_mismatch: set[int] = frozenset()) -> Plan:
+               allow_track_mismatch: set[int] = frozenset(), allow_encoding_drop: set[int] = frozenset()) -> Plan:
         text = self._template_text(template)
         layouts, aps, moves, tags = {}, [], 0, 0
         not_fetched = []

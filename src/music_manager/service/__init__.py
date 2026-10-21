@@ -45,6 +45,7 @@ from ._types import (
     DiscChoice,
     DiscConflict,
     DiscFolderMismatch,
+    EncodingLoss,
     FileChange,
     Job,
     JobKind,
@@ -81,7 +82,7 @@ from ._types import (
 
 __all__ = [
     "DISCOGS_CREDIT", "Album", "AlbumFilter", "AlbumPlan", "AlbumRow", "AlbumSort", "AutoRules", "Candidate",
-    "Cluster", "ClusterFile", "ClusterRow", "Collision", "ConfigError", "CoverArt", "CoverDefaults", "CoverPreview", "Destination", "DiscChoice", "DiscConflict", "DiscFolderMismatch", "Events", "FileChange", "Job", "JobKind", "JobState", "LayoutConflict", "LocalTrack",
+    "Cluster", "ClusterFile", "ClusterRow", "Collision", "ConfigError", "CoverArt", "CoverDefaults", "CoverPreview", "Destination", "DiscChoice", "DiscConflict", "DiscFolderMismatch", "EncodingLoss", "Events", "FileChange", "Job", "JobKind", "JobState", "LayoutConflict", "LocalTrack",
     "MMError", "ManualPair", "MatchReason", "MatchStatus", "MatchView", "NotFound", "Operation", "Page", "Pin", "PinConflict", "Plan", "PlanStale", "Problem",
     "ProblemKind",
     "ProviderCredit", "ProviderError", "RemoteTrack", "ScorePart", "Settings", "SubtrackGroup", "TagChange", "Template",

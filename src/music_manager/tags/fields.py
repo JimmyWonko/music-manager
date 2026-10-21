@@ -40,6 +40,7 @@ class TrackMeta(TypedDict):
     artist_id: NotRequired[list[str] | str | None]  # the release artists' Discogs ids
     write_styles: NotRequired[bool]  # write STYLE (Discogs styles); off: STYLE is neither written nor cleared
     styles_in_genre: NotRequired[bool]  # also append the styles to GENRE
+    keep_fields: NotRequired[list[str]]  # canonical fields not to write or clear (plan: Latin-1 "dropped")
     migrate_legacy_keys: NotRequired[bool]  # also drop keys earlier versions wrote that Picard doesn't (YEAR)
 
 
@@ -145,7 +146,7 @@ def tag_values(meta: TrackMeta) -> dict:
         style = None
     date = clean_date(meta.get("date"))
     original = clean_date(meta.get("originaldate"))
-    return {
+    out = {
         "artist": text(meta.get("artist")),
         "albumartist": text(meta.get("albumartist")),
         "album": text(meta.get("album")),
@@ -175,6 +176,9 @@ def tag_values(meta: TrackMeta) -> dict:
         "discogs_artist_id": _multi(meta.get("artist_id")),
         "discogs_position": text(meta.get("position")),
     }
+    for name in meta.get("keep_fields") or ():  # not written: the file keeps its value (Latin-1 "dropped")
+        out[name] = None
+    return out
 
 
 def legacy_year(tags, meta: TrackMeta, key: str = "YEAR") -> tuple[bool, bool]:

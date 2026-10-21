@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .fs import COPY_CHUNK, file_sha256, trash_file
+from .fs import COPY_CHUNK, file_sha256, junk_files, trash_file
 from .tags.fields import TrackMeta
 
 if TYPE_CHECKING:
@@ -46,17 +46,44 @@ def _same_file(a: Path, b: Path) -> bool:
         return False
 
 
-def _copy_verified(src: Path, dest: Path) -> None:
+VERIFY_HASHES = ("sha256", "xxhash")
+VERIFY_HASH = "sha256"  # the default; service.plan.apply sets Settings.verify_hash for its run
+
+
+def hasher(name: str):
+    """A new hash object: "sha256" (hashlib) or "xxhash" (xxh3_128 from the optional xxhash package)."""
+    if name == "sha256":
+        return hashlib.sha256()
+    if name == "xxhash":
+        try:
+            import xxhash
+        except ImportError as exc:
+            raise ValueError("verify_hash 'xxhash' needs the optional xxhash package (pip install xxhash)") from exc
+        return xxhash.xxh3_128()
+    raise ValueError(f"unknown verify hash {name!r}: one of {', '.join(VERIFY_HASHES)}")
+
+
+def xxhash_available() -> bool:
+    try:
+        import xxhash  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _copy_verified(src: Path, dest: Path, algo: str | None = None) -> None:
     """Copy one file to dest (which must not exist), verifying every byte.
 
     The data goes to a hidden partial file next to dest, is flushed to disk,
-    and is read back: size and SHA-256 must match the source. Only then is
+    and is read back: size and hash must match the source. The source is read once (hashed while it is
+    copied); the copy is read back in full. The hash is SHA-256 unless algo / VERIFY_HASH says xxhash. Only then is
     it given its real name. On any problem the partial file is removed and
     the source is untouched.
     """
+    algo = algo or VERIFY_HASH
+    src_hash = hasher(algo)  # an unknown or missing hash fails before anything is written
     fd, partial_name = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.discogs-tag-partial-")
     partial = Path(partial_name)
-    src_hash = hashlib.sha256()
     try:
         with open(src, "rb") as fin, os.fdopen(fd, "wb") as fout:
             while chunk := fin.read(COPY_CHUNK):
@@ -68,7 +95,7 @@ def _copy_verified(src: Path, dest: Path) -> None:
             shutil.copystat(src, partial)
         except OSError:
             pass  # timestamps/permissions are nice to have; the data is what matters
-        dest_hash = hashlib.sha256()
+        dest_hash = hasher(algo)
         with open(partial, "rb") as fcheck:
             while chunk := fcheck.read(COPY_CHUNK):
                 dest_hash.update(chunk)
@@ -280,6 +307,11 @@ def prune_limit(album_path: Path, dest_root: Path, scan_root: Path | None) -> Pa
 
 
 def _rmdir_logged(journal: Journal | None, current: Path) -> None:
+    """rmdir current. When junk files (fs.JUNK_NAMES) are all it holds, they go to the trash first."""
+    junk = junk_files(current)
+    if junk and len(junk) == sum(1 for _ in current.iterdir()):
+        for path in junk:
+            _trash_logged(journal, path)
     if journal is not None:
         journal.write(action="rmdir", path=str(current))
     os.rmdir(current)
@@ -290,7 +322,7 @@ def _remove_empty_tree(folder: Path, protected: set[Path], journal: Journal | No
     removed: list[Path] = []
     for dirpath, _dirnames, filenames in os.walk(folder, topdown=False, followlinks=False):
         current = Path(dirpath)
-        if current == folder or filenames:
+        if current == folder or len(junk_files(current)) != len(filenames):
             continue
         if current.resolve() in protected or current.is_symlink() or os.path.ismount(current):
             continue

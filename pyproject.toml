@@ -20,6 +20,8 @@ dependencies = [
 dev = ["pytest"]
 ui = ["PySide6"]
 ui-test = ["PySide6", "pytest", "pytest-qt"]
+fast-verify = ["xxhash>=3"]  # Settings.verify_hash = "xxhash" (BSD-2-Clause)
+transliterate = ["Unidecode>=1.3"]  # Settings.id3_latin1 transliteration (GPL-2.0-or-later); without it values drop
 
 [project.scripts]
 discogs-tag = "music_manager.cli.discogs_tag:main"

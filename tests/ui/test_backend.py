@@ -582,8 +582,8 @@ def test_mock_types_match_contract_exactly():
     assert classes["Problem"][1] == ["kind", "message", "paths", "disc_conflicts", "layout_reason",
                                      "blocking_subdirs", "loose_files", "folder_mismatches", "pin_conflicts"]
     assert {"DiscConflict", "DiscChoice", "DiscFolderMismatch"} <= set(classes)
-    assert classes["ProblemKind"][1][-5:] == ["DISC_AMBIGUOUS", "LAYOUT_AMBIGUOUS", "DISC_FOLDER_MISMATCH", "DISC_TRACK_COUNT",
-                                             "PIN_CONFLICT"]   # c2fcf25
+    assert classes["ProblemKind"][1][-6:] == ["DISC_AMBIGUOUS", "LAYOUT_AMBIGUOUS", "DISC_FOLDER_MISMATCH", "DISC_TRACK_COUNT",
+                                             "PIN_CONFLICT", "ENCODING_DROPPED"]   # c2fcf25, tag batch
     assert all(m.value == m.name.lower() for m in T.ProblemKind)
     for name, (kind, members) in classes.items():
         mine = getattr(T, name)

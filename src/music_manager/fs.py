@@ -273,6 +273,23 @@ def collect_albums(root: Path) -> list[AlbumFolder]:
 
 COPY_CHUNK = 4 * 1024 * 1024
 
+# Files OS and sync daemons drop into folders (2026-10-21). An exact allowlist: a folder holding only these
+# is "empty" for cleanup, and they go to the trash (never deleted) before the rmdir. Anything else blocks it.
+JUNK_NAMES = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
+
+
+def is_junk_file(path: Path) -> bool:
+    name = path.name
+    return (name in JUNK_NAMES or name.startswith("._")) and path.is_file() and not path.is_symlink()
+
+
+def junk_files(folder: Path) -> list[Path]:
+    """The junk files directly in folder (see JUNK_NAMES and AppleDouble "._*" files), sorted."""
+    try:
+        return sorted(p for p in folder.iterdir() if is_junk_file(p))
+    except OSError:
+        return []
+
 
 def file_sha256(path: Path) -> str | None:
     """SHA-256 of a regular file, or None if it can't be read."""

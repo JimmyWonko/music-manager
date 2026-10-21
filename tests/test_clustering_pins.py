@@ -156,7 +156,7 @@ def test_bad_pins_are_problems_not_errors(lib):  # noqa: F811
     service.match.unpin(row.id, files[0])
     assert [p.path for p in service.match.pins(row.id)] == files[1:3]
     service.match.unpin(row.id)
-    assert service.match.pins(row.id) == [] and service.ProblemKind("pin_conflict") is list(service.ProblemKind)[-1]
+    assert service.match.pins(row.id) == [] and service.ProblemKind("pin_conflict") is list(service.ProblemKind)[-2]
 
 
 def test_a_pin_overrides_a_held_disc_only_when_asked(lib):  # noqa: F811

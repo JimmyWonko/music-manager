@@ -343,7 +343,7 @@ def test_settings_and_types_are_appended(tmp_path):
         with pytest.raises(service.ValidationError):
             service.settings.set(migrate_tag_keys="yes")
         assert [f.name for f in dataclasses.fields(service.TagChange)][-3:] == ["key_before", "key_after", "migration"]
-        assert "migrate_tag_keys" in [f.name for f in dataclasses.fields(service.Settings)][-3:]
+        assert "migrate_tag_keys" in [f.name for f in dataclasses.fields(service.Settings)]
     finally:
         service.reset()
 
@@ -416,7 +416,7 @@ def test_plan_lists_unwritten_fields_and_keeps_warnings(tmp_path):
 
     from music_manager import service
 
-    assert [f.name for f in dataclasses.fields(service.AlbumPlan)][-1] == "unwritten"
+    assert "unwritten" in [f.name for f in dataclasses.fields(service.AlbumPlan)]  # more fields follow it
     assert [f.name for f in dataclasses.fields(service.UnwrittenField)] == ["field", "reason", "detail", "folder"]
     lib = Library(tmp_path)
     lib.multi["identifiers"] = [{"type": "Barcode", "value": "111"}, {"type": "Barcode", "value": "222"}]
@@ -477,7 +477,8 @@ def test_style_settings_are_appended_and_reach_the_plan(tmp_path):
     lib.multi["genres"], lib.multi["styles"] = ["Rock"], ["Southern Rock", "Classic Rock"]
     lib.start(tmp_path)
     try:
-        assert [f.name for f in dataclasses.fields(service.Settings)][-2:] == ["write_styles", "styles_in_genre"]
+        names = [f.name for f in dataclasses.fields(service.Settings)]
+        assert names[names.index("write_styles"):][:2] == ["write_styles", "styles_in_genre"]
         s = service.settings.get()
         assert (s.write_styles, s.styles_in_genre) == (False, False)
         with pytest.raises(service.ValidationError):

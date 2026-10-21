@@ -46,13 +46,16 @@ def meta_for(disc, number, title):
             "genre": "", "release_id": OVERLAP_ID, "master_id": 0, "position": f"{disc}-{number}"}
 
 
-def tagged_album(root: Path, audio_of=lambda pos: pos, lengths=None) -> Path:
-    """The flat 2CD folder an apply writes; the file tagged (d, n) holds the audio of audio_of((d, n))."""
+def tagged_album(root: Path, audio_of=lambda pos: pos, lengths=None, titles_follow_audio=True) -> Path:
+    """The flat 2CD folder an apply writes; the file tagged (d, n) holds the audio of audio_of((d, n)).
+
+    Its title tag names that audio (titles_follow_audio, as a rip's own tags do), or the tagged position: a
+    swap is only reported when the lengths and the titles both favour the other disc (2026-10-21)."""
     folder = root.joinpath(*ALBUM)
     for d, n, title, _s in OVERLAP_TRACKS:
         seconds = (lengths or {}).get(audio_of((d, n)), BY_POS[audio_of((d, n))][1])
         path = silent_flac(folder / f"{n}. {title}.flac", seconds)
-        write_tags(path, meta_for(d, n, title))
+        write_tags(path, meta_for(d, n, BY_POS[audio_of((d, n))][0] if titles_follow_audio else title))
     return folder
 
 
@@ -351,7 +354,7 @@ def test_real_silent_audio_of_different_lengths(tmp_path):
         path = folder / f"{n}. {title}.flac"
         subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
                         "anullsrc=r=8000:cl=mono", "-t", str(seconds), "-c:a", "flac", str(path)], check=True)
-        write_tags(path, meta_for(d, n, title))
+        write_tags(path, meta_for(d, n, BY_POS[SWAP.get((d, n), (d, n))][0]))  # the title of its audio
     album = next(a for a in collect_albums(tmp_path) if a.path == folder)
     check = check_album(album, Source(rel), read_journals(None))
     assert check.status == "likely swapped"

@@ -520,7 +520,7 @@ def _self_test_fixes() -> None:
             make(path)
             write_tags(path, meta)
             tags = MutagenFile(path).tags
-            assert isinstance(tags, ID3) and tags.version[:2] == (2, 4), name
+            assert isinstance(tags, ID3) and tags.version[:2] == (2, 3), name  # WAV/AIFF: ID3v2.3
             assert str(tags["TIT2"]) == "Ünïcode" and str(tags["TRCK"]) == "2/9" and str(tags["TDRC"]) == "2001"
             assert already_tagged(path) == "77"
         mp3 = root / "t.mp3"

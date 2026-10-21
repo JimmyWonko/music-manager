@@ -47,9 +47,13 @@ class Config:
     migrate_tag_keys: bool = False  # drop tag keys earlier versions wrote that Picard doesn't (YEAR)
     write_styles: bool = False  # write Discogs styles as STYLE (off: genres only, STYLE left alone)
     styles_in_genre: bool = False  # also append the styles to GENRE
+    id3v23_mp3: bool = False  # write MP3s as ID3v2.3 too (WAV/AIFF always are)
+    id3_latin1: bool = False  # ID3v2.3 text as Latin-1 instead of UTF-16 (the plan lists what is lost)
+    verify_hash: str = "sha256"  # cross-drive copy check: "sha256" or "xxhash" (optional package)
 
     BOOLS = ("sequential_sides", "save_cover_art", "clear_other_tags", "merge_subtracks", "migrate_tag_keys", "write_styles",
-             "styles_in_genre")
+             "styles_in_genre", "id3v23_mp3", "id3_latin1")
+    STRINGS: ClassVar[dict[str, tuple[str, ...]]] = {"verify_hash": ("sha256", "xxhash")}
     OPTIONAL: ClassVar[dict[str, type]] = {"embed_cover_art": bool, "replace_cover_art": bool, "cover_source": str, "cover_max_bytes": int}
 
 
@@ -71,6 +75,11 @@ def load_config(path: Path) -> Config:
         if name in data:
             if not isinstance(data[name], bool):
                 raise ConfigFileError(f"{path}: {name} must be true or false")
+            setattr(cfg, name, data[name])
+    for name, allowed in Config.STRINGS.items():
+        if name in data:
+            if data[name] not in allowed:
+                raise ConfigFileError(f"{path}: {name} must be one of {', '.join(allowed)}")
             setattr(cfg, name, data[name])
     for name, kind in Config.OPTIONAL.items():
         if name in data:
@@ -96,6 +105,8 @@ def dump_config(cfg: Config) -> str:
     ]
     for name in Config.BOOLS:
         lines.append(f"{name} = {'true' if getattr(cfg, name) else 'false'}")
+    for name in Config.STRINGS:
+        lines.append(f"{name} = {_q(getattr(cfg, name))}")
     for name in Config.OPTIONAL:
         value = getattr(cfg, name)
         if isinstance(value, bool):
