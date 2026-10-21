@@ -493,7 +493,7 @@ CONTRACT = Path(os.environ.get("MM_TEST_CONTRACT", "/workspace/mm-fix/API-CONTRA
 
 
 # Contract sections for service commits the UI doesn't build against yet (regexes on the heading).
-PENDING_SECTIONS: list[str] = [r"Subtracks \(2026-10-21\)"]  # mock not updated for subtracks yet (was c2fcf25)
+PENDING_SECTIONS: list[str] = []   # Subtracks (2026-10-21) is built against now; was ["Subtracks \\(2026-10-21\\)"]
 
 
 def _without_pending(text: str) -> str:
@@ -519,7 +519,8 @@ def _contract_code():
 
 
 def _contract_classes(code, with_partial=False):
-    """Class blocks from the contract. A later `class X: ...; field: T` block extends X (appends fields,
+    """Class blocks from the contract. A later `class X: ...; field: T` block (or `class X:  # changed` whose body
+    starts with `...`) extends X (appends fields,
     also to subclasses); `class X(Enum): ...; M = v` is a partial enum listing only additions."""
     import re
     out, lines, partial = {}, code.splitlines(), set()
@@ -534,8 +535,10 @@ def _contract_classes(code, with_partial=False):
                 break
             body.append(nxt)
         text = "\n".join(b.split("#", 1)[0] for b in body)
-        if rest.strip().startswith("..."):
-            text = text.strip()[3:]
+        code = [b.split("#", 1)[0].strip() for b in body if b.split("#", 1)[0].strip()]
+        if code and (code[0].startswith("...") or ("..." in code[1:] and name in out)):
+            # "class X: ...; f: T", or "class X:  # changed" whose body has a "..." line: extends X
+            text = "\n".join(c for c in code if c != "...").removeprefix("...")
             if base in ("Enum", "StrEnum"):
                 prev = out.get(name, ("enum", []))[1]
                 adds = [m for m in re.findall(r"\b([A-Z][A-Z_]+)\b", text) if m not in prev]   # restated: no dup
@@ -557,26 +560,11 @@ def _contract_classes(code, with_partial=False):
     return (out, partial) if with_partial else out
 
 
-# Contract "Subtracks (2026-10-21)" lists its appended fields in prose only (no python blocks yet): the same
-# fields, in the order the section gives (each appended last). Applied only where a block doesn't have them.
-SUBTRACK_FIELDS = {"RemoteTrack": ["subtracks"], "TrackPair": ["positions"], "FileChange": ["merged_subtracks"],
-                   "Pin": ["positions"], "MatchView": ["subtrack_groups"], "Settings": ["merge_subtracks"]}
-SUBTRACK_GROUP = ["disc", "position", "positions", "titles", "merged", "reason", "path", "duration_s"]
-
-
-def _add_subtrack_fields(classes):
-    for name, extra in SUBTRACK_FIELDS.items():
-        kind, members = classes[name]
-        classes[name] = (kind, members + [f for f in extra if f not in members])
-    classes.setdefault("SubtrackGroup", ("fields", SUBTRACK_GROUP))
-
-
 @pytest.mark.skipif(not CONTRACT.is_file(), reason="contract not present")
 def test_mock_types_match_contract_exactly():
     import dataclasses
     import mm_ui.fake_service as T
     classes, partial = _contract_classes(_contract_code(), with_partial=True)
-    _add_subtrack_fields(classes)
     assert {"AlbumSort", "Destination", "Template", "TemplatePreview", "Collision", "Settings"} <= set(classes)
     assert classes["AlbumRow"][1][-3:] == ["held_for", "loose_tracks", "cluster_id"]   # d6ac2f3, c334bbf
     assert classes["Album"][1][-3:] == ["cluster_id", "tracks", "extras"]
@@ -620,8 +608,10 @@ def test_mock_namespaces_cover_contract_functions(fake):
     for ns, fn, args in calls:
         f = getattr(getattr(fake, ns), fn)
         want = [a.split(":")[0].split("=")[0].strip().lstrip("*") for a in args.split(",") if a.strip()]
-        got = [p for p in inspect.signature(f).parameters]
-        if want and not args.strip().startswith("**"):
+        params = inspect.signature(f).parameters
+        got = list(params)
+        keywords_only = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+        if want and not args.strip().startswith("**") and not keywords_only:   # settings.set(x=...): an example
             assert got[:len(want)] == want, f"{ns}.{fn}: contract {want} vs mock {got}"
     # the adapter's required list is a subset of the contract
     names = {f"{ns}.{fn}" for ns, fn, _ in calls}

@@ -1219,3 +1219,34 @@ def test_real_subtracks_auto_merged_split_undo_and_setting(real, qtbot):
     assert svc.settings.get().merge_subtracks is False
     assert _st_row(w, "2-2a + 2-2b").text(6) == "not merged"
     assert w.view.subtrack_groups[0].reason == "merge_off"
+
+
+def test_real_subtracks_split_errors_and_merge_setting_events(real, qtbot):
+    real["qtbot"] = qtbot
+    svc = real["svc"]
+    aid, _folder, w = _subtrack_album(real, "Mailman Events", 743, lengths=True)
+    m, T = svc.match, svc.types
+    for blank in ("", "  "):
+        with pytest.raises(T.ValidationError) as e:
+            m.split_subtracks(aid, blank)
+        assert e.value.field == "base_position"
+        with pytest.raises(T.ValidationError):
+            m.unsplit_subtracks(aid, blank)
+    with pytest.raises(T.ValidationError) as e:
+        m.split_subtracks(aid, "2-99")
+    assert e.value.field == "base_position" and "2-2" in str(e.value)
+    with pytest.raises(T.NotFound):
+        m.split_subtracks(10**6, "2-2")
+    with pytest.raises(T.NotFound):
+        m.split_subtracks(aid, "2-2", release_id=1)
+    m.split_subtracks(aid, " 2-2 ")
+    assert m.subtrack_splits(aid) == ["2-2"] and _st_row(w, "2-2a + 2-2b").text(6) == "split"   # via the event
+    m.unsplit_subtracks(aid)
+    assert m.subtrack_splits(aid) == [] and _st_row(w, "2-2a + 2-2b").text(6) == "merged 2a + 2b"
+    seen = []
+    svc.events.match_view_changed.connect(seen.append)
+    svc.settings.set(merge_subtracks=True)
+    assert seen == []
+    svc.settings.set(merge_subtracks=False)
+    assert seen.count(aid) == 1, seen
+    assert _st_row(w, "2-2a + 2-2b").text(6) == "not merged" and not w.merge_box.isChecked()

@@ -809,21 +809,50 @@ class FakeContract:
                          [x.remote for x in pairs if x.remote is not None and x.local is None], problems, pins)
 
     # ---------------------------------------------------------------- subtracks (2026-10-21)
-    def _split_subtracks(self, album_id: int, base_position: str, release_id=None) -> None:
-        self._album(album_id)
-        base = str(base_position or "").strip()
+    @staticmethod
+    def _split_base(base_position) -> str:
+        base = str(base_position if base_position is not None else "").strip()
         if not base:
             raise ValidationError("base_position is empty", field="base_position")
-        rid = self._release_for(album_id, release_id)
+        return base
+
+    def _group_bases(self, release_id: int) -> list[str]:
+        """The release's subtrack group bases, as the release spells them ("2-9")."""
+        out: list[str] = []
+        for pos, _t, _s in self.fake._subtrack_releases.get(release_id, []):
+            d, n, suf = self._sub_key(pos)
+            if suf and f"{d}-{n}" not in out:
+                out.append(f"{d}-{n}")
+        return out
+
+    def _split_subtracks(self, album_id: int, base_position: str, release_id=None) -> None:
+        """MOCK of match.split_subtracks (3d31a39): base_position must name one of the release's subtrack groups
+        (case-insensitive, trimmed; stored as the release spells it), else ValidationError("base_position"),
+        also when empty or the release isn't fetched. NotFound: the album or a release that isn't its candidate."""
+        self._album(album_id)
+        want = self._split_base(base_position)
+        rid = self._release_for(album_id, release_id)        # NotFound: not a candidate
         if rid is None:
             raise MMError(f"album {album_id} has no candidates: run match.find first")
+        cand = next(c for c in self._candidates(album_id) if c.release_id == rid)
+        if not cand.fetched:
+            raise ValidationError(f"release {rid} is not fetched yet: its subtrack groups are unknown",
+                                  field="base_position")
+        groups = self._group_bases(rid)
+        base = next((g for g in groups if g.casefold() == want.casefold()), None)
+        if base is None:
+            raise ValidationError(f"release {rid} has no subtrack group {want!r} (groups: {', '.join(groups) or 'none'})",
+                                  field="base_position")
         self._splits.setdefault(album_id, set()).add((rid, base))
         self.fake.events.match_view_changed.emit(album_id)
 
     def _unsplit_subtracks(self, album_id: int, base_position=None, release_id=None) -> None:
+        """MOCK of match.unsplit_subtracks: one group (case-insensitive) or all (None); an empty base is a
+        ValidationError."""
         self._album(album_id)
+        want = None if base_position is None else self._split_base(base_position).casefold()
         keep = {(r, b) for r, b in self._splits.get(album_id, set())
-                if not ((base_position is None or b == str(base_position).strip())
+                if not ((want is None or b.casefold() == want)
                         and (release_id is None or r == int(release_id)))}
         self._splits[album_id] = keep
         self.fake.events.match_view_changed.emit(album_id)
@@ -831,6 +860,11 @@ class FakeContract:
     def _subtrack_splits(self, album_id: int, release_id=None) -> list[str]:
         self._album(album_id)
         return sorted({b for r, b in self._splits.get(album_id, set()) if release_id is None or r == int(release_id)})
+
+    def _albums_with_subtracks(self) -> list[int]:
+        """Albums whose view merge_subtracks can change: a fetched candidate release with subtrack groups."""
+        return sorted(aid for aid, cands in self.fake._cands.items()
+                      if any(c.fetched and self._group_bases(c.release_id) for c in cands))
 
     @staticmethod
     def _sub_key(position: str) -> tuple[int, int, str]:
@@ -1268,7 +1302,11 @@ class FakeContract:
             raise ValidationError("merge_subtracks must be true or false", field="merge_subtracks")
         if "active_template" in changes and not any(t.id == changes["active_template"] for t in self._tpl_list()):
             raise ValidationError(f"No template {changes['active_template']!r}", field="active_template")
+        before = self._settings.merge_subtracks
         self._settings = replace(self._settings, **changes)
+        if "merge_subtracks" in changes and self._settings.merge_subtracks != before:   # 3d31a39
+            for album_id in self._albums_with_subtracks():
+                self.fake.events.match_view_changed.emit(album_id)
         return self._settings
 
     # ================================================================ plans

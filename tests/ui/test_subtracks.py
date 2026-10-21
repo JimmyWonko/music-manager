@@ -173,3 +173,55 @@ def test_mock_contract_shapes(fake, prine):
     (g,) = m.view(prine).subtrack_groups
     assert (g.disc, g.position, g.positions, g.merged, g.reason, g.path, g.duration_s) == (
         2, "2-9", ["2-9a", "2-9b"], False, "durations_unknown", None, None)
+
+
+# ---------------------------------------------------------------- 3d31a39: split validation and events
+def test_split_rejects_blank_and_unknown_bases_and_unknown_album_or_release(fake, prine_lengths):
+    m, T = fake.match, fake.types
+    for blank in ("", "   "):
+        with pytest.raises(T.ValidationError) as e:
+            m.split_subtracks(prine_lengths, blank)
+        assert e.value.field == "base_position"
+        with pytest.raises(T.ValidationError):
+            m.unsplit_subtracks(prine_lengths, blank)
+    with pytest.raises(T.ValidationError) as e:
+        m.split_subtracks(prine_lengths, "2-99")
+    assert e.value.field == "base_position" and "2-9" in str(e.value)       # lists the valid groups
+    with pytest.raises(T.NotFound):
+        m.split_subtracks(10**6, "2-9")
+    with pytest.raises(T.NotFound):
+        m.split_subtracks(prine_lengths, "2-9", release_id=1)
+    assert m.subtrack_splits(prine_lengths) == []
+
+
+def test_split_base_is_trimmed_stored_as_the_release_spells_it_and_unsplit_none_clears_all(fake, prine_lengths):
+    m = fake.match
+    m.split_subtracks(prine_lengths, "  2-9 ")
+    m.split_subtracks(prine_lengths, "2-9")                                  # idempotent
+    assert m.subtrack_splits(prine_lengths) == ["2-9"]
+    m.unsplit_subtracks(prine_lengths, None)
+    assert m.subtrack_splits(prine_lengths) == []
+
+
+def test_merge_setting_emits_match_view_changed_once_per_affected_album(fake, qtbot, prine, prine_lengths):
+    seen = []
+    fake.events.match_view_changed.connect(seen.append)
+    fake.settings.set(merge_subtracks=True)                                  # unchanged: nothing
+    assert seen == []
+    fake.settings.set(merge_subtracks=False)
+    assert sorted(seen) == sorted([prine, prine_lengths])
+    seen.clear()
+    fake.settings.set(save_cover_art=False)
+    assert seen == []
+
+
+def test_window_follows_match_view_changed_from_other_callers(fake, qtbot, prine_lengths):
+    """The window re-reads the view on the service's event, e.g. a split made elsewhere."""
+    w = _window(fake, qtbot, prine_lengths)
+    fake.match.split_subtracks(prine_lengths, "2-9")
+    assert _row(w, GROUP_ROW).text(6) == "split"
+    fake.settings.set(merge_subtracks=False)
+    fake.match.unsplit_subtracks(prine_lengths)
+    assert _row(w, GROUP_ROW).text(6) == "not merged"
+    fake.settings.set(merge_subtracks=True)
+    assert _row(w, GROUP_ROW).text(6) == "merged 9a + 9b"

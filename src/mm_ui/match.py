@@ -285,6 +285,9 @@ class MatchWindow(QMainWindow):
         self.adopt_btn.setEnabled(r is not None and r.kind == "tag_cluster" and r.album_id is None)
         self.unadopt_btn.setEnabled(r is not None and r.kind == "tag_cluster" and r.album_id is not None)
         self.tracks.clear(); self.problems.clear(); self.subtracks_note.clear()
+        on = getattr(self.svc.settings.get(), "merge_subtracks", None)
+        if on is not None and on != self.merge_box.isChecked():   # changed elsewhere (match_view_changed)
+            self.merge_box.blockSignals(True); self.merge_box.setChecked(on); self.merge_box.blockSignals(False)
         if r is None:
             self.view = None
             self.header.setText("<i>Select an album, a cluster or a file.</i>")
@@ -534,8 +537,12 @@ class MatchWindow(QMainWindow):
         g = self.group_of(base) if base else self.selected_group()
         if g is None or self.view is None or not g.merged or g.reason == "pinned":
             return False
-        self.svc.match.split_subtracks(self.view.album_id, g.position, self.view.release_id)
-        self.show_view()
+        try:
+            self.svc.match.split_subtracks(self.view.album_id, g.position, self.view.release_id)
+        except self.svc.types.MMError as e:      # ValidationError / NotFound: the release changed meanwhile
+            self.inform("Can't change this group", str(e))
+            return False
+        self._reread()
         return True
 
     def unsplit_selected(self, base: str | None = None) -> bool:
@@ -543,8 +550,12 @@ class MatchWindow(QMainWindow):
         g = self.group_of(base) if base else self.selected_group()
         if g is None or self.view is None or (g.reason != "split" and g.position not in self.split_bases):
             return False
-        self.svc.match.unsplit_subtracks(self.view.album_id, g.position, self.view.release_id)
-        self.show_view()
+        try:
+            self.svc.match.unsplit_subtracks(self.view.album_id, g.position, self.view.release_id)
+        except self.svc.types.MMError as e:      # ValidationError / NotFound: the release changed meanwhile
+            self.inform("Can't change this group", str(e))
+            return False
+        self._reread()
         return True
 
     def splits(self) -> list[str]:
@@ -561,7 +572,12 @@ class MatchWindow(QMainWindow):
         except self.svc.types.MMError as e:      # ValidationError: an older backend without the setting
             self.inform("Can't change this setting", str(e))
             return
-        if self.view is not None:
+        self._reread()
+
+    def _reread(self):
+        """After split / unsplit / merge_subtracks the service emits match_view_changed(album_id) synchronously
+        (3d31a39) and _on_album re-reads the view; only a backend without that signal needs it done here."""
+        if getattr(self.svc.events, "match_view_changed", None) is None and self.view is not None:
             self.show_view()
 
     def _pin_one(self, aid, path: Path, position: str) -> bool:
