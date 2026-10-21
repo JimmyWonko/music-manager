@@ -1264,6 +1264,7 @@ def test_real_subtracks_split_errors_and_merge_setting_events(real, qtbot):
 # ---------------------------------------------------------------- Picard tag names (contract 2026-10-21)
 def test_real_picard_renames_unwritten_and_tag_settings(real, qtbot):
     import mutagen
+
     from mm_ui import problems as P
     from mm_ui.review import ApplyDialog
     from mm_ui.tagsettings import TagSettingsDialog
@@ -1382,6 +1383,7 @@ def test_real_latin1_transliterated_amber_with_proposed_tooltip(real, qtbot):
     pytest.importorskip("unidecode", reason="transliteration needs the optional unidecode package")
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QColor
+
     from mm_ui.review import TRANSLIT, ApplyDialog
     svc = real["svc"]
     if not hasattr(svc.settings, "verify_hashes_available"):

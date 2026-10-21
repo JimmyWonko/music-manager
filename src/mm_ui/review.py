@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QAbstractListModel, QModelIndex, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut, QColor, QBrush
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
+    QComboBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QListView, QListWidget, QListWidgetItem, QProgressBar, QProgressDialog, QMainWindow, QMessageBox, QPushButton, QSplitter, QTableWidget,
     QScrollArea, QSizePolicy, QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )

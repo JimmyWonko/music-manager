@@ -8,8 +8,16 @@ from test_ui_flows import built
 
 from mm_ui import problems as P
 from mm_ui import tagsettings as TS
-from mm_ui.review import (DROPPED_TEXT, JUNK_TEXT, LOSS, MOVING_TEXT, TRANSLIT, ApplyDialog, ReviewWindow,
-                          loss_html)
+from mm_ui.review import (
+    DROPPED_TEXT,
+    JUNK_TEXT,
+    LOSS,
+    MOVING_TEXT,
+    TRANSLIT,
+    ApplyDialog,
+    ReviewWindow,
+    loss_html,
+)
 from mm_ui.tagsettings import TagSettingsDialog
 
 
@@ -145,3 +153,20 @@ def test_window_rebuilds_with_allow_encoding_drop(fake, qtbot, album, monkeypatc
     assert calls[0].get("allow_encoding_drop") is None                     # first build: nothing allowed
     assert calls[-1]["allow_encoding_drop"] == frozenset({album})
     assert plans[0].albums[0].problems and not plans[-1].albums[0].problems
+
+
+def test_held_album_keeps_losses_totals_and_real_warning_wording(fake, qtbot, album):
+    fake.settings.set(id3_latin1=True)
+    plan = built(fake, [album])
+    (ap,) = plan.albums
+    assert P.held(ap) and len(ap.encoding_losses) == 3                 # held: losses still listed
+    assert (ap.encoding_transliterated, ap.encoding_dropped, ap.id3v23_files) == (1, 2, 2)
+    (w,) = [w for w in plan.warnings if "Latin-1" in w]
+    assert w == (f"{ap.folder_before.name}: Latin-1 (Settings.id3_latin1): 1 tag value(s) transliterated, 2 dropped "
+                 "and not written (existing value kept) (album held: allow_encoding_drop to apply): "
+                 "see AlbumPlan.encoding_losses")
+    assert "(artist, album)" in ap.problems[0].message or "(album, artist)" in ap.problems[0].message
+    d = ApplyDialog(plan); qtbot.addWidget(d)
+    assert len(d.losses) == 3 and "2 dropped" in d.loss_label.text()
+    (w2,) = [w for w in built(fake, [album], allow_encoding_drop={album}).warnings if "Latin-1" in w]
+    assert "album held" not in w2 and "2 dropped and not written" in w2

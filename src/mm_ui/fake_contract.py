@@ -1340,6 +1340,7 @@ class FakeContract:
                allow_track_mismatch: set[int] = frozenset(), allow_encoding_drop: set[int] = frozenset()) -> Plan:
         text = self._template_text(template)
         layouts, aps, moves, tags = {}, [], 0, 0
+        loss_warnings: list[str] = []
         not_fetched = []
         for aid in album_ids:
             album = self._album(aid)
@@ -1404,20 +1405,29 @@ class FakeContract:
             unwritten = [] if problems else [replace(u, folder=album.folder) for u in self.mock_unwritten.get(aid, [])]
             v23_ext = (".wav", ".aif", ".aiff") + ((".mp3",) if self._settings.id3v23_mp3 else ())
             n_v23 = self.mock_v23.get(aid, sum(1 for t in album.tracks if t.path.suffix.lower() in v23_ext))
-            losses = [] if problems or not self._settings.id3_latin1 or not n_v23 else [
+            losses = [] if not self._settings.id3_latin1 or not n_v23 else [   # kept on held albums too
                 T.EncodingLoss(album.folder / name, f, v, lost, sev, prop)
                 for name, f, v, lost, sev, prop in self.mock_losses.get(aid, [])]
             n_tr = sum(1 for x in losses if x.severity == "transliterated")
             n_dr = sum(1 for x in losses if x.severity == "dropped")
             if n_dr and aid not in allow_encoding_drop:      # held like TRACK_MISMATCH; paths = the tracks
-                problems = problems + [Problem(ProblemKind.ENCODING_DROPPED,
-                                               f"{n_dr} tag value(s) can't be written as Latin-1 and would be left "
-                                               "as they are", sorted({x.path for x in losses if x.severity == "dropped"}))]
+                dropped = [x for x in losses if x.severity == "dropped"]
+                problems = problems + [Problem(   # same wording as the real service (plan.py @ 59e9592)
+                    ProblemKind.ENCODING_DROPPED,
+                    f"{n_dr} tag value(s) have characters Latin-1 can't hold and no sensible substitute "
+                    f"({', '.join(sorted({x.field for x in dropped}))}): those fields would not be written. "
+                    "Turn off id3_latin1, or apply with allow_encoding_drop to keep the files' current values",
+                    sorted({x.path for x in dropped}))]
+            if losses:     # one summary line per album, as plan.py @ 59e9592
+                held = " (album held: allow_encoding_drop to apply)" if n_dr and aid not in allow_encoding_drop else ""
+                loss_warnings.append(f"{album.folder.name}: Latin-1 (Settings.id3_latin1): {n_tr} tag value(s) "
+                                     f"transliterated, {n_dr} dropped and not written (existing value kept){held}: "
+                                     "see AlbumPlan.encoding_losses")
             junk = [] if problems else [album.folder / n for n in self.mock_junk.get(aid, [])]
             moving = [album.folder / n for n in self.mock_junk_moving.get(aid, [])]
             aps.append(AlbumPlan(aid, cand.release_id, album.folder, folder, fcs, problems, *self._plan_names(album, cand),
                                  unwritten=unwritten, junk=junk, encoding_losses=losses, junk_moving=moving,
-                                 id3v23_files=0 if problems and not n_dr else n_v23,
+                                 id3v23_files=n_v23,
                                  encoding_transliterated=n_tr, encoding_dropped=n_dr))
         wanted = [(ap.album_id, ap.release_id) for ap, err in not_fetched if err is None]
         fetch_job = self._fetch_job(wanted) if wanted else None
@@ -1430,10 +1440,7 @@ class FakeContract:
         order = {aid: i for i, aid in enumerate(album_ids)}
         aps = sorted(aps + not_fetched, key=lambda ap: order[ap.album_id])
         warnings = [f"{u.folder or ap.folder_before}: {u.field}: {u.detail}" for ap in aps for u in ap.unwritten]
-        n_loss = sum(len(ap.encoding_losses) for ap in aps)
-        if n_loss:     # real plan.py adds one summary line
-            warnings.append(f"{n_loss} tag value(s) lose characters as Latin-1 (Settings.id3_latin1): "
-                            "see AlbumPlan.encoding_losses")
+        warnings += loss_warnings
         if not_fetched:
             warnings.append(f"{len(not_fetched)} release(s) are being fetched from Discogs (job {fetch_job}): build "
                             "the plan again when it finishes" if fetch_job is not None

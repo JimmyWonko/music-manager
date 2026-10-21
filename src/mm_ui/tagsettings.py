@@ -17,9 +17,9 @@ from __future__ import annotations
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QFormLayout,
     QDialog,
     QDialogButtonBox,
+    QFormLayout,
     QLabel,
     QMessageBox,
     QVBoxLayout,
@@ -42,10 +42,7 @@ V23_NOTE = "WAV and AIFF files are always written as ID3v2.3."
 def hashes_available(svc) -> list[str]:
     """settings.verify_hashes_available() (contract follow-up); an older service: SHA-256 only (cautious)."""
     f = getattr(svc.settings, "verify_hashes_available", None)
-    try:
-        return list(f()) if f else ["sha256"]
-    except Exception:
-        return ["sha256"]
+    return list(f()) if f else ["sha256"]
 
 
 def v23_note(n: int) -> str:
