@@ -1321,42 +1321,58 @@ def test_real_picard_renames_unwritten_and_tag_settings(real, qtbot):
 
 
 def test_real_tag_batch_latin1_losses_junk_and_settings(real, qtbot):
-    from mm_ui.review import ApplyDialog
-    from mm_ui.tagsettings import TagSettingsDialog
+    from mm_ui import problems as P
+    from mm_ui.review import DROPPED_TEXT, MOVING_TEXT, ApplyDialog
+    from mm_ui.tagsettings import TagSettingsDialog, hashes_available
     svc = real["svc"]
     if not hasattr(svc.settings.get(), "id3_latin1"):
         pytest.skip("service predates the tag batch (580c9f1)")
+    if not hasattr(svc.settings, "verify_hashes_available"):
+        pytest.skip("service predates the tag batch follow-ups (bfe3fc0)")
     title, rid = "Latin Batch", 752
     folder = real["lib"] / "Batch Band" / title
     for i, t in enumerate(["One", "Two"], 1):
         tone(folder / f"{i:02d} {t}.wav")
     (folder / ".DS_Store").write_bytes(b"\0junk")
-    real["discogs"].releases[rid] = release(rid, "Batch Band", title, 1999, f"BAT {rid}", ["Café ★", "Two"])
+    real["discogs"].releases[rid] = release(rid, "Batch Band", title, 1999, f"BAT {rid}", ["Łódź", "東京"])
     assert svc._c.jobs.wait(svc.library.scan().id).state.name == "DONE"
     (row,) = [x for x in svc.albums(None, limit=50).items if x.title == title]
     assert svc._c.jobs.wait(svc.match.find([row.id]).id).state.name == "DONE"
     svc.match.choose(row.id, rid)
 
-    def build():
-        plan = svc.plan.build([row.id])
+    def build(**kw):
+        plan = svc.plan.build([row.id], **kw)
         if plan.fetch_job is not None:
             svc._c.jobs.wait(plan.fetch_job)
-            plan = svc.plan.build([row.id])
+            plan = svc.plan.build([row.id], **kw)
         return plan
 
-    d = TagSettingsDialog(svc); qtbot.addWidget(d)
-    assert not d.boxes["id3_latin1"].isEnabled() and d.hash_combo.currentData() == "sha256"
     plan = build()
     (ap,) = plan.albums
-    assert not ap.encoding_losses                                   # UTF-16 by default
+    assert ap.id3v23_files == 2 and not ap.encoding_losses           # WAV: v2.3; UTF-16 by default
+    assert [p.name for p in ap.junk_moving] == [".DS_Store"]
     dlg = ApplyDialog(plan); qtbot.addWidget(dlg)
-    assert dlg.junk_label.isHidden() == (not ap.junk)            # junk in the album folder moves with it
-    d.boxes["id3v23_mp3"].setChecked(True); d.boxes["id3_latin1"].setChecked(True); d.save()
+    assert MOVING_TEXT in dlg.moving_label.text() and dlg.junk_label.isHidden() == (not ap.junk)
+    n = sum(a.id3v23_files for a in plan.albums)
+    d = TagSettingsDialog(svc, v23_files=n); qtbot.addWidget(d)
+    assert d.boxes["id3_latin1"].isEnabled() and not d.boxes["id3v23_mp3"].isChecked()   # WAV makes it apply
+    assert d.xxhash_ok == ("xxhash" in hashes_available(svc)) and d.hash_combo.currentData() == "sha256"
+    d.boxes["id3_latin1"].setChecked(True); d.save()
     assert svc.settings.get().id3_latin1 is True
     plan = build()
     (ap,) = plan.albums
-    assert [(x.field, x.lost) for x in ap.encoding_losses] == [("title", "★")], ap.encoding_losses
+    sev = {x.value: x.severity for x in ap.encoding_losses}
+    assert sev["東京"] == "dropped" and "Łódź" in sev, ap.encoding_losses
+    assert ap.encoding_dropped >= 1 and ap.encoding_transliterated + ap.encoding_dropped == len(ap.encoding_losses)
+    assert P.ENCODING_DROPPED in [P.kind_of(p) for p in ap.problems]
     dlg = ApplyDialog(plan); qtbot.addWidget(dlg)
-    assert not dlg.loss_label.isHidden() and "Caf" in dlg.loss_label.text()
+    assert not dlg.drop_banner.isHidden() and dlg.drop_btn is not None and not dlg.ok_btn.isEnabled()
+    dlg.problem_list.setCurrentRow(0); dlg.confirm_drop = lambda ap: True; dlg.allow_drop()
+    assert dlg.drop_album == row.id
+    plan = build(allow_encoding_drop={row.id})
+    (ap,) = plan.albums
+    assert not ap.problems, ap.problems
+    dlg = ApplyDialog(plan); qtbot.addWidget(dlg)
+    assert dlg.ok_btn.isEnabled() and DROPPED_TEXT in dlg.loss_label.text()
     assert (folder / ".DS_Store").exists() and (folder / "01 One.wav").exists()   # nothing written before Apply
-    d.svc.settings.set(id3v23_mp3=False, id3_latin1=False)
+    svc.settings.set(id3_latin1=False)

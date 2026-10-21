@@ -624,6 +624,7 @@ class ReviewWindow(QMainWindow):
         if not ids:
             return
         self._apply_ids, self._allow, self._fetch_rounds = ids, set(), 0
+        self._allow_drop = set()
         self._build_plan()
 
     def _wait_for_fetch(self, job_id, n):
@@ -654,9 +655,11 @@ class ReviewWindow(QMainWindow):
     def _build_plan(self, keep_progress=False):
         from .worker import run_async
         ids, allow, tpl = list(self._apply_ids), frozenset(self._allow), self.svc.active_template()
+        drop = frozenset(getattr(self, "_allow_drop", ()))
+        kw = {"allow_encoding_drop": drop} if drop else {}      # older services lack the keyword
         self.apply_btn.setEnabled(False)
         if keep_progress and getattr(self, "build_progress", None) is not None:
-            run_async(lambda: self.svc.plan.build(ids, tpl, allow_track_mismatch=allow),
+            run_async(lambda: self.svc.plan.build(ids, tpl, allow_track_mismatch=allow, **kw),
                       self._on_plan_built, self._on_plan_failed)
             return
         self._close_progress()
@@ -664,7 +667,7 @@ class ReviewWindow(QMainWindow):
         pd.setCancelButton(None); pd.setWindowTitle("Preparing batch"); pd.setWindowModality(Qt.WindowModal)
         pd.setMinimumDuration(300)
         self.queue_label.setText("<b>Building plan…</b>")
-        run_async(lambda: self.svc.plan.build(ids, tpl, allow_track_mismatch=allow),   # read-only; Template.id
+        run_async(lambda: self.svc.plan.build(ids, tpl, allow_track_mismatch=allow, **kw),   # read-only; Template.id
                   self._on_plan_built, self._on_plan_failed)
 
     def _close_progress(self):
@@ -693,6 +696,10 @@ class ReviewWindow(QMainWindow):
             return
         if r == ApplyDialog.OVERRIDE and dlg.override_album is not None:
             self._allow.add(dlg.override_album)       # one album at a time, after its own confirm
+            self._build_plan()
+            return
+        if r == ApplyDialog.ALLOW_DROP and dlg.drop_album is not None:
+            self._allow_drop.add(dlg.drop_album)      # ENCODING_DROPPED: one album, after its own confirm
             self._build_plan()
             return
         if r == QDialog.Accepted and dlg.clean_aps:
@@ -811,7 +818,9 @@ class ReviewWindow(QMainWindow):
 
     def show_tag_settings(self):
         from .tagsettings import TagSettingsDialog
-        r = TagSettingsDialog(self.svc, self).exec()
+        last = getattr(getattr(self, "last_apply_dialog", None), "plan", None)
+        n = sum(getattr(ap, "id3v23_files", 0) for ap in getattr(last, "albums", []))
+        r = TagSettingsDialog(self.svc, self, v23_files=n).exec()
         if self.album_id is not None:
             self.render()
         return r
@@ -827,17 +836,31 @@ RENAME = "#1f5fa8"      # a tag key renamed to its Picard name
 UNWRITTEN = "#8a6d00"   # a tag held back (AlbumPlan.unwritten)
 LOSS = "#a33"           # a character Latin-1 can't hold (AlbumPlan.encoding_losses)
 JUNK = "#8a6d00"        # a junk file cleanup moves to the trash (AlbumPlan.junk)
+TRANSLIT = "#b26b00"    # Latin-1: transliterated (amber)
 JUNK_TEXT = "Will be moved to trash"
+MOVING_TEXT = "Moves with album"
+DROPPED_TEXT = "not written, keeps current value"
 
 
-def latin1_written(value: str, lost: str) -> str:
-    """The value as the file gets it: each lost character becomes "?"."""
-    return "".join("?" if ch in lost else ch for ch in value)
+def loss_color(x) -> str:
+    return TRANSLIT if getattr(x, "severity", "dropped") == "transliterated" else LOSS
 
 
-def loss_html(value: str, lost: str) -> str:
-    """The value with each lost character highlighted (red, bold)."""
-    return "".join(f"<b style='color:{LOSS};background:#fdd'>{html.escape(ch)}</b>" if ch in lost
+def loss_after(x) -> str:
+    """What the file gets: the transliteration, or nothing (dropped: the field keeps its current value)."""
+    if getattr(x, "severity", "dropped") == "transliterated" and x.proposed_value is not None:
+        return x.proposed_value
+    return DROPPED_TEXT
+
+
+def loss_tip(x) -> str:
+    return f"{x.path}\n{x.field}: {x.value} -> {loss_after(x)}"
+
+
+def loss_html(value: str, lost: str, color: str = LOSS) -> str:
+    """The value with each lost character highlighted (bold, red or amber)."""
+    bg = "#fdd" if color == LOSS else "#fec"
+    return "".join(f"<b style='color:{color};background:{bg}'>{html.escape(ch)}</b>" if ch in lost
                    else html.escape(ch) for ch in value)
 
 
@@ -893,6 +916,7 @@ class ApplyDialog(QDialog):
     Undo: file_changed etc. are listed as skipped files; only legacy_journal blocks, and "Confirm older-format
     undo…" closes with TRUST_LEGACY so the caller can confirm and re-plan with trust_legacy=True.
     The dialog sizes itself to the plan: a short plan gives a short dialog, not a tall empty tree."""
+    ALLOW_DROP = 5       # encoding_dropped: the caller re-builds with allow_encoding_drop={drop_album}
     TRUST_LEGACY = 2
     OVERRIDE = 3
     OPEN_NAMING = 4      # disc_folder_mismatch: the caller opens the naming settings, then builds again
@@ -900,7 +924,7 @@ class ApplyDialog(QDialog):
     def __init__(self, plan, parent=None, undo=False, mock=False, trusted=False, album_name=None, album_row=None):
         super().__init__(parent)
         self.setWindowTitle("Review undo" if undo else "Review batch before applying")
-        self.plan, self.undo, self.override_album = plan, undo, None
+        self.plan, self.undo, self.override_album, self.drop_album = plan, undo, None, None
         self._name = album_name                    # library lookup by album_id (fallback only)
         self._row = album_row                      # library row by album_id (layout_ambiguous names)
         name = self.ap_name                        # AlbumPlan.artist/title first (e1eca5e), see P.album_label
@@ -950,18 +974,42 @@ class ApplyDialog(QDialog):
         else:
             self.cluster_label.hide()
         # tag batch (2026-10-21): Latin-1 losses and junk to trash, shown before anything is written
-        self.losses = [] if undo else [(ap, x) for ap in self.clean_aps for x in getattr(ap, "encoding_losses", None) or []]
+        live = [] if undo else [ap for ap in plan.albums if not P.waiting(ap)]
+        self.losses = [(ap, x) for ap in live for x in getattr(ap, "encoding_losses", None) or []]
         self.junk = [] if undo else [(ap, j) for ap in self.clean_aps for j in getattr(ap, "junk", None) or []]
+        self.junk_moving = [] if undo else [(ap, j) for ap in self.clean_aps for j in getattr(ap, "junk_moving", None) or []]
+        self.n_dropped = sum(1 for _ap, x in self.losses if getattr(x, "severity", "dropped") == "dropped")
+        self.drop_banner = QLabel(wordWrap=True)
+        if self.n_dropped:
+            held = sum(1 for ap in self.held_aps if any(P.kind_of(p) == P.ENCODING_DROPPED for p in ap.problems))
+            self.drop_banner.setText(
+                f"<b>⚠ {self.n_dropped} tag value(s) can't be written as Latin-1.</b> Those fields are not "
+                "written and the files keep their current values. "
+                + (f"{held} album(s) are held: select one under “held back” and use “Allow drop for this album…” "
+                   "to apply it anyway." if held else "You allowed this for the album(s) below."))
+            self.drop_banner.setStyleSheet(f"background:{LOSS};color:white;padding:6px;border-radius:3px")
+            lay.addWidget(self.drop_banner)
+        else:
+            self.drop_banner.hide()
         self.loss_label = QLabel(wordWrap=True)
         self.loss_label.setTextFormat(Qt.RichText)
         if self.losses:
-            lines = [f"{html.escape(_rel_to(x.path, ap.folder_before))} · {html.escape(x.field)}: "
-                     f"{loss_html(x.value, x.lost)} → <code>{html.escape(latin1_written(x.value, x.lost))}</code>"
-                     for ap, x in self.losses]
+            lines, seen = [], set()
+            for ap, x in self.losses:
+                if ap.album_id not in seen:
+                    seen.add(ap.album_id)
+                    lines.append(f"<b>{html.escape(self.ap_name(ap))}</b>: "
+                                 f"<span style='color:{TRANSLIT}'>{getattr(ap, 'encoding_transliterated', 0)} "
+                                 f"transliterated</span> · <span style='color:{LOSS}'>"
+                                 f"{getattr(ap, 'encoding_dropped', 0)} dropped</span>")
+                c = loss_color(x)
+                lines.append(f"&nbsp;&nbsp;{html.escape(_rel_to(x.path, ap.folder_before))} · {html.escape(x.field)}: "
+                             f"{loss_html(x.value, x.lost, c)} → <span style='color:{c}'>"
+                             f"{html.escape(loss_after(x))}</span>")
             self.loss_label.setText(
-                f"<span style='background:{LOSS};color:white;padding:1px 4px'>&nbsp;⚠ Latin-1&nbsp;</span> "
-                f"<b style='color:{LOSS}'>{len(self.losses)} tag value(s) lose characters</b> (written as “?”; "
-                "turn off “Use Latin-1” in Tags settings to keep them):<br>" + "<br>".join(lines))
+                f"<span style='background:{TRANSLIT};color:white'>&nbsp;⚠ Latin-1&nbsp;</span> "
+                f"<b>{len(self.losses)} tag value(s) don't fit Latin-1</b> (amber: transliterated, red: not "
+                "written; turn off “Use Latin-1” in Tags settings to keep them as they are):<br>" + "<br>".join(lines))
             lay.addWidget(self.loss_label)
         else:
             self.loss_label.hide()
@@ -975,6 +1023,15 @@ class ApplyDialog(QDialog):
             lay.addWidget(self.junk_label)
         else:
             self.junk_label.hide()
+        self.moving_label = QLabel(wordWrap=True)
+        if self.junk_moving:
+            self.moving_label.setText(
+                f"<span style='color:#555'>ℹ {len(self.junk_moving)} junk file(s): {MOVING_TEXT} "
+                "(nothing to do):<br>" + "<br>".join(html.escape(_rel_to(j, ap.folder_before))
+                                                    for ap, j in self.junk_moving) + "</span>")
+            lay.addWidget(self.moving_label)
+        else:
+            self.moving_label.hide()
         self.problems = P.all_problems(plan)
         self.legacy = [p for p in self.problems if P.kind_of(p) == P.LEGACY]
         self.blocking = self.legacy if undo else [p for ap in self.held_aps for p in ap.problems]
@@ -1072,7 +1129,7 @@ class ApplyDialog(QDialog):
                                 "; ".join(p.message for p in ap.problems if P.kind_of(p) == P.NOT_FETCHED))
         lay.addWidget(tree, 1)
         bb = QDialogButtonBox(); bb.addButton("Cancel", QDialogButtonBox.RejectRole)
-        self.trust_btn = self.anyway_btn = self.naming_btn = None
+        self.trust_btn = self.anyway_btn = self.naming_btn = self.drop_btn = None
         if not undo and any(P.has_folder_mismatch(ap.problems) for ap in self.held_aps):
             self.naming_btn = bb.addButton("Change naming template…", QDialogButtonBox.ActionRole)
             self.naming_btn.setToolTip("The naming template puts some tracks into another disc's CD folder. "
@@ -1087,6 +1144,11 @@ class ApplyDialog(QDialog):
             self.anyway_btn.clicked.connect(self.apply_anyway)
             self.problem_list.currentItemChanged.connect(lambda *_: self._sync_anyway())
             self._sync_anyway()
+        if not undo and any(P.drop_allowable(ap) for ap in self.held_aps):
+            self.drop_btn = bb.addButton("Allow drop for this album…", QDialogButtonBox.ActionRole)
+            self.drop_btn.clicked.connect(self.allow_drop)
+            self.problem_list.currentItemChanged.connect(lambda *_: self._sync_drop())
+            self._sync_drop()
         ok = bb.addButton("Undo these changes" if undo else
                           ("Apply batch" if not self.held_aps and not self.waiting_aps
                            else f"Apply {len(self.clean_aps)} album(s)"),
@@ -1166,11 +1228,11 @@ class ApplyDialog(QDialog):
                 ui.setForeground(c, QBrush(QColor(UNWRITTEN))); ui.setFont(c, font)
             top.addChild(ui)
         for x in getattr(ap, "encoding_losses", None) or []:
-            li = QTreeWidgetItem([f"⚠ Latin-1 loses “{x.lost}”: {x.field}", x.value, latin1_written(x.value, x.lost)])
-            li.setData(0, Qt.UserRole, "encoding_loss")
-            li.setToolTip(0, f"{x.path}\nLatin-1 can't hold {x.lost!r}: written as “?”")
+            sev = getattr(x, "severity", "dropped")
+            li = QTreeWidgetItem([f"⚠ Latin-1 {sev}: {x.field}", x.value, loss_after(x)])
+            li.setData(0, Qt.UserRole, "encoding_loss"); li.setData(0, Qt.UserRole + 1, sev)
             for c in range(3):
-                li.setForeground(c, QBrush(QColor(LOSS)))
+                li.setForeground(c, QBrush(QColor(loss_color(x)))); li.setToolTip(c, loss_tip(x))
             top.addChild(li)
         for j in getattr(ap, "junk", None) or []:
             ji = QTreeWidgetItem([f"⚠ {JUNK_TEXT}", j.name, "Trash"])
@@ -1180,6 +1242,12 @@ class ApplyDialog(QDialog):
             for c in range(3):
                 ji.setForeground(c, QBrush(QColor(JUNK)))
             top.addChild(ji)
+        for j in getattr(ap, "junk_moving", None) or []:
+            mi = QTreeWidgetItem([f"ℹ {MOVING_TEXT}", j.name, _rel_to(j, ap.folder_before)])
+            mi.setData(0, Qt.UserRole, "junk_moving"); mi.setToolTip(1, str(j))
+            for c in range(3):
+                mi.setForeground(c, QBrush(QColor(GREY)))
+            top.addChild(mi)
         for p in ap.problems:
             if self.undo and P.kind_of(p) != P.LEGACY:
                 continue                       # shown as skipped steps instead
@@ -1240,6 +1308,28 @@ class ApplyDialog(QDialog):
         why = P.blocking_reasons(ap) if ap else []
         self.anyway_btn.setToolTip(f"Can't apply anyway: {', '.join(why)}" if why else
                                    "Select one album held back only for a track-count mismatch")
+
+    def _sync_drop(self):
+        ap = self._ap(self.selected_album())
+        ok = bool(ap and P.drop_allowable(ap))
+        self.drop_btn.setEnabled(ok)
+        self.drop_btn.setToolTip("Apply this album without the tags Latin-1 can't hold (they keep their current "
+                                 "values)" if ok else "Select one album held back for tags Latin-1 can't hold")
+
+    def confirm_drop(self, ap) -> bool:
+        """Per-album confirm listing what is not written (patched in tests)."""
+        lost = [f"{x.path.name} · {x.field}: {x.value}" for x in getattr(ap, "encoding_losses", [])
+                if getattr(x, "severity", "dropped") == "dropped"]
+        return QMessageBox.question(
+            self, "Allow drop?", f"{self.ap_name(ap)}: these tags can't be written as Latin-1 and will not be "
+            "written (the files keep their current values):\n\n" + "\n".join(lost) + "\n\nApply this album anyway?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+
+    def allow_drop(self):
+        ap = self._ap(self.selected_album())
+        if ap and P.drop_allowable(ap) and self.confirm_drop(ap):
+            self.drop_album = ap.album_id
+            self.done(self.ALLOW_DROP)
 
     def confirm_mismatch(self, ap) -> bool:
         """Per-album confirm naming the mismatch (patched in tests)."""

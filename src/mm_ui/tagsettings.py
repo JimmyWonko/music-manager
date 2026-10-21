@@ -6,13 +6,13 @@
 - styles_in_genre: append the styles to GENRE. The contract keeps it independent of write_styles.
 Tag batch (2026-10-21):
 - id3v23_mp3: MP3s as ID3v2.3 too. WAV/AIFF are always v2.3.
-- id3_latin1: v2.3 text as Latin-1 instead of UTF-16; enabled only when v2.3 applies here (MP3 v2.3 is on, or
-  it is already on so it can be turned off). The plan lists every loss before Apply.
-- verify_hash: SHA-256 (default) or xxHash; xxHash is disabled with a hint when the xxhash package is missing.
+- id3_latin1: v2.3 text as Latin-1 instead of UTF-16; enabled only when v2.3 applies: MP3 v2.3 is on, or some
+  album of the last built plan has AlbumPlan.id3v23_files > 0 (WAV/AIFF), or it is already on (so it can be
+  turned off). The plan lists every loss before Apply.
+- verify_hash: SHA-256 (default) or xxHash; options come from settings.verify_hashes_available(), xxHash is
+  disabled with a hint when the service doesn't offer it.
 Saving only changes settings: plan.build reads them, nothing is written to any file before Apply."""
 from __future__ import annotations
-
-import importlib.util
 
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -39,8 +39,17 @@ XXHASH_HINT = "xxHash needs the optional xxhash package (pip install xxhash)"
 V23_NOTE = "WAV and AIFF files are always written as ID3v2.3."
 
 
-def xxhash_available() -> bool:
-    return importlib.util.find_spec("xxhash") is not None
+def hashes_available(svc) -> list[str]:
+    """settings.verify_hashes_available() (contract follow-up); an older service: SHA-256 only (cautious)."""
+    f = getattr(svc.settings, "verify_hashes_available", None)
+    try:
+        return list(f()) if f else ["sha256"]
+    except Exception:
+        return ["sha256"]
+
+
+def v23_note(n: int) -> str:
+    return f"{n} track(s) in the last plan are written as ID3v2.3 (WAV/AIFF), so Latin-1 applies to them."
 TIPS = {
     "migrate_tag_keys": "Removes keys earlier versions wrote that Picard doesn't (today a Vorbis YEAR). Each "
                         "removal shows in the plan before Apply; undo restores them. Alias keys such as "
@@ -56,8 +65,9 @@ TIPS = {
 
 
 class TagSettingsDialog(QDialog):
-    def __init__(self, svc=None, parent=None):
+    def __init__(self, svc=None, parent=None, v23_files: int = 0):
         super().__init__(parent)
+        self.v23_files = v23_files     # sum of AlbumPlan.id3v23_files over the last built plan
         self.svc = as_backend(svc)
         self.setWindowTitle("Tags")
         st = self.svc.settings.get()
@@ -71,13 +81,16 @@ class TagSettingsDialog(QDialog):
             lay.addWidget(b)
         v23 = QLabel(V23_NOTE, wordWrap=True); v23.setStyleSheet("color:#666")
         lay.addWidget(v23)
+        self.v23_label = QLabel(v23_note(v23_files), wordWrap=True); self.v23_label.setStyleSheet("color:#666")
+        self.v23_label.setVisible(v23_files > 0)
+        lay.addWidget(self.v23_label)
         self.latin1_always = bool(getattr(st, "id3_latin1", False))
         self.boxes["id3v23_mp3"].toggled.connect(self._sync_latin1)
         self._sync_latin1()
         self.hash_combo = QComboBox()
         for key, label in HASHES:
             self.hash_combo.addItem(label, key)
-        self.xxhash_ok = xxhash_available()
+        self.xxhash_ok = "xxhash" in hashes_available(self.svc)
         if not self.xxhash_ok:
             item = self.hash_combo.model().item(1)
             item.setEnabled(False); item.setToolTip(XXHASH_HINT)
@@ -100,11 +113,11 @@ class TagSettingsDialog(QDialog):
         self.warn = lambda title, text: QMessageBox.warning(self, title, text)
 
     def _sync_latin1(self):
-        """Latin-1 only matters where v2.3 is written: MP3 v2.3 on (WAV/AIFF always are, but the UI can't tell if
-        the library holds any, so it stays reachable once on)."""
+        """Latin-1 only matters where v2.3 is written: MP3 v2.3 on, or WAV/AIFF in the last plan."""
         st = self.svc.settings.get()
         b = self.boxes["id3_latin1"]
-        b.setEnabled(hasattr(st, "id3_latin1") and (self.boxes["id3v23_mp3"].isChecked() or self.latin1_always))
+        b.setEnabled(hasattr(st, "id3_latin1") and (self.boxes["id3v23_mp3"].isChecked() or self.v23_files > 0
+                                                       or self.latin1_always))
 
     def changes(self) -> dict:
         st = self.svc.settings.get()

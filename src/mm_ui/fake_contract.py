@@ -305,6 +305,8 @@ class FakeContract:
         # (listed only with Settings.id3_latin1) and junk file names cleanup would trash (AlbumPlan.junk)
         self.mock_losses: dict[int, list[tuple[str, str, str, str]]] = {}
         self.mock_junk: dict[int, list[str]] = {}
+        self.mock_junk_moving: dict[int, list[str]] = {}   # AlbumPlan.junk_moving (file names in the album folder)
+        self.mock_v23: dict[int, int] = {}                 # AlbumPlan.id3v23_files override (mock tracks are FLAC)
         # MOCK: files edited since their apply -> FILE_CHANGED on undo, that step is skipped
         self.mock_changed: dict[Path, str] = {}
         # Contract "Release fetching in plan.build": build never fetches. An unfetched or stale (> 6 h) chosen
@@ -1400,11 +1402,23 @@ class FakeContract:
                 tags += len(tc)
             moves += len(fcs)
             unwritten = [] if problems else [replace(u, folder=album.folder) for u in self.mock_unwritten.get(aid, [])]
-            losses = [] if problems or not self._settings.id3_latin1 else [
-                T.EncodingLoss(album.folder / name, f, v, lost) for name, f, v, lost in self.mock_losses.get(aid, [])]
+            v23_ext = (".wav", ".aif", ".aiff") + ((".mp3",) if self._settings.id3v23_mp3 else ())
+            n_v23 = self.mock_v23.get(aid, sum(1 for t in album.tracks if t.path.suffix.lower() in v23_ext))
+            losses = [] if problems or not self._settings.id3_latin1 or not n_v23 else [
+                T.EncodingLoss(album.folder / name, f, v, lost, sev, prop)
+                for name, f, v, lost, sev, prop in self.mock_losses.get(aid, [])]
+            n_tr = sum(1 for x in losses if x.severity == "transliterated")
+            n_dr = sum(1 for x in losses if x.severity == "dropped")
+            if n_dr and aid not in allow_encoding_drop:      # held like TRACK_MISMATCH; paths = the tracks
+                problems = problems + [Problem(ProblemKind.ENCODING_DROPPED,
+                                               f"{n_dr} tag value(s) can't be written as Latin-1 and would be left "
+                                               "as they are", sorted({x.path for x in losses if x.severity == "dropped"}))]
             junk = [] if problems else [album.folder / n for n in self.mock_junk.get(aid, [])]
+            moving = [album.folder / n for n in self.mock_junk_moving.get(aid, [])]
             aps.append(AlbumPlan(aid, cand.release_id, album.folder, folder, fcs, problems, *self._plan_names(album, cand),
-                                 unwritten=unwritten, junk=junk, encoding_losses=losses))
+                                 unwritten=unwritten, junk=junk, encoding_losses=losses, junk_moving=moving,
+                                 id3v23_files=0 if problems and not n_dr else n_v23,
+                                 encoding_transliterated=n_tr, encoding_dropped=n_dr))
         wanted = [(ap.album_id, ap.release_id) for ap, err in not_fetched if err is None]
         fetch_job = self._fetch_job(wanted) if wanted else None
         pending = []
@@ -1576,9 +1590,12 @@ class FakeContract:
     def add_tag_batch_demo(self, album_id: int) -> None:
         """MOCK: Latin-1 losses and junk files for one album (contract "Tag batch (2026-10-21)")."""
         t1 = "01 Track.wav"
-        self.mock_losses[album_id] = [(t1, "title", "Ångström → Café ★", "→★"),
-                                      (t1, "artist", "Motörhead ♥ Čapek", "♥Č")]
-        self.mock_junk[album_id] = [".DS_Store", "Thumbs.db", "._01 Track.wav"]
+        self.mock_v23[album_id] = 2
+        self.mock_losses[album_id] = [(t1, "title", "Łódź — “Live”", "Łź—“”", "transliterated", 'Lódz -- "Live"'),
+                                      (t1, "artist", "Motörhead ♥ Čapek", "♥Č", "dropped", None),
+                                      ("02 Track.wav", "album", "東京 Sessions", "東京", "dropped", None)]
+        self.mock_junk[album_id] = [".DS_Store", "Thumbs.db"]
+        self.mock_junk_moving[album_id] = [".DS_Store", "._01 Track.wav"]
 
     @staticmethod
     def _reverse(plan: Plan, new_id: int) -> Plan:

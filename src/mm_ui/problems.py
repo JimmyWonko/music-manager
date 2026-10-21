@@ -27,7 +27,8 @@ LABELS = {
     "layout_ambiguous": "Loose tracks next to subfolders with audio",   # paths = [album folder]; never overridable
     "disc_folder_mismatch": "Tracks would go into another disc's folder",   # template issue; never overridable
     "disc_track_count": "A disc's file count doesn't match its tracks",   # 1566b36: paths = that disc's files
-    "pin_conflict": "A pair you made can't be used",   # c2fcf25: paths = the pinned file
+    "pin_conflict": "A pair you made can't be used",
+    "encoding_dropped": "Some tags can't be written as Latin-1",   # tag batch: allow_encoding_drop={id}   # c2fcf25: paths = the pinned file
 }
 NOT_FETCHED = "release_not_fetched"   # not held: apply leaves the album out and its status stays as it was
 OVERRIDABLE = "track_mismatch"   # per album only, via plan.build(allow_track_mismatch={id}) after a confirm
@@ -71,6 +72,15 @@ def held(ap) -> bool:
 def overridable(ap) -> bool:
     """Apply: held only by track_mismatch, so "Apply anyway…" is offered."""
     return bool(ap.problems) and all(kind_of(p) == OVERRIDABLE for p in ap.problems)
+
+
+ENCODING_DROPPED = "encoding_dropped"   # tag batch: held; plan.build(allow_encoding_drop={id}) after a confirm
+
+
+def drop_allowable(ap) -> bool:
+    """Apply: held by encoding_dropped and nothing worse (a track_mismatch still needs "Apply anyway…")."""
+    kinds = {kind_of(p) for p in ap.problems}
+    return ENCODING_DROPPED in kinds and kinds <= {ENCODING_DROPPED, OVERRIDABLE}
 
 
 def all_problems(plan):
