@@ -6,7 +6,6 @@ import pytest
 from coverart_fixtures import jpeg, png
 
 FORMATS = ["mp3", "flac", "ogg", "opus", "m4a"]
-xfail = pytest.mark.xfail(strict=True, reason="cover art embedding not implemented yet")
 
 
 def ca():
@@ -15,7 +14,6 @@ def ca():
     return coverart
 
 
-@xfail
 def test_sniff_reads_mime_and_dimensions():
     c = ca()
     p = c.sniff(png(7, 9))
@@ -26,7 +24,6 @@ def test_sniff_reads_mime_and_dimensions():
     assert c.sniff(b"") is None
 
 
-@xfail
 def test_folder_art_prefers_cover_then_folder_then_front(tmp_path):
     c = ca()
     assert c.folder_art(tmp_path) is None
@@ -39,7 +36,6 @@ def test_folder_art_prefers_cover_then_folder_then_front(tmp_path):
     assert c.folder_art(tmp_path) == tmp_path / "cover.jpeg"
 
 
-@xfail
 @pytest.mark.parametrize("ext", FORMATS)
 def test_embed_keep_and_replace(sample, ext):
     c = ca()
@@ -56,7 +52,6 @@ def test_embed_keep_and_replace(sample, ext):
     assert c.embedded_front(f).data == second.data
 
 
-@xfail
 @pytest.mark.parametrize("ext", FORMATS)
 def test_preview_matches_embed(sample, ext):
     c = ca()
@@ -69,14 +64,12 @@ def test_preview_matches_embed(sample, ext):
 
 
 def test_unsupported_formats_are_left_alone(sample):
-    pytest.importorskip("music_manager.coverart")
     c = ca()
     f = sample("wv")
     assert c.embed_front(f, c.sniff(png()), replace=True) is False
     assert c.preview_embed(f, c.sniff(png()), replace=True) is None
 
 
-@xfail
 def test_flac_replace_keeps_other_picture_types(sample):
     from mutagen.flac import FLAC, Picture
 
@@ -92,7 +85,6 @@ def test_flac_replace_keeps_other_picture_types(sample):
     assert types == [3, 4]
 
 
-@xfail
 @pytest.mark.parametrize("ext", FORMATS)
 @pytest.mark.parametrize("had_art", [False, True])
 def test_journal_snapshot_restores_original_art_or_absence(sample, ext, had_art):
@@ -115,7 +107,6 @@ def test_journal_snapshot_restores_original_art_or_absence(sample, ext, had_art)
         assert got is None
 
 
-@xfail
 @pytest.mark.parametrize("ext", FORMATS)
 def test_write_tags_embeds_cover_in_the_same_atomic_write(sample, meta, ext):
     from music_manager.tags.write import write_tags

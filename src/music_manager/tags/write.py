@@ -23,6 +23,7 @@ from mutagen.oggspeex import OggSpeex
 from mutagen.oggvorbis import OggVorbis
 from mutagen.wave import WAVE
 
+from ..coverart import EmbedCover, embed_front
 from ..fs import COPY_CHUNK
 from .ape import _write_ape
 from .asf import _write_asf
@@ -85,18 +86,27 @@ def _atomic_tag_update(path: Path, edit):
     return result
 
 
-def write_tags(path: Path, meta: TrackMeta, clear_other: bool = False, dry_run: bool = False) -> list[str]:
+def write_tags(path: Path, meta: TrackMeta, clear_other: bool = False, dry_run: bool = False,
+               cover: EmbedCover | None = None) -> list[str]:
     """Write meta into path with the format's own tag names, atomically.
 
     Returns the tag keys that were removed and not rewritten. With dry_run
     the file is read and the changes are computed, but nothing is saved.
     A real write goes to a temporary copy that replaces the file only after
-    it was saved and fsynced (see _atomic_tag_update).
+    it was saved and fsynced (see _atomic_tag_update). cover: also embed this
+    front cover (coverart.embed_front) in the same atomic write.
     """
     if dry_run:
         return _write_tags_file(path, meta, clear_other, dry_run=True)
     previous = already_tagged(path)
-    return _atomic_tag_update(path, lambda tmp: _write_tags_file(tmp, meta, clear_other, previous=previous))
+
+    def edit(tmp: Path) -> list[str]:
+        removed = _write_tags_file(tmp, meta, clear_other, previous=previous)
+        if cover is not None:
+            embed_front(tmp, cover.image, cover.replace)
+        return removed
+
+    return _atomic_tag_update(path, edit)
 
 
 def _replace_set(path: Path, meta: TrackMeta, previous: str | None) -> set[str]:
