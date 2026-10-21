@@ -130,6 +130,20 @@ def _size(path: Path) -> int:
 
 # --- build ---------------------------------------------------------------------------
 
+def _junk_moving(changes: list[FileChange]) -> list[Path]:
+    """The junk files (fs.is_junk_file) the plan moves with the album: extra files, and those inside moved
+    folders, sorted."""
+    out: list[Path] = []
+    for c in changes:
+        if c.kind != "extra":
+            continue
+        if c.path_before.is_dir() and not c.path_before.is_symlink():
+            out += [p for p in c.path_before.rglob("*") if is_junk_file(p)]
+        elif is_junk_file(c.path_before):
+            out.append(c.path_before)
+    return sorted(out)
+
+
 def _junk_left_behind(album: Path, root: Path | None, target: Path, moving: set[Path]) -> list[Path]:
     """The junk files (fs.junk_files) apply's cleanup would trash: in the album folder (those not moving with
     it) and in each parent that holds nothing else, up to (not including) the library root, never in the
@@ -376,7 +390,7 @@ def build(album_ids: list[int], template: str | None = None,
                 covers += 1
         ap = AlbumPlan(t.album_id, t.release_id, t.album.path, t.target, changes, problems, *_names(t),
                        cover=choice.art if embed is not None else None, unwritten=unwritten, junk=junk,
-                       encoding_losses=losses)
+                       encoding_losses=losses, junk_moving=_junk_moving(changes))
         plans[t.album_id] = ap
         art_path = [choice.art.path] if embed is not None and choice.art.path else []
         records.append(_AlbumRecord(t, ap, _fingerprint(t, art_path), cover_url, embed))

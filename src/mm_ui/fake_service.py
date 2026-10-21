@@ -307,6 +307,7 @@ class AlbumPlan:
     unwritten: list[UnwrittenField] = field(default_factory=list)  # 2026-10-21: tags held back, and why
     junk: list[Path] = field(default_factory=list)                 # tag batch: junk files cleanup would trash
     encoding_losses: list[EncodingLoss] = field(default_factory=list)  # tag batch: Latin-1 losses
+    junk_moving: list[Path] = field(default_factory=list)          # tag batch: junk files moving with the album
 
 
 @dataclass(frozen=True)

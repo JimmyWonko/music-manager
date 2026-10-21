@@ -502,6 +502,7 @@ class AlbumPlan:
     unwritten: list[UnwrittenField] = field(default_factory=list)  # 2026-10-21: tags held back, and why
     junk: list[Path] = field(default_factory=list)  # junk files (.DS_Store, ...) apply would trash to empty the folder
     encoding_losses: list[EncodingLoss] = field(default_factory=list)  # Latin-1 losses, before anything is written
+    junk_moving: list[Path] = field(default_factory=list)  # junk files (fs.JUNK_NAMES) that move with the album
 
 
 @dataclass(frozen=True)

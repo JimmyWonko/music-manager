@@ -162,7 +162,8 @@ def test_settings_are_appended_with_defaults(tmp_path):
         with pytest.raises(service.ValidationError):
             service.settings.set(verify_hash="md5")
         assert service.settings.set(verify_hash="xxhash").verify_hash == "xxhash"
-        assert [f.name for f in dataclasses.fields(service.AlbumPlan)][-2:] == ["junk", "encoding_losses"]
+        names = [f.name for f in dataclasses.fields(service.AlbumPlan)]
+        assert names[names.index("junk"):] == ["junk", "encoding_losses", "junk_moving"]
         assert [f.name for f in dataclasses.fields(service.EncodingLoss)] == ["path", "field", "value", "lost"]
     finally:
         service.reset()
@@ -233,7 +234,6 @@ def test_misfiled_folders_with_correct_tags_are_disagree_even_without_lengths(tm
     assert check.status == "disagree" and check.flagged and len(check.disagreements) == 10
 
 
-@pytest.mark.xfail(strict=True, reason="AlbumPlan.junk_moving not built yet")
 def test_plan_lists_junk_that_moves_with_the_album(tmp_path):
     import dataclasses
 
