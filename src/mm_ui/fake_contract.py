@@ -1300,8 +1300,9 @@ class FakeContract:
                 raise ValidationError(f"Unknown setting {k}", field=k)
         if "merge_subtracks" in changes and not isinstance(changes["merge_subtracks"], bool):
             raise ValidationError("merge_subtracks must be true or false", field="merge_subtracks")
-        if "migrate_tag_keys" in changes and not isinstance(changes["migrate_tag_keys"], bool):
-            raise ValidationError("migrate_tag_keys must be true or false", field="migrate_tag_keys")
+        for key in ("migrate_tag_keys", "write_styles", "styles_in_genre"):
+            if key in changes and not isinstance(changes[key], bool):
+                raise ValidationError(f"{key} must be true or false", field=key)
         if "active_template" in changes and not any(t.id == changes["active_template"] for t in self._tpl_list()):
             raise ValidationError(f"No template {changes['active_template']!r}", field="active_template")
         before = self._settings.merge_subtracks

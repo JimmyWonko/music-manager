@@ -560,3 +560,5 @@ class Settings:
     merge_subtracks: bool = True  # automatic subtrack merging (2026-10-21); group pins merge either way
     # also remove keys earlier versions wrote that Picard doesn't (Vorbis YEAR), shown in the plan (2026-10-21)
     migrate_tag_keys: bool = False
+    write_styles: bool = False  # 2026-10-21: write Discogs styles as STYLE (off: genres only)
+    styles_in_genre: bool = False  # also append the styles to GENRE

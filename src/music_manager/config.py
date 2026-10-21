@@ -45,8 +45,11 @@ class Config:
     cover_max_bytes: int | None = None
     merge_subtracks: bool = True  # merge subtracks ripped as one file automatically (match.collapse_subtracks)
     migrate_tag_keys: bool = False  # drop tag keys earlier versions wrote that Picard doesn't (YEAR)
+    write_styles: bool = False  # write Discogs styles as STYLE (off: genres only, STYLE left alone)
+    styles_in_genre: bool = False  # also append the styles to GENRE
 
-    BOOLS = ("sequential_sides", "save_cover_art", "clear_other_tags", "merge_subtracks", "migrate_tag_keys")
+    BOOLS = ("sequential_sides", "save_cover_art", "clear_other_tags", "merge_subtracks", "migrate_tag_keys", "write_styles",
+             "styles_in_genre")
     OPTIONAL: ClassVar[dict[str, type]] = {"embed_cover_art": bool, "replace_cover_art": bool, "cover_source": str, "cover_max_bytes": int}
 
 

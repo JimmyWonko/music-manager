@@ -126,12 +126,13 @@ def _size(path: Path) -> int:
 # --- build ---------------------------------------------------------------------------
 
 def _file_changes(t: AlbumTarget, clear_other: bool, warnings: list[str], migrate: bool = False,
-                  unwritten: list[UnwrittenField] | None = None) -> list[FileChange]:
+                  unwritten: list[UnwrittenField] | None = None, styles: tuple[bool, bool] = (False, False)) -> list[FileChange]:
     layout = t.layout
     assert layout is not None
     changes: list[FileChange] = []
     for item in layout.tracks:  # the apply writes item.meta: the same choice as the preview
         item.meta["migrate_legacy_keys"] = migrate
+        item.meta["write_styles"], item.meta["styles_in_genre"] = styles
     held = release_info(t.release, t.dtracks, t.original_year).tags
     for note in held.notes:
         warnings.append(f"{t.album.path.name}: {note}")
@@ -304,7 +305,8 @@ def build(album_ids: list[int], template: str | None = None,
         problems = [p for p in t.problems if not (p.kind is ProblemKind.TRACK_MISMATCH and t.album_id in allowed)]
         problems += cross.get(t.album_id, [])
         unwritten: list[UnwrittenField] = []
-        changes = _file_changes(t, cfg.clear_other_tags, warnings, cfg.migrate_tag_keys, unwritten)
+        changes = _file_changes(t, cfg.clear_other_tags, warnings, cfg.migrate_tag_keys, unwritten,
+                               (cfg.write_styles, cfg.styles_in_genre))
         choice = _cover_for(st, t, opts, warnings)
         if choice.pending_url and not problems:  # held albums download nothing
             cover_wanted.append((t.album_id, choice.pending_url))

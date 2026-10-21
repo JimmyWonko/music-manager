@@ -369,6 +369,8 @@ class Settings:
     clear_other_tags: bool = False
     merge_subtracks: bool = True            # 2026-10-21: merge subtracks ripped as one file automatically
     migrate_tag_keys: bool = False          # 2026-10-21: also drop tag keys earlier versions wrote (Vorbis YEAR)
+    write_styles: bool = False              # 2026-10-21: Discogs styles as STYLE (off: genres only)
+    styles_in_genre: bool = False           # 2026-10-21: also append the styles to GENRE
 
 
 # ---------------------------------------------------------------- errors

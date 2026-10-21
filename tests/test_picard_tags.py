@@ -343,7 +343,7 @@ def test_settings_and_types_are_appended(tmp_path):
         with pytest.raises(service.ValidationError):
             service.settings.set(migrate_tag_keys="yes")
         assert [f.name for f in dataclasses.fields(service.TagChange)][-2:] == ["key_before", "key_after"]
-        assert [f.name for f in dataclasses.fields(service.Settings)][-1] == "migrate_tag_keys"
+        assert "migrate_tag_keys" in [f.name for f in dataclasses.fields(service.Settings)][-3:]
     finally:
         service.reset()
 
@@ -439,10 +439,7 @@ def test_plan_lists_unwritten_fields_and_keeps_warnings(tmp_path):
 
 # --- styles are opt-in (Jimmy, 2026-10-21) ---------------------------------------------------------------------------
 
-STYLES = pytest.mark.xfail(strict=True, reason="write_styles / styles_in_genre not built yet")
 
-
-@STYLES
 @pytest.mark.parametrize("ext", ["flac", "mp3", "m4a"])
 def test_styles_off_writes_genres_only_and_leaves_an_existing_style_alone(sample, ext):
     f = sample(ext)
@@ -455,14 +452,12 @@ def test_styles_off_writes_genres_only_and_leaves_an_existing_style_alone(sample
     assert genre == ["Rock", "Folk, World, & Country"]
 
 
-@STYLES
 def test_styles_off_does_not_create_style(sample):
     f = sample("flac")
     write_tags(f, full_meta(write_styles=False))
     assert "STYLE" not in {k.upper() for k in raw(f)}
 
 
-@STYLES
 def test_styles_in_genre_appends_styles_to_genre(sample):
     f = sample("flac")
     write_tags(f, full_meta(styles_in_genre=True, style=["Folk Rock", "Rock"]))
@@ -471,7 +466,6 @@ def test_styles_in_genre_appends_styles_to_genre(sample):
     assert t["STYLE"] == ["Folk Rock", "Rock"]
 
 
-@STYLES
 def test_style_settings_are_appended_and_reach_the_plan(tmp_path):
     import dataclasses
 

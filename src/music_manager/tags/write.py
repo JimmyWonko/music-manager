@@ -121,6 +121,8 @@ def _replace_set(path: Path, meta: TrackMeta, previous: str | None) -> set[str]:
         # Not a reissue: drop an original date an earlier run of this tool
         # wrote. Files never tagged by this tool keep theirs.
         replace |= ORIGINAL_FIELDS
+    if not meta.get("write_styles"):
+        replace.discard("style")  # styles are opt-in: an existing STYLE is left alone
     return replace
 
 

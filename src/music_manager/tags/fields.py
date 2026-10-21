@@ -38,6 +38,8 @@ class TrackMeta(TypedDict):
     artistsort: NotRequired[str | None]
     albumartistsort: NotRequired[str | None]
     artist_id: NotRequired[list[str] | str | None]  # the release artists' Discogs ids
+    write_styles: NotRequired[bool]  # write STYLE (Discogs styles); off: STYLE is neither written nor cleared
+    styles_in_genre: NotRequired[bool]  # also append the styles to GENRE
     migrate_legacy_keys: NotRequired[bool]  # also drop keys earlier versions wrote that Picard doesn't (YEAR)
 
 
@@ -136,6 +138,11 @@ def tag_values(meta: TrackMeta) -> dict:
         value = str(value).strip()
         return value if value and value != "0" else None
 
+    genre, style = _multi(meta.get("genre")), _multi(meta.get("style"))
+    if meta.get("styles_in_genre") and style:
+        genre = list(dict.fromkeys([*(genre or []), *style]))
+    if not meta.get("write_styles"):
+        style = None
     date = clean_date(meta.get("date"))
     original = clean_date(meta.get("originaldate"))
     return {
@@ -153,8 +160,8 @@ def tag_values(meta: TrackMeta) -> dict:
         "originalyear": text(year4(original)),
         "label": _multi(meta.get("label")),
         "catalognumber": _multi(meta.get("catalognumber")),
-        "genre": _multi(meta.get("genre")),
-        "style": _multi(meta.get("style")),
+        "genre": genre,
+        "style": style,
         "barcode": text(meta.get("barcode")),
         "media": text(meta.get("media")),
         "releasecountry": text(meta.get("releasecountry")),
