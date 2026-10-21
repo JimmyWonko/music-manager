@@ -161,7 +161,6 @@ def test_settings_are_appended_with_defaults(tmp_path):
             service.settings.set(id3_latin1="yes")
         with pytest.raises(service.ValidationError):
             service.settings.set(verify_hash="md5")
-        assert service.settings.set(verify_hash="xxhash").verify_hash == "xxhash"
         names = [f.name for f in dataclasses.fields(service.AlbumPlan)]
         assert names[names.index("junk"):] == ["junk", "encoding_losses", "junk_moving"]
         assert [f.name for f in dataclasses.fields(service.EncodingLoss)] == ["path", "field", "value", "lost"]
@@ -257,3 +256,80 @@ def test_plan_lists_junk_that_moves_with_the_album(tmp_path):
         assert ap.junk == []
     finally:
         service.reset()
+
+
+FOLLOW = pytest.mark.xfail(strict=True, reason="verify_hashes_available / id3v23_files not built yet")
+
+
+def test_xxhash_setting_when_installed(tmp_path):
+    pytest.importorskip("xxhash")
+    from service_fixtures import Library
+
+    from music_manager import service
+
+    Library(tmp_path).start(tmp_path)
+    try:
+        assert service.settings.set(verify_hash="xxhash").verify_hash == "xxhash"
+    finally:
+        service.reset()
+
+
+@FOLLOW
+def test_verify_hashes_available(tmp_path, monkeypatch):
+    import builtins
+
+    from service_fixtures import Library
+
+    from music_manager import service
+
+    Library(tmp_path).start(tmp_path)
+    try:
+        try:
+            import xxhash  # noqa: F401
+            have = ["sha256", "xxhash"]
+        except ImportError:
+            have = ["sha256"]
+        assert service.settings.verify_hashes_available() == have
+        real = builtins.__import__
+
+        def block(name, *a, **k):
+            if name == "xxhash":
+                raise ImportError("blocked")
+            return real(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", block)
+        assert service.settings.verify_hashes_available() == ["sha256"]
+        with pytest.raises(service.ValidationError):
+            service.settings.set(verify_hash="xxhash")
+    finally:
+        service.reset()
+
+
+@FOLLOW
+def test_plan_counts_id3v23_files(tmp_path):
+    from service_fixtures import Library, make_album
+
+    from music_manager import service
+
+    lib = Library(tmp_path)
+    flacs = sorted(lib.double.glob("*.flac"))
+    for f in flacs[:2]:
+        f.unlink()
+    make_album(lib.double, ["1-01 One"], ext="wav")
+    make_album(lib.double, ["1-02 Two"], ext="mp3")
+    lib.start(tmp_path)
+    try:
+        aid = lib.album_id(lib.double)
+        lib.find(aid)
+        service.match.choose(aid, lib.multi["id"])
+        [ap] = service.plan.build([aid]).albums
+        assert ap.id3v23_files == 1  # the WAV
+        service.settings.set(id3v23_mp3=True)
+        [ap] = service.plan.build([aid]).albums
+        assert ap.id3v23_files == 2  # and the MP3
+        import dataclasses
+
+        assert [f.name for f in dataclasses.fields(service.AlbumPlan)][-1] == "id3v23_files"
+    finally:
+        service.reset()
+
