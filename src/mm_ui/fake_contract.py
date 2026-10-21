@@ -1309,7 +1309,9 @@ class FakeContract:
                 raise ValidationError(f"Unknown setting {k}", field=k)
         if "merge_subtracks" in changes and not isinstance(changes["merge_subtracks"], bool):
             raise ValidationError("merge_subtracks must be true or false", field="merge_subtracks")
-        for key in ("migrate_tag_keys", "write_styles", "styles_in_genre"):
+        if "verify_hash" in changes and changes["verify_hash"] not in ("sha256", "xxhash"):
+            raise ValidationError("verify_hash must be sha256 or xxhash", field="verify_hash")
+        for key in ("migrate_tag_keys", "write_styles", "styles_in_genre", "id3v23_mp3", "id3_latin1"):
             if key in changes and not isinstance(changes[key], bool):
                 raise ValidationError(f"{key} must be true or false", field=key)
         if "active_template" in changes and not any(t.id == changes["active_template"] for t in self._tpl_list()):

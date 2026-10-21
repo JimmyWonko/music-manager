@@ -11,7 +11,7 @@ from test_apply import VINYL_DIR, make_album, run_apply
 from music_manager import moves
 from music_manager.cli import discogs_tag as cli
 from music_manager.cli.discogs_tag import main
-from music_manager.fs import collect_albums
+from music_manager.fs import collect_albums, trash_root
 from music_manager.moves import _prune_empty, prune_limit
 
 
@@ -136,12 +136,18 @@ def test_prune_empty_rules(tmp_path):
     assert (top / "a" / "keep" / ".hidden").exists() and (top / "a").is_dir()
     assert len(removed) == 4
 
-    # A folder holding only a hidden file is never removed.
+    # A folder holding only junk files (fs.JUNK_NAMES) is removed, the junk going to the trash (2026-10-21);
+    # any other hidden file keeps it.
     lone = tmp_path / "lone" / "album"
     lone.mkdir(parents=True)
     (lone / ".DS_Store").write_bytes(b"x")
-    assert _prune_empty(lone, tmp_path / "lone") == []
-    assert (lone / ".DS_Store").exists()
+    assert _prune_empty(lone, tmp_path / "lone") == [lone, lone.parent]
+    assert any(p.name == ".DS_Store" for p in (trash_root() / "files").iterdir())
+    other = tmp_path / "other" / "album"
+    other.mkdir(parents=True)
+    (other / ".DS_Store").write_bytes(b"x")
+    (other / ".hidden").write_bytes(b"x")
+    assert _prune_empty(other, tmp_path / "other") == [] and (other / ".DS_Store").exists()
 
     # The limit itself may go; nothing above it; protected folders never.
     solo = tmp_path / "solo" / "arg" / "album"

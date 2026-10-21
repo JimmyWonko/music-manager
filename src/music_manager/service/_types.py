@@ -479,6 +479,15 @@ class UnwrittenField:
 
 
 @dataclass(frozen=True)
+class EncodingLoss:
+    """A tag value Latin-1 can't hold (Settings.id3_latin1 on an ID3v2.3 file): lost characters become "?"."""
+    path: Path   # the track, as FileChange.path_before
+    field: str   # canonical tag name (title, artist, genre, ...)
+    value: str   # the value that would be written
+    lost: str    # the characters that would be lost, in order
+
+
+@dataclass(frozen=True)
 class AlbumPlan:
     album_id: int
     release_id: int
@@ -491,6 +500,8 @@ class AlbumPlan:
     title: str = ""
     cover: CoverArt | None = None  # front cover plan.apply embeds (FileChange.tags has "cover_art" per file)
     unwritten: list[UnwrittenField] = field(default_factory=list)  # 2026-10-21: tags held back, and why
+    junk: list[Path] = field(default_factory=list)  # junk files (.DS_Store, ...) apply would trash to empty the folder
+    encoding_losses: list[EncodingLoss] = field(default_factory=list)  # Latin-1 losses, before anything is written
 
 
 @dataclass(frozen=True)
@@ -564,3 +575,6 @@ class Settings:
     migrate_tag_keys: bool = False
     write_styles: bool = False  # 2026-10-21: write Discogs styles as STYLE (off: genres only)
     styles_in_genre: bool = False  # also append the styles to GENRE
+    id3v23_mp3: bool = False  # tag batch (2026-10-21): MP3s as ID3v2.3 too (WAV/AIFF always are)
+    id3_latin1: bool = False  # ID3v2.3 text as Latin-1, not UTF-16 (AlbumPlan.encoding_losses lists the losses)
+    verify_hash: str = "sha256"  # cross-drive copy check: "sha256" or "xxhash" (needs the xxhash package)

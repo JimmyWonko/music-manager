@@ -9,8 +9,6 @@ import dataclasses
 
 import pytest
 
-BATCH = pytest.mark.xfail(strict=True, reason="tag batch not built yet")
-
 
 def meta(**extra):
     out = {"title": "Söng 日本", "artist": "Ärtist", "albumartist": "Ärtist", "album": "Albüm", "track": 1,
@@ -28,8 +26,8 @@ def id3_of(path):
 # --- 1. ID3 version ------------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize(("ext", "extra", "version"), [
-    pytest.param("wav", {}, 3, marks=BATCH), pytest.param("aiff", {}, 3, marks=BATCH), ("mp3", {}, 4),
-    pytest.param("mp3", {"id3_v23": True}, 3, marks=BATCH)])
+    ("wav", {}, 3), ("aiff", {}, 3), ("mp3", {}, 4),
+    ("mp3", {"id3_v23": True}, 3)])
 def test_id3_version_per_container(sample, ext, extra, version):
     from mutagen.id3 import ID3
 
@@ -44,7 +42,6 @@ def test_id3_version_per_container(sample, ext, extra, version):
 
 # --- 2. v2.3 encodings ---------------------------------------------------------------------------------------------
 
-@BATCH
 def test_v23_defaults_to_utf16_and_latin1_is_opt_in(sample):
     from mutagen.id3 import Encoding
 
@@ -60,7 +57,6 @@ def test_v23_defaults_to_utf16_and_latin1_is_opt_in(sample):
     assert str(id3_of(f)["TPE1"]) == "Ärtist"  # Latin-1 characters survive
 
 
-@BATCH
 def test_latin1_losses_names_fields_and_characters():
     from music_manager.tags.id3 import latin1_losses
 
@@ -70,7 +66,6 @@ def test_latin1_losses_names_fields_and_characters():
 
 # --- 4. disc swaps need lengths and titles -------------------------------------------------------------------------
 
-@BATCH
 def test_jaro_winkler():
     from music_manager.similarity import jaro_winkler
 
@@ -79,11 +74,10 @@ def test_jaro_winkler():
     assert jaro_winkler("abc", "abc") == 1.0 and jaro_winkler("", "abc") == 0.0
 
 
-@BATCH
 def test_lengths_alone_are_unsure(tmp_path):
     from test_swapcheck import SWAP, only, tagged_album
 
-    tagged_album(tmp_path, lambda pos: SWAP.get(pos, pos))  # audio swapped, titles tagged as the release
+    tagged_album(tmp_path, lambda pos: SWAP.get(pos, pos), titles_follow_audio=False)  # titles as the release
     [check] = only(tmp_path)
     assert check.status == "unsure" and not check.flagged
     assert [n.verdict for n in check.numbers] == ["unsure", "unsure"]
@@ -97,7 +91,6 @@ def test_lengths_alone_are_unsure(tmp_path):
 JUNK = (".DS_Store", "Thumbs.db", "desktop.ini", "._01 One.flac")
 
 
-@BATCH
 def test_junk_files_are_an_exact_allowlist(tmp_path):
     from music_manager.fs import junk_files
 
@@ -106,7 +99,6 @@ def test_junk_files_are_an_exact_allowlist(tmp_path):
     assert sorted(p.name for p in junk_files(tmp_path)) == sorted(JUNK)
 
 
-@BATCH
 def test_prune_trashes_junk_only_when_nothing_else_is_left(tmp_path):
     from music_manager.fs import trash_root
     from music_manager.moves import _prune_empty
@@ -126,7 +118,6 @@ def test_prune_trashes_junk_only_when_nothing_else_is_left(tmp_path):
 
 # --- 6. verify hash ------------------------------------------------------------------------------------------------
 
-@BATCH
 @pytest.mark.parametrize("algo", ["sha256", "xxhash"])
 def test_copy_reads_the_source_once_and_reads_back_the_copy(tmp_path, monkeypatch, algo):
     import builtins
@@ -146,7 +137,6 @@ def test_copy_reads_the_source_once_and_reads_back_the_copy(tmp_path, monkeypatc
     assert len(opened) == 2  # the source once, the partial copy once (read-back)
 
 
-@BATCH
 def test_unknown_hash_is_refused():
     from music_manager import moves
 
@@ -156,7 +146,6 @@ def test_unknown_hash_is_refused():
 
 # --- the service ---------------------------------------------------------------------------------------------------
 
-@BATCH
 def test_settings_are_appended_with_defaults(tmp_path):
     from service_fixtures import Library
 
@@ -179,7 +168,6 @@ def test_settings_are_appended_with_defaults(tmp_path):
         service.reset()
 
 
-@BATCH
 def test_plan_lists_latin1_losses_and_junk(tmp_path):
     from service_fixtures import Library, make_album
 
@@ -189,7 +177,7 @@ def test_plan_lists_latin1_losses_and_junk(tmp_path):
     for f in lib.double.glob("*.flac"):
         f.unlink()
     make_album(lib.double, ["1-01 One", "1-02 Two", "2-01 Three", "2-02 Four"], ext="wav")
-    (lib.double / ".DS_Store").write_bytes(b"junk")
+    (lib.double.parent / ".DS_Store").write_bytes(b"junk")  # the new folder is in this artist folder too
     lib.multi["tracklist"][0]["title"] = "One 日本"
     lib.start(tmp_path)
     try:
@@ -197,7 +185,7 @@ def test_plan_lists_latin1_losses_and_junk(tmp_path):
         lib.find(aid)
         service.match.choose(aid, lib.multi["id"])
         [ap] = service.plan.build([aid]).albums
-        assert ap.encoding_losses == [] and ap.junk == [lib.double / ".DS_Store"]  # UTF-16: nothing lost
+        assert ap.encoding_losses == [] and ap.junk == []  # UTF-16: nothing lost
         service.settings.set(id3_latin1=True)
         [ap] = service.plan.build([aid]).albums
         assert [(loss.field, loss.value, loss.lost) for loss in ap.encoding_losses] == [
@@ -205,3 +193,20 @@ def test_plan_lists_latin1_losses_and_junk(tmp_path):
         assert ap.encoding_losses[0].path.name == "1-01 One.wav"
     finally:
         service.reset()
+
+
+def test_junk_left_behind_stops_at_a_folder_with_other_files(tmp_path):
+    from music_manager.service.plan import _junk_left_behind
+
+    root = tmp_path / "lib"
+    album = root / "Artist" / "Album"
+    album.mkdir(parents=True)
+    for d in (album, album.parent):
+        (d / ".DS_Store").write_bytes(b"j")
+    (album / "Thumbs.db").write_bytes(b"j")
+    target = root / "New" / "Album"
+    assert _junk_left_behind(album, root, target, set()) == [
+        album / ".DS_Store", album / "Thumbs.db", album.parent / ".DS_Store"]
+    (album.parent / "notes.txt").write_text("x")
+    assert _junk_left_behind(album, root, target, {album / "Thumbs.db"}) == [album / ".DS_Store"]
+    assert _junk_left_behind(album, root, root / "Artist" / "Other", set())[-1] == album / "Thumbs.db"

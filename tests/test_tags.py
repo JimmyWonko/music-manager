@@ -48,7 +48,7 @@ def test_id3_formats_get_id3v24_frames(sample, meta, ext):
     write_tags(path, meta)
     tags = ID3(path) if ext == "mp3" else MutagenFile(path).tags
     assert isinstance(tags, ID3)
-    assert tags.version[:2] == (2, 4)
+    assert tags.version[:2] == ((2, 4) if ext == "mp3" else (2, 3))  # WAV/AIFF: ID3v2.3 (2026-10-21)
     assert str(tags["TIT2"]) == "Söng"
     assert str(tags["TRCK"]) == "3/10"
     assert str(tags["TPOS"]) == "1/2"

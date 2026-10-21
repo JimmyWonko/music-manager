@@ -20,6 +20,7 @@ dependencies = [
 dev = ["pytest"]
 ui = ["PySide6"]
 ui-test = ["PySide6", "pytest", "pytest-qt"]
+fast-verify = ["xxhash>=3"]  # Settings.verify_hash = "xxhash" (BSD-2-Clause)
 
 [project.scripts]
 discogs-tag = "music_manager.cli.discogs_tag:main"

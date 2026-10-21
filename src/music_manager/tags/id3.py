@@ -126,3 +126,43 @@ def _apply_id3(tags: ID3, meta: TrackMeta, clear_other: bool, replace: set[str])
             tags.delall(key)
             removed.append(key)
     return removed
+
+
+# --- ID3v2.3 (2026-10-21) --------------------------------------------------------------------------------------------
+# WAV and AIFF are written as ID3v2.3 (v2.4 in those containers breaks older players); MP3 stays v2.4 unless
+# meta["id3_v23"]. v2.3 has no UTF-8: text is UTF-16 by default, or Latin-1 with meta["id3_latin1"], where the
+# fields we write lose what Latin-1 can't hold (see latin1_losses, listed by the plan before anything is written).
+# Frames we don't manage become Latin-1 only when that loses nothing; otherwise UTF-16.
+
+_MANAGED_FRAMES = {fid for fid, _cls in ID3_TEXT_FRAMES.values()} | {"TRCK", "TPOS"}
+_MANAGED_TXXX = {desc.casefold() for desc, _aliases in ID3_TXXX_FIELDS.values()}
+
+
+def _lost(text: str) -> str:
+    return "".join(ch for ch in text if ord(ch) > 0xFF)
+
+
+def latin1_losses(values: dict) -> list[tuple[str, str, str]]:
+    """(field, value, the characters Latin-1 can't hold) for each value that would lose some, in field order."""
+    out = []
+    for name, value in values.items():
+        for item in value if isinstance(value, (list, tuple)) else [value]:
+            if isinstance(item, str) and _lost(item):
+                out.append((name, item, _lost(item)))
+    return out
+
+
+def prepare_v23(tags: ID3, latin1: bool) -> None:
+    """Set every text frame's encoding for a v2.3 save (UTF-16, or Latin-1 as described above)."""
+    for frame in tags.values():
+        if not hasattr(frame, "encoding") or not isinstance(getattr(frame, "text", None), list):
+            continue
+        managed = frame.FrameID in _MANAGED_FRAMES or (
+            frame.FrameID == "TXXX" and (frame.desc or "").casefold() in _MANAGED_TXXX)
+        texts = [str(t) for t in frame.text]
+        if latin1 and (managed or not any(_lost(t) for t in texts)):
+            frame.encoding = 0
+            if frame.FrameID not in ("TDRC", "TDOR"):  # timestamps are ASCII
+                frame.text = [t.encode("latin-1", "replace").decode("latin-1") for t in texts]
+        else:
+            frame.encoding = 1

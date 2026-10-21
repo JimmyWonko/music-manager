@@ -23,7 +23,8 @@ def get() -> Settings:
                     replace_cover_art=cover.replace_cover_art, cover_source=cover.cover_source,
                     cover_max_bytes=cover.cover_max_bytes, merge_subtracks=cfg.merge_subtracks,
                     migrate_tag_keys=cfg.migrate_tag_keys,
-                    write_styles=cfg.write_styles, styles_in_genre=cfg.styles_in_genre)
+                    write_styles=cfg.write_styles, styles_in_genre=cfg.styles_in_genre,
+                    id3v23_mp3=cfg.id3v23_mp3, id3_latin1=cfg.id3_latin1, verify_hash=cfg.verify_hash)
 
 
 def set(**changes) -> Settings:  # noqa: A001 - contract name
@@ -53,11 +54,20 @@ def set(**changes) -> Settings:  # noqa: A001 - contract name
             raise ValidationError(f"No template {tid!r}", field="active_template")
         values["active_template"] = tid
     for key in ("sequential_sides", "save_cover_art", "clear_other_tags", "merge_subtracks", "migrate_tag_keys",
-                "write_styles", "styles_in_genre"):
+                "write_styles", "styles_in_genre", "id3v23_mp3", "id3_latin1"):
         if key in changes:
             if not isinstance(changes[key], bool):
                 raise ValidationError(f"{key} must be True or False", field=key)
             values[key] = changes[key]
+    if "verify_hash" in changes:
+        from ..moves import VERIFY_HASHES, xxhash_available
+
+        if changes["verify_hash"] not in VERIFY_HASHES:
+            raise ValidationError(f"verify_hash must be one of {', '.join(VERIFY_HASHES)}", field="verify_hash")
+        if changes["verify_hash"] == "xxhash" and not xxhash_available():
+            raise ValidationError("verify_hash 'xxhash' needs the optional xxhash package (pip install xxhash)",
+                                  field="verify_hash")
+        values["verify_hash"] = changes["verify_hash"]
     for key in ("embed_cover_art", "replace_cover_art"):
         if key in changes:
             if changes[key] is not None and not isinstance(changes[key], bool):

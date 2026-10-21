@@ -172,7 +172,7 @@ def test_wav_aiff_get_id3v24(tmp_path, name, maker):
     getattr(cli, maker)(path)
     write_tags(path, meta)
     tags = MutagenFile(path).tags
-    assert isinstance(tags, ID3) and tags.version[:2] == (2, 4)
+    assert isinstance(tags, ID3) and tags.version[:2] == (2, 3)  # WAV/AIFF: ID3v2.3 (2026-10-21)
     assert (str(tags["TIT2"]), str(tags["TRCK"]), str(tags["TDRC"])) == ("Ünïcode", "2/9", "2001")
     assert already_tagged(path) == "77"
 
