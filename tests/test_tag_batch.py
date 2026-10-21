@@ -6,6 +6,7 @@ Synthetic files and fixtures only."""
 from __future__ import annotations
 
 import dataclasses
+import importlib.util
 
 import pytest
 
@@ -42,6 +43,7 @@ def test_id3_version_per_container(sample, ext, extra, version):
 
 # --- 2. v2.3 encodings ---------------------------------------------------------------------------------------------
 
+@pytest.mark.xfail(strict=True, reason="severity/transliteration not built yet")
 def test_v23_defaults_to_utf16_and_latin1_is_opt_in(sample):
     from mutagen.id3 import Encoding
 
@@ -51,17 +53,63 @@ def test_v23_defaults_to_utf16_and_latin1_is_opt_in(sample):
     write_tags(f, meta())
     frame = id3_of(f)["TIT2"]
     assert frame.encoding == Encoding.UTF16 and str(frame) == "Söng 日本"
-    write_tags(f, meta(id3_latin1=True))
+    write_tags(f, meta(id3_latin1=True, title="Söng"))
     frame = id3_of(f)["TIT2"]
-    assert frame.encoding == Encoding.LATIN1 and str(frame) == "Söng ??"
+    assert frame.encoding == Encoding.LATIN1 and str(frame) == "Söng"
     assert str(id3_of(f)["TPE1"]) == "Ärtist"  # Latin-1 characters survive
+    write_tags(f, meta(id3_latin1=True, keep_fields=["title"]))  # a dropped field: not written, kept
+    assert str(id3_of(f)["TIT2"]) == "Söng"
 
 
+@pytest.mark.xfail(strict=True, reason="severity/transliteration not built yet")
 def test_latin1_losses_names_fields_and_characters():
     from music_manager.tags.id3 import latin1_losses
 
     assert latin1_losses({"title": "Söng 日本", "artist": "Ärtist", "genre": ["Rock", "J-ポップ"]}) == [
-        ("title", "Söng 日本", "日本"), ("genre", "J-ポップ", "ポップ")]
+        ("title", "Söng 日本", "日本", "dropped", None), ("genre", "J-ポップ", "ポップ", "dropped", None)]
+
+
+@pytest.mark.xfail(strict=True, reason="severity/transliteration not built yet")
+@pytest.mark.parametrize("name", ["Björk", "Motörhead", "Sigur Rós", "Ærøskøbing"])
+def test_latin1_safe_values_are_untouched(name):
+    from music_manager.tags.id3 import latin1_value
+
+    assert latin1_value(name) == (None, name)
+
+
+@pytest.mark.xfail(strict=True, reason="severity/transliteration not built yet")
+@pytest.mark.parametrize(("value", "proposed"), [("Łódź", "Lódz"), ("Dvořák “live”", 'Dvorák "live"'),
+                                               ("Œuvre — 2", "OEuvre -- 2")])
+def test_only_unencodable_latin_characters_are_transliterated(value, proposed):
+    pytest.importorskip("unidecode")
+    from music_manager.tags.id3 import latin1_value
+
+    assert latin1_value(value) == ("transliterated", proposed)
+
+
+@pytest.mark.xfail(strict=True, reason="severity/transliteration not built yet")
+@pytest.mark.parametrize("value", ["日本", "Кино", "Söng 日本"])
+def test_characters_without_a_sensible_substitute_drop_the_field(value):
+    from music_manager.tags.id3 import latin1_value
+
+    assert latin1_value(value) == ("dropped", None)
+
+
+@pytest.mark.xfail(strict=True, reason="severity/transliteration not built yet")
+def test_without_unidecode_every_unencodable_character_drops(monkeypatch):
+    import builtins
+
+    from music_manager.tags.id3 import latin1_value
+
+    real = builtins.__import__
+
+    def block(name, *a, **k):
+        if name == "unidecode":
+            raise ModuleNotFoundError(name)
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", block)
+    assert latin1_value("Łódź") == ("dropped", None) and latin1_value("Björk") == (None, "Björk")
 
 
 # --- 4. disc swaps need lengths and titles -------------------------------------------------------------------------
@@ -146,6 +194,7 @@ def test_unknown_hash_is_refused():
 
 # --- the service ---------------------------------------------------------------------------------------------------
 
+@pytest.mark.xfail(strict=True, reason="severity/transliteration not built yet")
 def test_settings_are_appended_with_defaults(tmp_path):
     from service_fixtures import Library
 
@@ -162,12 +211,16 @@ def test_settings_are_appended_with_defaults(tmp_path):
         with pytest.raises(service.ValidationError):
             service.settings.set(verify_hash="md5")
         names = [f.name for f in dataclasses.fields(service.AlbumPlan)]
-        assert names[names.index("junk"):] == ["junk", "encoding_losses", "junk_moving"]
-        assert [f.name for f in dataclasses.fields(service.EncodingLoss)] == ["path", "field", "value", "lost"]
+        assert names[names.index("junk"):][:4] == ["junk", "encoding_losses", "junk_moving", "id3v23_files"]
+        assert [f.name for f in dataclasses.fields(service.EncodingLoss)] == [
+            "path", "field", "value", "lost", "severity", "proposed_value"]
+        names = [f.name for f in dataclasses.fields(service.AlbumPlan)]
+        assert names[-2:] == ["encoding_transliterated", "encoding_dropped"]
     finally:
         service.reset()
 
 
+@pytest.mark.xfail(strict=True, reason="severity/transliteration not built yet")
 def test_plan_lists_latin1_losses_and_junk(tmp_path):
     from service_fixtures import Library, make_album
 
@@ -178,7 +231,9 @@ def test_plan_lists_latin1_losses_and_junk(tmp_path):
         f.unlink()
     make_album(lib.double, ["1-01 One", "1-02 Two", "2-01 Three", "2-02 Four"], ext="wav")
     (lib.double.parent / ".DS_Store").write_bytes(b"junk")  # the new folder is in this artist folder too
-    lib.multi["tracklist"][0]["title"] = "One 日本"
+    lib.multi["tracklist"][0]["title"] = "One 日本"  # dropped: the album is held
+    lib.multi["tracklist"][1]["title"] = "Łódź"  # transliterated
+    lib.multi["labels"] = [{"name": "Björk Records", "catno": "Ł-1"}]  # not a core field
     lib.start(tmp_path)
     try:
         aid = lib.album_id(lib.double)
@@ -188,9 +243,20 @@ def test_plan_lists_latin1_losses_and_junk(tmp_path):
         assert ap.encoding_losses == [] and ap.junk == []  # UTF-16: nothing lost
         service.settings.set(id3_latin1=True)
         [ap] = service.plan.build([aid]).albums
-        assert [(loss.field, loss.value, loss.lost) for loss in ap.encoding_losses] == [
-            ("title", "One 日本", "日本")]
-        assert ap.encoding_losses[0].path.name == "1-01 One.wav"
+        got = {(loss.path.name, loss.field, loss.value, loss.severity, loss.proposed_value)
+               for loss in ap.encoding_losses}
+        want = {("1-01 One.wav", "title", "One 日本", "dropped", None)}
+        if importlib.util.find_spec("unidecode") is not None:
+            want |= {("1-02 Two.wav", "title", "Łódź", "transliterated", "Lódz")}
+            want |= {(n, "catalognumber", "Ł-1", "transliterated", "L-1") for n in
+                     ("1-01 One.wav", "1-02 Two.wav", "2-01 Three.wav", "2-02 Four.wav")}
+        assert got == want
+        assert (ap.encoding_dropped, ap.encoding_transliterated) == (1, len(want) - 1)
+        assert [p.kind for p in ap.problems] == [service.ProblemKind.ENCODING_DROPPED]
+        [ap] = service.plan.build([aid], allow_encoding_drop={aid}).albums  # the manual option
+        assert ap.problems == [] and ap.encoding_dropped == 1
+        one = next(c for c in ap.files if c.path_before.name == "1-01 One.wav")
+        assert "title" not in {t.key for t in one.tags}  # the dropped field is not written
     finally:
         service.reset()
 
@@ -246,7 +312,7 @@ def test_plan_lists_junk_that_moves_with_the_album(tmp_path):
     (lib.double / "notes.txt").write_text("not junk")
     lib.start(tmp_path)
     try:
-        assert [f.name for f in dataclasses.fields(service.AlbumPlan)][-1] == "junk_moving"
+        assert "junk_moving" in [f.name for f in dataclasses.fields(service.AlbumPlan)]
         aid = lib.album_id(lib.double)
         lib.find(aid)
         service.match.choose(aid, lib.multi["id"])
@@ -257,8 +323,6 @@ def test_plan_lists_junk_that_moves_with_the_album(tmp_path):
     finally:
         service.reset()
 
-
-FOLLOW = pytest.mark.xfail(strict=True, reason="verify_hashes_available / id3v23_files not built yet")
 
 
 def test_xxhash_setting_when_installed(tmp_path):
@@ -274,7 +338,6 @@ def test_xxhash_setting_when_installed(tmp_path):
         service.reset()
 
 
-@FOLLOW
 def test_verify_hashes_available(tmp_path, monkeypatch):
     import builtins
 
@@ -305,7 +368,6 @@ def test_verify_hashes_available(tmp_path, monkeypatch):
         service.reset()
 
 
-@FOLLOW
 def test_plan_counts_id3v23_files(tmp_path):
     from service_fixtures import Library, make_album
 
@@ -329,7 +391,7 @@ def test_plan_counts_id3v23_files(tmp_path):
         assert ap.id3v23_files == 2  # and the MP3
         import dataclasses
 
-        assert [f.name for f in dataclasses.fields(service.AlbumPlan)][-1] == "id3v23_files"
+        assert "id3v23_files" in [f.name for f in dataclasses.fields(service.AlbumPlan)]
     finally:
         service.reset()
 
