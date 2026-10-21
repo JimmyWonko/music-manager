@@ -503,6 +503,7 @@ class AlbumPlan:
     junk: list[Path] = field(default_factory=list)  # junk files (.DS_Store, ...) apply would trash to empty the folder
     encoding_losses: list[EncodingLoss] = field(default_factory=list)  # Latin-1 losses, before anything is written
     junk_moving: list[Path] = field(default_factory=list)  # junk files (fs.JUNK_NAMES) that move with the album
+    id3v23_files: int = 0  # tracks written as ID3v2.3 under the current settings (WAV/AIFF; MP3 with id3v23_mp3)
 
 
 @dataclass(frozen=True)

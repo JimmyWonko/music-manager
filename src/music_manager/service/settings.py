@@ -27,6 +27,13 @@ def get() -> Settings:
                     id3v23_mp3=cfg.id3v23_mp3, id3_latin1=cfg.id3_latin1, verify_hash=cfg.verify_hash)
 
 
+def verify_hashes_available() -> list[str]:
+    """The Settings.verify_hash values usable now: "sha256" always, "xxhash" only when the package imports."""
+    from ..moves import xxhash_available
+
+    return ["sha256", "xxhash"] if xxhash_available() else ["sha256"]
+
+
 def set(**changes) -> Settings:  # noqa: A001 - contract name
     """Change settings, e.g. set(active_template="archivist"). Unknown keys or bad values: ValidationError.
 

@@ -308,6 +308,7 @@ class AlbumPlan:
     junk: list[Path] = field(default_factory=list)                 # tag batch: junk files cleanup would trash
     encoding_losses: list[EncodingLoss] = field(default_factory=list)  # tag batch: Latin-1 losses
     junk_moving: list[Path] = field(default_factory=list)          # tag batch: junk files moving with the album
+    id3v23_files: int = 0                                          # tag batch: tracks written as ID3v2.3
 
 
 @dataclass(frozen=True)

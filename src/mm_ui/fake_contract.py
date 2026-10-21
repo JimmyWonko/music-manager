@@ -287,7 +287,8 @@ class FakeContract:
         self.journal = _NS(manual_pairs=self._manual_pairs, list=self._journal_list, undo_plan=self._undo_plan, undo=self._undo)
         self.templates = _NS(list=self._tpl_list, save=self._tpl_save, delete=self._tpl_delete,
                              preview=self._tpl_preview)
-        self.settings = _NS(get=lambda: self._settings, set=self._settings_set)
+        self.settings = _NS(get=lambda: self._settings, set=self._settings_set,
+                            verify_hashes_available=lambda: ["sha256"])  # MOCK: no optional xxhash
         self.jobs = _NS(get=self._job_get, cancel=lambda job_id: None, pause=lambda job_id: None,
                          resume=lambda job_id: None, wait=self._job_wait, idle=self._jobs_idle)
         self._announced: set[int] = set()     # finished jobs whose job_finished has been emitted

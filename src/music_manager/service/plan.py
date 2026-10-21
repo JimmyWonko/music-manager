@@ -130,6 +130,12 @@ def _size(path: Path) -> int:
 
 # --- build ---------------------------------------------------------------------------
 
+def _is_v23(path: Path, id3v23_mp3: bool) -> bool:
+    """Is path written as ID3v2.3 (tags.write): WAV/AIFF always, MP3 with Settings.id3v23_mp3."""
+    suffix = path.suffix.lower()
+    return suffix in V23_SUFFIXES or (suffix == ".mp3" and id3v23_mp3)
+
+
 def _junk_moving(changes: list[FileChange]) -> list[Path]:
     """The junk files (fs.is_junk_file) the plan moves with the album: extra files, and those inside moved
     folders, sorted."""
@@ -174,7 +180,7 @@ def _file_changes(t: AlbumTarget, clear_other: bool, warnings: list[str], migrat
         item.meta["migrate_legacy_keys"] = migrate
         item.meta["write_styles"], item.meta["styles_in_genre"] = styles
         item.meta["id3_v23"], item.meta["id3_latin1"] = id3
-        v23 = item.source.suffix.lower() in V23_SUFFIXES or (item.source.suffix.lower() == ".mp3" and id3[0])
+        v23 = _is_v23(item.source, id3[0])
         if id3[1] and v23 and losses is not None:
             losses += [EncodingLoss(item.source, f, v, lost) for f, v, lost in latin1_losses(tag_values(item.meta))]
     held = release_info(t.release, t.dtracks, t.original_year).tags
@@ -390,7 +396,9 @@ def build(album_ids: list[int], template: str | None = None,
                 covers += 1
         ap = AlbumPlan(t.album_id, t.release_id, t.album.path, t.target, changes, problems, *_names(t),
                        cover=choice.art if embed is not None else None, unwritten=unwritten, junk=junk,
-                       encoding_losses=losses, junk_moving=_junk_moving(changes))
+                       encoding_losses=losses, junk_moving=_junk_moving(changes),
+                       id3v23_files=sum(1 for c in changes if c.kind == "track" and not c.skip_reason
+                                        and _is_v23(c.path_before, cfg.id3v23_mp3)))
         plans[t.album_id] = ap
         art_path = [choice.art.path] if embed is not None and choice.art.path else []
         records.append(_AlbumRecord(t, ap, _fingerprint(t, art_path), cover_url, embed))
