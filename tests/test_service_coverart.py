@@ -15,6 +15,7 @@ DISCOGS_URL = "https://img.example/1000004.jpg"
 @pytest.fixture
 def lib(tmp_path):
     library = Library(tmp_path).start(tmp_path)
+    service.settings.set(embed_cover_art=True)  # opt-in
     yield library
     service.reset()
 
@@ -46,7 +47,10 @@ def cover_changes(plan):
 
 
 def test_settings_cover_defaults_follow_the_preset(lib):
-    s = service.settings.get()
+    assert service.settings.set(embed_cover_art=None).embed_cover_art is False  # opt-in in every preset
+    for preset in ("archivist", "simple", "edition-detail", "label-archive", "user:x"):
+        assert service.coverart.preset_defaults(preset).embed_cover_art is False
+    s = service.settings.set(embed_cover_art=True)
     assert (s.embed_cover_art, s.replace_cover_art, s.cover_source, s.cover_max_bytes) == (
         True, False, "folder_first", 0)
     s = service.settings.set(replace_cover_art=True, cover_source="discogs_first", cover_max_bytes=1000)
@@ -166,3 +170,19 @@ def test_changed_folder_art_refuses_the_apply(lib):
     job = wait(service.plan.apply(plan.id))
     assert job.state is JobState.FAILED
     assert service.library.album(d).held_for[0].kind is service.ProblemKind.FILE_CHANGED
+
+
+def test_embedding_is_off_by_default_and_folder_jpg_is_still_saved(tmp_path):
+    lib = Library(tmp_path).start(tmp_path)
+    try:
+        lib.discogs.images[DISCOGS_URL] = png(30, 30)
+        d = accepted_double(lib, None)
+        plan = service.plan.build([d])
+        assert plan.albums[0].cover is None and cover_changes(plan) == [] and plan.cover_job is None
+        assert any("folder.jpg" in w for w in plan.warnings)
+        assert wait(service.plan.apply(plan.id)).state is JobState.DONE
+        target = plan.albums[0].folder_after
+        assert (target / "folder.jpg").read_bytes() == png(30, 30)
+        assert all(front(t) is None for t in target.rglob("*.flac"))
+    finally:
+        service.reset()

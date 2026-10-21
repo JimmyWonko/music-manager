@@ -32,7 +32,7 @@ from ._types import (
     NotFound,
 )
 
-# Per naming preset. All four keep existing art and never downscale for now; user templates use archivist's.
+# Per naming preset. All four: embedding is opt-in (off), existing art is kept, nothing is downscaled; user templates use archivist's.
 PRESET_DEFAULTS: dict[str, CoverDefaults] = {
     "archivist": CoverDefaults(),
     "simple": CoverDefaults(),

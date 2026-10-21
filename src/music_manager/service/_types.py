@@ -413,7 +413,7 @@ class CoverPreview:
 
 @dataclass(frozen=True)
 class CoverDefaults:
-    embed_cover_art: bool = True
+    embed_cover_art: bool = False  # opt-in: saving folder.jpg (save_cover_art) is the norm
     replace_cover_art: bool = False  # False: tracks with front art keep it
     cover_source: CoverSource = "folder_first"
     cover_max_bytes: int = 0  # 0: no limit; larger images are not embedded (never resized)
@@ -495,7 +495,7 @@ class Settings:
     clear_other_tags: bool = False
     # cover art embedding: effective values (the user's, else the active template's preset default);
     # settings.set(name=None) goes back to the preset default
-    embed_cover_art: bool = True
+    embed_cover_art: bool = False  # opt-in
     replace_cover_art: bool = False
     cover_source: CoverSource = "folder_first"
     cover_max_bytes: int = 0
