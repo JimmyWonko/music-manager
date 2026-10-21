@@ -12,6 +12,8 @@ code on both backends. Everything mock-specific lives here, never in the UI modu
 """
 from __future__ import annotations
 
+import importlib.util
+
 import bisect
 import functools
 import itertools
@@ -255,7 +257,7 @@ class FakeContract:
             "AlbumFilter", "AlbumSort", "MatchStatus", "JobState", "JobKind", "Job", "Page", "Template",
             "TemplatePreview", "Collision", "Destination", "Settings", "Operation", "AutoRules", "Problem", "ProblemKind", "AlbumPlan", "Plan", "MMError", "NotFound",
             "PlanStale", "ValidationError", "ProviderError", "ConfigError", "Cluster", "ClusterFile", "MatchView",
-            "ClusterRow", "Pin", "ManualPair", "PinConflict", "SubtrackGroup", "TrackPair", "RemoteTrack", "TagChange", "UnwrittenField")})
+            "ClusterRow", "Pin", "ManualPair", "PinConflict", "SubtrackGroup", "TrackPair", "RemoteTrack", "TagChange", "UnwrittenField", "EncodingLoss")})
         self._ids = itertools.count(100_000)
         self._jobs: dict[int, Job] = {}
         self._plans: dict[int, Plan] = {}
@@ -299,6 +301,10 @@ class FakeContract:
         self.mock_tag_keys: dict[int, dict[str, str]] = {}
         # MOCK: AlbumPlan.unwritten per album (also a Plan.warnings line each); empty for held albums
         self.mock_unwritten: dict[int, list] = {}
+        # MOCK (contract "Tag batch (2026-10-21)"): per album, (track name, field, value, lost) Latin-1 losses
+        # (listed only with Settings.id3_latin1) and junk file names cleanup would trash (AlbumPlan.junk)
+        self.mock_losses: dict[int, list[tuple[str, str, str, str]]] = {}
+        self.mock_junk: dict[int, list[str]] = {}
         # MOCK: files edited since their apply -> FILE_CHANGED on undo, that step is skipped
         self.mock_changed: dict[Path, str] = {}
         # Contract "Release fetching in plan.build": build never fetches. An unfetched or stale (> 6 h) chosen
@@ -1312,6 +1318,9 @@ class FakeContract:
             raise ValidationError("merge_subtracks must be true or false", field="merge_subtracks")
         if "verify_hash" in changes and changes["verify_hash"] not in ("sha256", "xxhash"):
             raise ValidationError("verify_hash must be sha256 or xxhash", field="verify_hash")
+        if changes.get("verify_hash") == "xxhash" and importlib.util.find_spec("xxhash") is None:
+            raise ValidationError("verify_hash 'xxhash' needs the optional xxhash package (pip install xxhash)",
+                                  field="verify_hash")
         for key in ("migrate_tag_keys", "write_styles", "styles_in_genre", "id3v23_mp3", "id3_latin1"):
             if key in changes and not isinstance(changes[key], bool):
                 raise ValidationError(f"{key} must be true or false", field=key)
@@ -1391,8 +1400,11 @@ class FakeContract:
                 tags += len(tc)
             moves += len(fcs)
             unwritten = [] if problems else [replace(u, folder=album.folder) for u in self.mock_unwritten.get(aid, [])]
+            losses = [] if problems or not self._settings.id3_latin1 else [
+                T.EncodingLoss(album.folder / name, f, v, lost) for name, f, v, lost in self.mock_losses.get(aid, [])]
+            junk = [] if problems else [album.folder / n for n in self.mock_junk.get(aid, [])]
             aps.append(AlbumPlan(aid, cand.release_id, album.folder, folder, fcs, problems, *self._plan_names(album, cand),
-                                 unwritten=unwritten))
+                                 unwritten=unwritten, junk=junk, encoding_losses=losses))
         wanted = [(ap.album_id, ap.release_id) for ap, err in not_fetched if err is None]
         fetch_job = self._fetch_job(wanted) if wanted else None
         pending = []
@@ -1404,6 +1416,10 @@ class FakeContract:
         order = {aid: i for i, aid in enumerate(album_ids)}
         aps = sorted(aps + not_fetched, key=lambda ap: order[ap.album_id])
         warnings = [f"{u.folder or ap.folder_before}: {u.field}: {u.detail}" for ap in aps for u in ap.unwritten]
+        n_loss = sum(len(ap.encoding_losses) for ap in aps)
+        if n_loss:     # real plan.py adds one summary line
+            warnings.append(f"{n_loss} tag value(s) lose characters as Latin-1 (Settings.id3_latin1): "
+                            "see AlbumPlan.encoding_losses")
         if not_fetched:
             warnings.append(f"{len(not_fetched)} release(s) are being fetched from Discogs (job {fetch_job}): build "
                             "the plan again when it finishes" if fetch_job is not None
@@ -1556,6 +1572,13 @@ class FakeContract:
             U("catalognumber", "missing_catalog_number", "SST Records has no catalog number (\"none\")"),
             U("releasestatus", "some_future_code", "Discogs lists this release as a test pressing"),
         ]
+
+    def add_tag_batch_demo(self, album_id: int) -> None:
+        """MOCK: Latin-1 losses and junk files for one album (contract "Tag batch (2026-10-21)")."""
+        t1 = "01 Track.wav"
+        self.mock_losses[album_id] = [(t1, "title", "Ångström → Café ★", "→★"),
+                                      (t1, "artist", "Motörhead ♥ Čapek", "♥Č")]
+        self.mock_junk[album_id] = [".DS_Store", "Thumbs.db", "._01 Track.wav"]
 
     @staticmethod
     def _reverse(plan: Plan, new_id: int) -> Plan:

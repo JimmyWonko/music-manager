@@ -825,6 +825,20 @@ class ReviewWindow(QMainWindow):
 GREY = "#888"
 RENAME = "#1f5fa8"      # a tag key renamed to its Picard name
 UNWRITTEN = "#8a6d00"   # a tag held back (AlbumPlan.unwritten)
+LOSS = "#a33"           # a character Latin-1 can't hold (AlbumPlan.encoding_losses)
+JUNK = "#8a6d00"        # a junk file cleanup moves to the trash (AlbumPlan.junk)
+JUNK_TEXT = "Will be moved to trash"
+
+
+def latin1_written(value: str, lost: str) -> str:
+    """The value as the file gets it: each lost character becomes "?"."""
+    return "".join("?" if ch in lost else ch for ch in value)
+
+
+def loss_html(value: str, lost: str) -> str:
+    """The value with each lost character highlighted (red, bold)."""
+    return "".join(f"<b style='color:{LOSS};background:#fdd'>{html.escape(ch)}</b>" if ch in lost
+                   else html.escape(ch) for ch in value)
 
 
 def _rel_to(path, folder) -> str:
@@ -935,6 +949,32 @@ class ApplyDialog(QDialog):
             lay.addWidget(self.cluster_label)
         else:
             self.cluster_label.hide()
+        # tag batch (2026-10-21): Latin-1 losses and junk to trash, shown before anything is written
+        self.losses = [] if undo else [(ap, x) for ap in self.clean_aps for x in getattr(ap, "encoding_losses", None) or []]
+        self.junk = [] if undo else [(ap, j) for ap in self.clean_aps for j in getattr(ap, "junk", None) or []]
+        self.loss_label = QLabel(wordWrap=True)
+        self.loss_label.setTextFormat(Qt.RichText)
+        if self.losses:
+            lines = [f"{html.escape(_rel_to(x.path, ap.folder_before))} · {html.escape(x.field)}: "
+                     f"{loss_html(x.value, x.lost)} → <code>{html.escape(latin1_written(x.value, x.lost))}</code>"
+                     for ap, x in self.losses]
+            self.loss_label.setText(
+                f"<span style='background:{LOSS};color:white;padding:1px 4px'>&nbsp;⚠ Latin-1&nbsp;</span> "
+                f"<b style='color:{LOSS}'>{len(self.losses)} tag value(s) lose characters</b> (written as “?”; "
+                "turn off “Use Latin-1” in Tags settings to keep them):<br>" + "<br>".join(lines))
+            lay.addWidget(self.loss_label)
+        else:
+            self.loss_label.hide()
+        self.junk_label = QLabel(wordWrap=True)
+        if self.junk:
+            self.junk_label.setText(
+                f"<span style='background:{JUNK};color:white'>&nbsp;⚠ Trash&nbsp;</span> "
+                f"<b style='color:{JUNK}'>{len(self.junk)} junk file(s): {JUNK_TEXT}</b> (to empty the old "
+                "folders; never deleted, undo restores them):<br>"
+                + "<br>".join(html.escape(str(j)) for _ap, j in self.junk))
+            lay.addWidget(self.junk_label)
+        else:
+            self.junk_label.hide()
         self.problems = P.all_problems(plan)
         self.legacy = [p for p in self.problems if P.kind_of(p) == P.LEGACY]
         self.blocking = self.legacy if undo else [p for ap in self.held_aps for p in ap.problems]
@@ -1125,6 +1165,21 @@ class ApplyDialog(QDialog):
             for c in range(3):
                 ui.setForeground(c, QBrush(QColor(UNWRITTEN))); ui.setFont(c, font)
             top.addChild(ui)
+        for x in getattr(ap, "encoding_losses", None) or []:
+            li = QTreeWidgetItem([f"⚠ Latin-1 loses “{x.lost}”: {x.field}", x.value, latin1_written(x.value, x.lost)])
+            li.setData(0, Qt.UserRole, "encoding_loss")
+            li.setToolTip(0, f"{x.path}\nLatin-1 can't hold {x.lost!r}: written as “?”")
+            for c in range(3):
+                li.setForeground(c, QBrush(QColor(LOSS)))
+            top.addChild(li)
+        for j in getattr(ap, "junk", None) or []:
+            ji = QTreeWidgetItem([f"⚠ {JUNK_TEXT}", j.name, "Trash"])
+            ji.setData(0, Qt.UserRole, "junk")
+            ji.setToolTip(1, str(j)); ji.setToolTip(0, "Junk file moved to the trash so its folder can be removed "
+                                                        "(never deleted; undo restores it)")
+            for c in range(3):
+                ji.setForeground(c, QBrush(QColor(JUNK)))
+            top.addChild(ji)
         for p in ap.problems:
             if self.undo and P.kind_of(p) != P.LEGACY:
                 continue                       # shown as skipped steps instead

@@ -1318,3 +1318,45 @@ def test_real_picard_renames_unwritten_and_tag_settings(real, qtbot):
     tags = mutagen.File(folder / "01 One.flac")
     assert tags["YEAR"] == ["1984"] and tags["TOTALTRACKS"] == ["2"]    # nothing written before Apply
     assert any(P.is_rename(t) for f in _plan.albums[0].files for t in f.tags)
+
+
+def test_real_tag_batch_latin1_losses_junk_and_settings(real, qtbot):
+    from mm_ui.review import ApplyDialog
+    from mm_ui.tagsettings import TagSettingsDialog
+    svc = real["svc"]
+    if not hasattr(svc.settings.get(), "id3_latin1"):
+        pytest.skip("service predates the tag batch (580c9f1)")
+    title, rid = "Latin Batch", 752
+    folder = real["lib"] / "Batch Band" / title
+    for i, t in enumerate(["One", "Two"], 1):
+        tone(folder / f"{i:02d} {t}.wav")
+    (folder / ".DS_Store").write_bytes(b"\0junk")
+    real["discogs"].releases[rid] = release(rid, "Batch Band", title, 1999, f"BAT {rid}", ["Café ★", "Two"])
+    assert svc._c.jobs.wait(svc.library.scan().id).state.name == "DONE"
+    (row,) = [x for x in svc.albums(None, limit=50).items if x.title == title]
+    assert svc._c.jobs.wait(svc.match.find([row.id]).id).state.name == "DONE"
+    svc.match.choose(row.id, rid)
+
+    def build():
+        plan = svc.plan.build([row.id])
+        if plan.fetch_job is not None:
+            svc._c.jobs.wait(plan.fetch_job)
+            plan = svc.plan.build([row.id])
+        return plan
+
+    d = TagSettingsDialog(svc); qtbot.addWidget(d)
+    assert not d.boxes["id3_latin1"].isEnabled() and d.hash_combo.currentData() == "sha256"
+    plan = build()
+    (ap,) = plan.albums
+    assert not ap.encoding_losses                                   # UTF-16 by default
+    dlg = ApplyDialog(plan); qtbot.addWidget(dlg)
+    assert dlg.junk_label.isHidden() == (not ap.junk)            # junk in the album folder moves with it
+    d.boxes["id3v23_mp3"].setChecked(True); d.boxes["id3_latin1"].setChecked(True); d.save()
+    assert svc.settings.get().id3_latin1 is True
+    plan = build()
+    (ap,) = plan.albums
+    assert [(x.field, x.lost) for x in ap.encoding_losses] == [("title", "★")], ap.encoding_losses
+    dlg = ApplyDialog(plan); qtbot.addWidget(dlg)
+    assert not dlg.loss_label.isHidden() and "Caf" in dlg.loss_label.text()
+    assert (folder / ".DS_Store").exists() and (folder / "01 One.wav").exists()   # nothing written before Apply
+    d.svc.settings.set(id3v23_mp3=False, id3_latin1=False)
