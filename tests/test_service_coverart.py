@@ -9,7 +9,6 @@ from service_fixtures import Library, direct
 from music_manager import service
 from music_manager.service import JobState
 
-xfail = pytest.mark.xfail(strict=True, reason="cover art embedding not implemented yet")
 DISCOGS_URL = "https://img.example/1000004.jpg"
 
 
@@ -46,7 +45,6 @@ def cover_changes(plan):
     return [t for f in plan.albums[0].files for t in f.tags if t.key == "cover_art"]
 
 
-@xfail
 def test_settings_cover_defaults_follow_the_preset(lib):
     s = service.settings.get()
     assert (s.embed_cover_art, s.replace_cover_art, s.cover_source, s.cover_max_bytes) == (
@@ -62,7 +60,6 @@ def test_settings_cover_defaults_follow_the_preset(lib):
     assert service.coverart.preset_defaults("archivist").replace_cover_art is False
 
 
-@xfail
 def test_folder_art_is_previewed_embedded_and_undone(lib):
     art = jpeg(600, 600, tag=b"folder")
     d = accepted_double(lib, art)
@@ -83,7 +80,6 @@ def test_folder_art_is_previewed_embedded_and_undone(lib):
     assert all(front(t) is None for t in sorted(lib.double.rglob("*.flac")))
 
 
-@xfail
 def test_keep_existing_art_unless_replace(lib):
     from music_manager.coverart import embed_front, sniff
 
@@ -106,7 +102,6 @@ def test_keep_existing_art_unless_replace(lib):
     assert front(first).data == old  # undo put the original art back
 
 
-@xfail
 def test_embed_off_changes_no_art(lib):
     d = accepted_double(lib, png())
     service.settings.set(embed_cover_art=False)
@@ -114,7 +109,6 @@ def test_embed_off_changes_no_art(lib):
     assert plan.albums[0].cover is None and cover_changes(plan) == []
 
 
-@xfail
 def test_discogs_art_is_downloaded_by_a_job_then_previewed(lib):
     art = png(300, 300)
     lib.discogs.images[DISCOGS_URL] = art
@@ -142,7 +136,6 @@ def test_discogs_art_is_downloaded_by_a_job_then_previewed(lib):
     assert len([c for c in lib.discogs.calls if c[0] == "image"]) == before + 1
 
 
-@xfail
 def test_preview_reports_pending_download_and_existing_art(lib):
     lib.discogs.images[DISCOGS_URL] = png()
     d = accepted_double(lib, None)
@@ -151,7 +144,6 @@ def test_preview_reports_pending_download_and_existing_art(lib):
     assert (pv.files_to_embed, pv.files_keeping) == (0, 0)
 
 
-@xfail
 def test_oversized_art_is_not_embedded(lib):
     d = accepted_double(lib, png(50, 50))
     service.settings.set(cover_max_bytes=10)
@@ -160,7 +152,6 @@ def test_oversized_art_is_not_embedded(lib):
     assert any("larger than" in w for w in plan.warnings)
 
 
-@xfail
 def test_invalid_folder_art_is_ignored_with_a_warning(lib):
     d = accepted_double(lib, b"not an image")
     plan = service.plan.build([d])

@@ -5,15 +5,17 @@ from __future__ import annotations
 import os
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from .. import coverart as cover_engine
 from ..apply import AlbumApplyError, execute_layout
 from ..fs import collect_albums, file_sha256
 from ..journal import Journal
 from ..playlists import playlist_path
 from ..tags.write import preview_tags
-from ._common import is_loose_tracks, now_utc, set_status
+from . import coverart
+from ._common import album_record, cluster_guess, is_loose_tracks, now_utc, set_status
 from ._ops import journal_dir, record_operation
 from ._planning import (
     AlbumTarget,
@@ -26,6 +28,7 @@ from ._releases import _primary_image, fetch_release, provider_call, release_is_
 from ._state import State, events, state
 from ._types import (
     AlbumPlan,
+    CoverDefaults,
     FileChange,
     Job,
     JobKind,
@@ -50,6 +53,7 @@ class _AlbumRecord:
     plan: AlbumPlan
     fingerprint: dict[str, tuple]
     cover_url: str | None = None
+    embed: cover_engine.EmbedCover | None = None  # front cover embedded with the tags
 
 
 @dataclass
@@ -74,8 +78,8 @@ def _stat(path: Path) -> tuple:
     return ("file", st.st_size, st.st_mtime_ns)
 
 
-def _fingerprint(t: AlbumTarget) -> dict[str, tuple]:
-    paths: list[Path] = [t.album.path, t.target]
+def _fingerprint(t: AlbumTarget, extra: list[Path] = ()) -> dict[str, tuple]:
+    paths: list[Path] = [t.album.path, t.target, *extra]
     layout = t.layout
     if layout is not None:
         for item in [*layout.tracks, *layout.moves]:
@@ -142,6 +146,29 @@ def _file_changes(t: AlbumTarget, clear_other: bool, warnings: list[str]) -> lis
     for old in layout.old_playlists:
         changes.append(FileChange("playlist", old, playlist_path(layout.target_dir), []))
     return changes
+
+
+def _with_cover(changes: list[FileChange], image, opts: CoverDefaults, warnings: list[str]) -> list[FileChange]:
+    """Add a "cover_art" TagChange to every track that plan.apply would give the front cover."""
+    out = []
+    for change in changes:
+        if change.kind == "track" and not change.skip_reason:
+            try:
+                diff = cover_engine.preview_embed(change.path_before, image, opts.replace_cover_art)
+            except Exception as exc:  # noqa: BLE001 - unreadable file: the apply will report it
+                diff = None
+                warnings.append(f"cannot read the cover art of {change.path_before}: {exc}")
+            if diff is not None:
+                change = replace(change, tags=[*change.tags, TagChange("cover_art", *diff)])
+        out.append(change)
+    return out
+
+
+def _cover_for(st: State, t: AlbumTarget, opts: CoverDefaults, warnings: list[str]) -> coverart.Choice:
+    folder_ok = not cluster_guess(album_record(t.album_id, st)) and not is_loose_tracks(t.album)
+    choice = coverart.choose(st, t.album.path, t.release, opts, folder_ok=folder_ok)
+    warnings += choice.warnings
+    return choice
 
 
 FETCH_RETRY_AFTER_S = 120.0  # a release that failed to download is not retried by plan.build for this long
@@ -251,6 +278,8 @@ def build(album_ids: list[int], template: str | None = None,
     plans: dict[int, AlbumPlan] = {}
     files_to_move = tags_to_write = bytes_to_copy = skipped = steps = 0
     covers = 0
+    opts = coverart.options(st)
+    cover_wanted: list[tuple[int, str]] = []
     for t in pending.values():
         failed = st.fetch_failures.get((t.album_id, t.release_id))
         if failed is not None and fetch_job is None:
@@ -264,6 +293,14 @@ def build(album_ids: list[int], template: str | None = None,
         problems = [p for p in t.problems if not (p.kind is ProblemKind.TRACK_MISMATCH and t.album_id in allowed)]
         problems += cross.get(t.album_id, [])
         changes = _file_changes(t, cfg.clear_other_tags, warnings)
+        choice = _cover_for(st, t, opts, warnings)
+        if choice.pending_url and not problems:  # held albums download nothing
+            cover_wanted.append((t.album_id, choice.pending_url))
+        embed = None
+        if choice.image is not None:
+            changes = _with_cover(changes, choice.image, opts, warnings)
+            if any(tc.key == "cover_art" for c in changes for tc in c.tags):
+                embed = cover_engine.EmbedCover(choice.image, opts.replace_cover_art)
         dest_dev = _device(t.target)
         for change in changes:
             if change.skip_reason:
@@ -288,9 +325,11 @@ def build(album_ids: list[int], template: str | None = None,
             if url and not has_cover:
                 cover_url = url
                 covers += 1
-        ap = AlbumPlan(t.album_id, t.release_id, t.album.path, t.target, changes, problems, *_names(t))
+        ap = AlbumPlan(t.album_id, t.release_id, t.album.path, t.target, changes, problems, *_names(t),
+                       cover=choice.art if embed is not None else None)
         plans[t.album_id] = ap
-        records.append(_AlbumRecord(t, ap, _fingerprint(t), cover_url))
+        art_path = [choice.art.path] if embed is not None and choice.art.path else []
+        records.append(_AlbumRecord(t, ap, _fingerprint(t, art_path), cover_url, embed))
     if pending:
         if fetch_job is not None:
             warnings.append(f"{len(pending)} release(s) are being fetched from Discogs (job {fetch_job}): "
@@ -302,8 +341,12 @@ def build(album_ids: list[int], template: str | None = None,
         warnings.append(f"{refused} album(s) have problems and will be refused (held) by apply")
     if covers:
         warnings.append(f"{COVER_NAME} will be saved from Discogs for {covers} album(s)")
+    cover_job = coverart.fetch_job(st, cover_wanted) if cover_wanted else None
+    if cover_wanted:
+        warnings.append(f"the Discogs cover of {len(cover_wanted)} album(s) is not downloaded yet"
+                        + (f" (job {cover_job}): build the plan again to embed it" if cover_job else ""))
     plan = Plan(st.next_id(), [plans[aid] for aid in ids if aid in plans], warnings, files_to_move, tags_to_write,
-                bytes_to_copy, skipped, fetch_job)
+                bytes_to_copy, skipped, fetch_job, cover_job)
     with st.lock:
         st.plans[plan.id] = _PlanRecord(plan, records, cfg.clear_other_tags, steps=steps,
                                         not_fetched=[plans[aid] for aid in pending])
@@ -317,7 +360,7 @@ def _save_cover(st: State, journal: Journal | None, target: Path, url: str, note
     if journal is None or os.path.lexists(dest):
         return
     try:
-        data = provider_call(st.client().image, url)
+        data = coverart.cached_image(st, url) or provider_call(st.client().image, url)
     except MMError as exc:
         notes.append(f"cover art not saved for {target.name}: {exc}")
         return
@@ -440,7 +483,8 @@ def apply(plan_id: int) -> Job:
                         t.layout, dry_run=False, clear_other=rec.clear_other, scan_root=t.root, journal=journal,
                         log=lambda _line: None, on_file=step,
                         after_moves=(lambda j, t=t, url=r.cover_url: _save_cover(st, j, t.target, url, notes))
-                        if r.cover_url else None)
+                        if r.cover_url else None,
+                        cover=r.embed)
                 except AlbumApplyError as exc:
                     failed.append((r, str(exc)))
                     events.album_changed.emit(ap.album_id)

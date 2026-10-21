@@ -15,6 +15,7 @@ from .conflicts import (
     describe_disc_conflict,
     describe_folder_mismatch,
 )
+from .coverart import EmbedCover
 from .fs import DISC_DIR, AlbumFolder, file_sha256
 from .journal import Journal
 from .match import (
@@ -510,13 +511,16 @@ def execute_layout(
     log: Callable[[str], None] = print,
     on_file: Callable[[Path], None] | None = None,
     after_moves: Callable[[Journal | None], None] | None = None,
+    cover: EmbedCover | None = None,
 ) -> list[tuple[Path, Path]]:
     """Carry out a layout: tag every file in place, then move everything, then playlists and cleanup.
 
     Without a journal, a real run opens (and closes) its own. A shared
     journal gets this album's "start" entry and is left open. on_file is
     called after each file is tagged and after each move; after_moves runs
-    once everything moved (before playlists and pruning).
+    once everything moved (before playlists and pruning). cover: embed this
+    front cover into every track with its tags (the journal's tag snapshot
+    covers it, so undo restores the original art or its absence).
     """
     album, dest_root, target_dir = layout.album, layout.dest_root, layout.target_dir
     plan = layout.tracks
@@ -547,7 +551,7 @@ def execute_layout(
             try:
                 if journal is not None:
                     journal.write(action="tags", phase="before", path=str(item.source), snapshot=capture_tags(item.source))
-                removed = write_tags(item.source, item.meta, clear_other=clear_other, dry_run=dry_run)
+                removed = write_tags(item.source, item.meta, clear_other=clear_other, dry_run=dry_run, cover=cover)
             except Exception as exc:  # noqa: BLE001 - any failure must stop this album only
                 msg = f"tagging failed for {item.source}: {type(exc).__name__}: {exc}\n  nothing was moved"
                 if tagged and not dry_run:

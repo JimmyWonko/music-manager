@@ -85,10 +85,10 @@ def test_types_are_frozen_with_the_contract_fields_and_defaults():
                                       "loose_files", "folder_mismatches", "pin_conflicts"]  # each one appended
     assert names(service.PinConflict) == ["path", "position", "reason"]
     assert names(service.Plan) == ["id", "albums", "warnings", "files_to_move", "tags_to_write", "bytes_to_copy",
-                                   "skipped", "fetch_job"]  # fetch_job: additive, defaults to None
+                                   "skipped", "fetch_job", "cover_job"]  # fetch_job, cover_job: additive, None
     assert dataclasses.fields(service.Plan)[-1].default is None
     assert names(service.AlbumPlan) == ["album_id", "release_id", "folder_before", "folder_after", "files", "problems",
-                                        "artist", "title"]  # artist, title: additive, default ""
+                                        "artist", "title", "cover"]  # additive: "", "", None
     assert names(service.FileChange) == ["kind", "path_before", "path_after", "tags", "skip_reason",
                                           "pinned"]  # pinned: additive, default False
     assert names(service.Candidate)[-1] == "auto_score"  # additive, default None
