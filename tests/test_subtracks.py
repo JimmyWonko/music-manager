@@ -13,6 +13,7 @@ from music_manager import service
 from music_manager.fs import AlbumFolder
 from music_manager.match import collapse_subtracks
 from music_manager.providers.discogs import flatten_tracklist, subtrack_groups
+from music_manager.service import JobState
 
 PRINE = 4054414
 TIMED = 4054415  # the same tracklist with durations that fit the one file
@@ -285,3 +286,75 @@ def test_track_pair_positions_is_appended_last():
     import dataclasses
 
     assert [f.name for f in dataclasses.fields(service.TrackPair)][-1] == "positions"
+
+
+# --- merge_subtracks setting and per-album splits ----------------------------------------------------------------
+
+SPLIT_TODO = pytest.mark.xfail(strict=True, reason="merge_subtracks / split_subtracks: not implemented yet")
+
+
+@SPLIT_TODO
+def test_merge_subtracks_setting_defaults_on_and_switches_auto_merging_off(lib):
+    aid = lib.prine_id
+    assert service.settings.get().merge_subtracks is True
+    assert service.settings.set(merge_subtracks=False).merge_subtracks is False
+    view = service.match.view(aid, TIMED)
+    [group] = view.subtrack_groups
+    assert (group.merged, group.reason) == (False, "merge_off")
+    assert "disc_track_count" in [p.kind for p in view.problems]
+    # a group pin still merges: it is the user's explicit pairing
+    service.match.pin(aid, _file(lib, "2-09"), positions=["2-9a", "2-9b"], release_id=TIMED)
+    [group] = service.match.view(aid, TIMED).subtrack_groups
+    assert (group.merged, group.reason) == (True, "pinned")
+    with pytest.raises(service.ValidationError):
+        service.settings.set(merge_subtracks="no")
+    assert service.settings.set(merge_subtracks=True).merge_subtracks is True
+
+
+@SPLIT_TODO
+def test_split_subtracks_undoes_an_automatic_merge_and_is_reversible(lib):
+    from service_fixtures import direct
+
+    aid = lib.prine_id
+    service.match.choose(aid, TIMED)
+    seen = []
+    direct(service.events.match_view_changed, seen.append)
+    service.match.split_subtracks(aid, "2-9")
+    assert seen == [aid]
+    view = service.match.view(aid)
+    [group] = view.subtrack_groups
+    assert (group.merged, group.reason, group.path) == (False, "split", None)
+    assert [p.remote.position for p in view.pairs if p.remote and p.remote.position.startswith("2-9")] == [
+        "2-9a", "2-9b"]
+    assert not any(p.method == "subtracks" for p in view.pairs)
+    assert "disc_track_count" in [p.kind for p in service.plan.build([aid]).albums[0].problems]
+    assert service.match.subtrack_splits(aid) == ["2-9"]
+    # survives a rebuild of the index rows (a rescan)
+    assert service.jobs.wait(service.library.scan().id).state is JobState.DONE
+    assert service.match.view(aid).subtrack_groups[0].reason == "split"
+    service.match.unsplit_subtracks(aid, "2-9")
+    assert seen[-1] == aid and service.match.subtrack_splits(aid) == []
+    [group] = service.match.view(aid).subtrack_groups
+    assert (group.merged, group.reason) == (True, "durations_fit")
+    assert service.plan.build([aid]).albums[0].problems == []
+
+
+@SPLIT_TODO
+def test_split_subtracks_validation(lib):
+    aid = lib.prine_id
+    with pytest.raises(service.ValidationError):
+        service.match.split_subtracks(aid, "  ")
+    with pytest.raises(service.NotFound):
+        service.match.split_subtracks(999999, "2-9")
+    service.match.split_subtracks(aid, "2-9", release_id=TIMED)
+    service.match.split_subtracks(aid, "2-9", release_id=TIMED)  # idempotent
+    assert service.match.subtrack_splits(aid) == ["2-9"]
+    service.match.unsplit_subtracks(aid)  # every split of the album
+    assert service.match.subtrack_splits(aid) == []
+
+
+@SPLIT_TODO
+def test_settings_field_appended_last():
+    import dataclasses
+
+    assert [f.name for f in dataclasses.fields(service.Settings)][-1] == "merge_subtracks"
