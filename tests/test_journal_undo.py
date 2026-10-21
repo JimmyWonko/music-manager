@@ -70,7 +70,8 @@ def test_untagged_file_restored_to_untagged(sample, meta, ext):
     path = sample(ext)
     restore_tags(path, {"kind": "none"})
     snapshot = capture_tags(path)
-    assert snapshot == {"kind": "none"}
+    # FLAC also records its (absent) pictures, so undo can remove embedded cover art
+    assert snapshot == ({"kind": "none", "flac_pictures": []} if ext == "flac" else {"kind": "none"})
     write_tags(path, meta)
     restore_tags(path, snapshot)
     assert tag_dump(path) in ("", "\n") or "Söng" not in tag_dump(path)

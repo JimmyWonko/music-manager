@@ -13,6 +13,7 @@ import tempfile
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 
 def config_dir() -> Path:
@@ -37,8 +38,14 @@ class Config:
     save_cover_art: bool = True
     clear_other_tags: bool = False
     templates: dict[str, tuple[str, str]] = field(default_factory=dict)  # id -> (name, text), user templates
+    # Cover art embedding; None = the active template's preset default (service.coverart.preset_defaults).
+    embed_cover_art: bool | None = None
+    replace_cover_art: bool | None = None
+    cover_source: str | None = None
+    cover_max_bytes: int | None = None
 
     BOOLS = ("sequential_sides", "save_cover_art", "clear_other_tags")
+    OPTIONAL: ClassVar[dict[str, type]] = {"embed_cover_art": bool, "replace_cover_art": bool, "cover_source": str, "cover_max_bytes": int}
 
 
 def load_config(path: Path) -> Config:
@@ -60,6 +67,12 @@ def load_config(path: Path) -> Config:
             if not isinstance(data[name], bool):
                 raise ConfigFileError(f"{path}: {name} must be true or false")
             setattr(cfg, name, data[name])
+    for name, kind in Config.OPTIONAL.items():
+        if name in data:
+            value = data[name]
+            if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+                raise ConfigFileError(f"{path}: {name} must be a {kind.__name__}")
+            setattr(cfg, name, value)
     for tid, entry in (data.get("templates") or {}).items():
         if isinstance(entry, dict) and isinstance(entry.get("name"), str) and isinstance(entry.get("text"), str):
             cfg.templates[tid] = (entry["name"], entry["text"])
@@ -78,6 +91,14 @@ def dump_config(cfg: Config) -> str:
     ]
     for name in Config.BOOLS:
         lines.append(f"{name} = {'true' if getattr(cfg, name) else 'false'}")
+    for name in Config.OPTIONAL:
+        value = getattr(cfg, name)
+        if isinstance(value, bool):
+            lines.append(f"{name} = {'true' if value else 'false'}")
+        elif isinstance(value, int):
+            lines.append(f"{name} = {value}")
+        elif isinstance(value, str):
+            lines.append(f"{name} = {_q(value)}")
     for tid, (name, text) in cfg.templates.items():
         lines += ["", f"[templates.{_q(tid)}]", f"name = {_q(name)}", f"text = {_q(text)}"]
     return "\n".join(lines) + "\n"

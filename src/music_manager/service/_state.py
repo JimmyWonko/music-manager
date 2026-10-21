@@ -33,6 +33,7 @@ class State:
     # plan.build's background release fetches: (album id, release id) -> job id, and recent failures
     fetching: dict[tuple[int, int], int] = field(default_factory=dict)
     fetch_failures: dict[tuple[int, int], tuple[float, str]] = field(default_factory=dict)
+    cover_fetching: dict[str, int] = field(default_factory=dict)  # Discogs cover URL -> FETCH_COVER job id
     clusters: dict[str, Any] = field(default_factory=dict)  # cluster id -> Cluster (last library.clusters)
     cluster_keys: dict[str, str] = field(default_factory=dict)  # cluster id -> FileCluster.key
     lock: threading.RLock = field(default_factory=threading.RLock)

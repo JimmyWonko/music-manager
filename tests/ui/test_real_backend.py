@@ -343,7 +343,8 @@ def test_real_plan_build_never_fetches_and_reuses_fetch_job(real, monkeypatch):
     svc = real["svc"]; _needs_fetch_job(svc)
     T = svc.types
     assert T.ProblemKind.RELEASE_NOT_FETCHED.value == "release_not_fetched"
-    assert [f.name for f in dataclasses.fields(T.Plan)][-1] == "fetch_job"
+    names = [f.name for f in dataclasses.fields(T.Plan)]
+    assert names[7] == "fetch_job" and names[8:] in ([], ["cover_job"])  # cover_job: appended (cover art)
     aid = real["ids"]["Test Album"].id
     svc.match.choose(aid, 501)
     assert svc.plan.build([aid]).fetch_job is None                 # stored by match.find: nothing to fetch

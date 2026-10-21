@@ -56,6 +56,7 @@ class JobKind(Enum):
     APPLY = "apply"
     UNDO = "undo"
     CLUSTER = "cluster"  # library.scan_clusters
+    FETCH_COVER = "fetch_cover"  # coverart.fetch / Plan.cover_job: Discogs front covers into the image cache
 
 
 class JobState(Enum):
@@ -381,6 +382,43 @@ class FileChange:
     pinned: bool = False  # a track paired by the user (match.pin)
 
 
+CoverSource = Literal["folder_first", "discogs_first", "folder", "discogs"]
+COVER_SOURCES = ("folder_first", "discogs_first", "folder", "discogs")
+
+
+@dataclass(frozen=True)
+class CoverArt:
+    """A front cover image: what plan.apply would embed, or what a track has embedded."""
+    source: Literal["folder", "discogs", "embedded"]
+    mime: str  # "image/jpeg" or "image/png" (embedded art may be anything)
+    width: int  # pixels; 0 when unknown
+    height: int
+    size: int  # bytes
+    path: Path | None  # folder art: the image file; embedded: the track it came from
+    url: str | None  # Discogs: the image URL
+    data: bytes = field(default=b"", repr=False)  # the image itself, for the preview
+
+
+@dataclass(frozen=True)
+class CoverPreview:
+    """coverart.preview: the album's cover art as plan.build would handle it now."""
+    album_id: int
+    cover: CoverArt | None  # what would be embedded (None: nothing to embed, see message)
+    existing: CoverArt | None  # the first track's embedded front cover, if any
+    files_to_embed: int  # tracks that would get cover
+    files_keeping: int  # tracks that keep their own front cover (replace_cover_art False or same image)
+    pending_url: str | None  # a Discogs cover that is not downloaded yet (coverart.fetch)
+    message: str  # why there is no cover, or ""
+
+
+@dataclass(frozen=True)
+class CoverDefaults:
+    embed_cover_art: bool = False  # opt-in: saving folder.jpg (save_cover_art) is the norm
+    replace_cover_art: bool = False  # False: tracks with front art keep it
+    cover_source: CoverSource = "folder_first"
+    cover_max_bytes: int = 0  # 0: no limit; larger images are not embedded (never resized)
+
+
 @dataclass(frozen=True)
 class AlbumPlan:
     album_id: int
@@ -392,6 +430,7 @@ class AlbumPlan:
     artist: str = ""  # the release's artist and title ("" when unknown, e.g. an old journal);
     # for loose tracks (AlbumRow.loose_tracks) the folder's name and ""
     title: str = ""
+    cover: CoverArt | None = None  # front cover plan.apply embeds (FileChange.tags has "cover_art" per file)
 
 
 @dataclass(frozen=True)
@@ -404,6 +443,7 @@ class Plan:
     bytes_to_copy: int  # copies only for cross-drive
     skipped: int = 0  # steps with FileChange.skip_reason set; counted nowhere else
     fetch_job: int | None = None  # job fetching releases this plan lacks; rebuild when it finishes
+    cover_job: int | None = None  # job downloading Discogs covers this plan lacks (JobKind.FETCH_COVER)
 
 
 @dataclass(frozen=True)
@@ -451,5 +491,11 @@ class Settings:
     library_roots: list[Path]
     active_template: str
     sequential_sides: bool = False
-    save_cover_art: bool = True
+    save_cover_art: bool = True  # save folder.jpg from Discogs when the album folder has no cover/folder/front image
     clear_other_tags: bool = False
+    # cover art embedding: effective values (the user's, else the active template's preset default);
+    # settings.set(name=None) goes back to the preset default
+    embed_cover_art: bool = False  # opt-in
+    replace_cover_art: bool = False
+    cover_source: CoverSource = "folder_first"
+    cover_max_bytes: int = 0

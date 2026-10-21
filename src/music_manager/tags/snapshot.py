@@ -36,6 +36,7 @@ class TagSnapshot(TypedDict, total=False):
     pairs: list[list[Any]]
     vendor: str
     data: str
+    flac_pictures: list[str]  # FLAC only: every PICTURE block (base64); absent in journals before cover art
 
 
 def _tag_container(path: Path):
@@ -163,8 +164,19 @@ def capture_tags(path: Path) -> TagSnapshot:
     raw bytes (re-parsed by mutagen on restore) and its version (2.3/2.4);
     other formats keep their key/value pairs with typed values, binary data
     (cover art, MP4 free-form atoms, APE/ASF binary fields) base64-encoded.
-    Audio data is never copied.
+    Audio data is never copied. FLAC also keeps its PICTURE blocks
+    ("flac_pictures"), which live outside the Vorbis comment.
     """
+    snap = _capture(path)
+    from ..coverart import capture_flac_pictures
+
+    pictures = capture_flac_pictures(path)
+    if pictures is not None:
+        snap["flac_pictures"] = pictures
+    return snap
+
+
+def _capture(path: Path) -> TagSnapshot:
     _audio, tags = _tag_container(path)
     if tags is None:
         return {"kind": "none"}
@@ -226,6 +238,25 @@ def _restore_tags_file(path: Path, snapshot: TagSnapshot, payload: list) -> None
 
 def _prepare_restore(path: Path, snapshot: TagSnapshot, payload: list):
     """Load path and put the snapshot's tags in place in memory: (tag container getter, save)."""
+    get_tags, save, audio = _prepare_restore_tags(path, snapshot, payload)
+    pictures = snapshot.get("flac_pictures")
+    if pictures is None or audio is None or not hasattr(audio, "clear_pictures"):
+        return get_tags, save
+    from ..coverart import flac_pictures
+
+    decoded = flac_pictures(pictures)  # validated before the file is touched
+
+    def save_with_pictures():
+        save()
+        audio.clear_pictures()
+        for pic in decoded:
+            audio.add_picture(pic)
+        audio.save()
+
+    return get_tags, save_with_pictures
+
+
+def _prepare_restore_tags(path: Path, snapshot: TagSnapshot, payload: list):
     kind = snapshot.get("kind")
     if path.suffix.lower() == ".mp3":
         if kind == "none":
@@ -234,12 +265,12 @@ def _prepare_restore(path: Path, snapshot: TagSnapshot, payload: list):
                     ID3(path).delete(path)
                 except ID3NoHeaderError:
                     pass
-            return (lambda: None), delete_id3
+            return (lambda: None), delete_id3, None
         tags = ID3()
         for frame in payload:
             tags.add(frame)
         version = (snapshot.get("version") or [2, 4, 0])[1]
-        return (lambda: tags), (lambda: tags.save(path, v2_version=3 if version == 3 else 4))
+        return (lambda: tags), (lambda: tags.save(path, v2_version=3 if version == 3 else 4)), None
     audio = MutagenFile(path)
     if audio is None:
         raise OSError(f"unrecognised audio file: {path}")
@@ -247,7 +278,7 @@ def _prepare_restore(path: Path, snapshot: TagSnapshot, payload: list):
         def delete_tags():
             if audio.tags is not None:
                 audio.delete()
-        return (lambda: None), delete_tags
+        return (lambda: None), delete_tags, audio
     if audio.tags is None:
         audio.add_tags()
     if kind == "id3":
@@ -255,18 +286,18 @@ def _prepare_restore(path: Path, snapshot: TagSnapshot, payload: list):
         for frame in payload:
             audio.tags.add(frame)
         version = (snapshot.get("version") or [2, 4, 0])[1]
-        return (lambda: audio.tags), (lambda: audio.save(v2_version=3 if version == 3 else 4))
+        return (lambda: audio.tags), (lambda: audio.save(v2_version=3 if version == 3 else 4)), audio
     if kind == "list" and isinstance(audio.tags, list):
         list.__delitem__(audio.tags, slice(None))
         list.extend(audio.tags, payload)
         if "vendor" in snapshot and hasattr(audio.tags, "vendor"):
             audio.tags.vendor = snapshot["vendor"]
-        return (lambda: audio.tags), audio.save
+        return (lambda: audio.tags), audio.save, audio
     for key in list(audio.tags.keys()):
         del audio.tags[key]
     for key, value in payload:
         audio.tags[key] = value
-    return (lambda: audio.tags), audio.save
+    return (lambda: audio.tags), audio.save, audio
 
 
 def preview_restore(path: Path, snapshot: TagSnapshot, trust_legacy: bool = False
@@ -281,8 +312,28 @@ def preview_restore(path: Path, snapshot: TagSnapshot, trust_legacy: bool = Fals
     before = tag_text_map(_tag_container(path)[1])
     get_tags, _save = _prepare_restore(path, snapshot, payload)
     after = tag_text_map(get_tags())
-    return [(k, before.get(k), after.get(k)) for k in list(before) + [k for k in after if k not in before]
-            if before.get(k) != after.get(k)]
+    changes = [(k, before.get(k), after.get(k)) for k in list(before) + [k for k in after if k not in before]
+               if before.get(k) != after.get(k)]
+    art = _cover_change(path, snapshot)
+    if art is not None:
+        changes.append(art)
+    return changes
+
+
+def _cover_change(path: Path, snapshot: TagSnapshot) -> tuple[str, str | None, str | None] | None:
+    """("cover_art", now, after restore) when the restore changes the embedded front cover."""
+    from ..coverart import embedded_front, snapshot_front
+
+    if path.suffix.lower() == ".flac" and "flac_pictures" not in snapshot:
+        return None  # an older journal: FLAC pictures are not restored
+    try:
+        now = embedded_front(path)
+    except Exception:  # noqa: BLE001 - an unreadable file shows no art change
+        return None
+    then = snapshot_front(snapshot)
+    if (now.data if now else None) == (then.data if then else None):
+        return None
+    return "cover_art", now.describe() if now else None, then.describe() if then else None
 
 
 def snapshot_text_map(snapshot: TagSnapshot) -> dict[str, str]:
