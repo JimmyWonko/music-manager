@@ -355,10 +355,6 @@ def test_settings_field_appended_last():
 
 # --- review fixes (Pixel, a04475f) -------------------------------------------------------------------------------
 
-REVIEW_TODO = pytest.mark.xfail(strict=True, reason="review fixes: not implemented yet")
-
-
-@REVIEW_TODO
 @pytest.mark.parametrize("base", ["2-99", "2-10", "9"])
 def test_split_rejects_a_base_that_is_not_a_subtrack_group(lib, base):
     with pytest.raises(service.ValidationError) as err:
@@ -367,13 +363,12 @@ def test_split_rejects_a_base_that_is_not_a_subtrack_group(lib, base):
     assert service.match.subtrack_splits(lib.prine_id) == []
 
 
-@REVIEW_TODO
 def test_split_rejects_a_release_that_is_not_a_candidate(lib):
     with pytest.raises(service.NotFound):
         service.match.split_subtracks(lib.prine_id, "2-9", release_id=123456789)
 
 
-@pytest.mark.parametrize("call", ["split", pytest.param("unsplit", marks=REVIEW_TODO)])
+@pytest.mark.parametrize("call", ["split", "unsplit"])
 @pytest.mark.parametrize("base", ["", "   "])
 def test_split_and_unsplit_reject_an_empty_base_alike(lib, call, base):
     fn = service.match.split_subtracks if call == "split" else service.match.unsplit_subtracks
@@ -390,7 +385,6 @@ def test_split_and_unsplit_trim_the_base(lib):
     assert service.match.subtrack_splits(aid) == []
 
 
-@REVIEW_TODO
 def test_split_base_is_case_insensitive_for_letter_bases(lib):
     # a base with letters ("Disc2-9A"-like spellings) matches whatever the case, and is stored as Discogs spells it
     from music_manager.service._state import state
@@ -414,7 +408,6 @@ def test_split_base_is_case_insensitive_for_letter_bases(lib):
     assert service.match.subtrack_splits(lib.prine_id) == []
 
 
-@REVIEW_TODO
 def test_changing_merge_subtracks_emits_match_view_changed_per_affected_album(lib):
     from service_fixtures import direct
 

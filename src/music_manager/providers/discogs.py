@@ -457,7 +457,8 @@ def _track_artist(item: DiscogsTrackJSON, fallback: str) -> str:
     )
 
 
-SUBPOS = re.compile(r"^((?:\d+-)?\d+)(?:([a-z])|\.(\d+))$", re.IGNORECASE)  # 9a / 2-9a / 9.1 / 2-9.1
+# 9a / 2-9a / 9.1 / 2-9.1 / CD2-9a (the disc prefixes parse_position accepts)
+SUBPOS = re.compile(r"^((?:(?:cd|dvd|disc|disk)\s*)?(?:\d+-)?\d+)(?:([a-z])|\.(\d+))$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)

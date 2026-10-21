@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from ..match import AUTO_MIN_MARGIN, AUTO_MIN_SCORE, TITLE_MATCH_MIN, score_result
-from ..providers.discogs import rank_by_year
+from ..providers.discogs import rank_by_year, subtrack_groups
 from ..tags.read import normalize_barcode
 from ._common import (
     album_record,
@@ -440,30 +440,49 @@ def split_subtracks(album_id: int, base_position: str, release_id: int | None = 
     """Undo an automatic subtrack merge for one group: its subtracks ("2-9a", "2-9b") stay separate release
     tracks for this album and release (MatchView.subtrack_groups reason "split"). Stored in the index next to
     the pins, so it survives rescans; idempotent; unsplit_subtracks reverses it. A group pin still merges.
+    base_position must name one of the release's subtrack groups, case-insensitively and trimmed (stored as
+    the release spells it); else ValidationError (field "base_position"), also for an empty base or a
+    release that is not fetched yet. NotFound: the album, or a release_id that is not its candidate.
     release_id None: the chosen release, else the best candidate. Emits match_view_changed(album_id).
     """
     st = state()
     album_record(album_id, st)
-    base = str(base_position or "").strip()
-    if not base:
-        raise ValidationError("base_position is empty", field="base_position")
+    want = _split_base(base_position)
     rid = int(release_id) if release_id is not None else chosen_release_id(album_id, st)
     if rid is None:
         raise MMError(f"album {album_id} has no candidates: run match.find first")
+    row = candidate_row(album_id, rid, st)  # NotFound: not a candidate
+    if not row["release"]:
+        raise ValidationError(f"release {rid} is not fetched yet: its subtrack groups are unknown",
+                              field="base_position")
+    groups = subtrack_groups(json.loads(row["release"]))
+    base = next((g.base for g in groups if g.base.casefold() == want.casefold()), None)
+    if base is None:
+        known = ", ".join(g.base for g in groups) or "none"
+        raise ValidationError(f"release {rid} has no subtrack group {want!r} (groups: {known})",
+                              field="base_position")
     with st.index.tx() as conn:
         conn.execute("INSERT OR IGNORE INTO subtrack_splits(album_id, release_id, base) VALUES(?, ?, ?)",
                      (album_id, rid, base))
     events.match_view_changed.emit(album_id)
 
 
+def _split_base(base_position) -> str:
+    base = str(base_position if base_position is not None else "").strip()
+    if not base:
+        raise ValidationError("base_position is empty", field="base_position")
+    return base
+
+
 def unsplit_subtracks(album_id: int, base_position: str | None = None, release_id: int | None = None) -> None:
-    """Reverse split_subtracks: one group (base_position) or every split of the album (None), for one release
-    (release_id) or all of them (None). Emits match_view_changed(album_id)."""
+    """Reverse split_subtracks: one group (base_position, matched case-insensitively) or every split of the
+    album (None), for one release (release_id) or all of them (None). An empty base_position is a
+    ValidationError, as in split_subtracks. Emits match_view_changed(album_id)."""
     st = state()
     album_record(album_id, st)
     sql, args = "DELETE FROM subtrack_splits WHERE album_id = ?", [album_id]
     if base_position is not None:
-        sql, args = sql + " AND base = ?", [*args, str(base_position).strip()]
+        sql, args = sql + " AND lower(base) = lower(?)", [*args, _split_base(base_position)]
     if release_id is not None:
         sql, args = sql + " AND release_id = ?", [*args, int(release_id)]
     with st.index.tx() as conn:
