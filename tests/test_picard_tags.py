@@ -498,3 +498,70 @@ def test_style_settings_are_appended_and_reach_the_plan(tmp_path):
         assert "Southern Rock" in str(on["style"]) and "Southern Rock" in str(on["genre"])
     finally:
         service.reset()
+
+
+# --- follow-ups: TagChange.migration, UnwrittenField.folder (2026-10-21) ---------------------------------------------
+
+FOLLOWUP = pytest.mark.xfail(strict=True, reason="TagChange.migration / UnwrittenField.folder not built yet")
+
+
+@FOLLOWUP
+def test_preview_marks_only_migration_changes(sample):
+    from mutagen.flac import FLAC
+
+    from music_manager.tags.write import preview_tag_changes
+
+    f = sample("flac")
+    audio = FLAC(f)
+    audio["YEAR"] = "1990"
+    audio["TOTALTRACKS"] = "12"
+    audio.save()
+    by = {c.key: c for c in preview_tag_changes(f, full_meta(migrate_legacy_keys=True))}
+    assert by["year"].migration is True and by["year"].after is None
+    assert by["tracktotal"].migration is False  # an alias rename: happens with or without the setting
+    assert not any(c.migration for k, c in by.items() if k != "year")
+    plain = preview_tag_changes(f, full_meta())
+    assert not any(c.migration for c in plain)
+    assert next(c for c in plain if c.key == "tracktotal").key_before == "TOTALTRACKS"
+
+
+@FOLLOWUP
+def test_service_types_gain_migration_and_folder_last():
+    import dataclasses
+
+    from music_manager import service
+
+    assert [f.name for f in dataclasses.fields(service.TagChange)][-1] == "migration"
+    assert service.TagChange("k", None, None).migration is False
+    assert [f.name for f in dataclasses.fields(service.UnwrittenField)] == ["field", "reason", "detail", "folder"]
+
+
+@FOLLOWUP
+def test_plan_fills_migration_and_unwritten_folder(tmp_path):
+    from mutagen.flac import FLAC
+    from service_fixtures import Library
+
+    from music_manager import service
+
+    lib = Library(tmp_path)
+    lib.multi["country"] = "UK & Europe"
+    lib.start(tmp_path)
+    try:
+        first = min(lib.double.glob("*.flac"))
+        audio = FLAC(first)
+        audio["YEAR"] = "1990"
+        audio["TOTALTRACKS"] = "2"
+        audio.save()
+        service.jobs.wait(service.library.scan().id)
+        aid = lib.album_id(lib.double)
+        lib.find(aid)
+        service.match.choose(aid, lib.multi["id"])
+        service.settings.set(migrate_tag_keys=True)
+        [ap] = service.plan.build([aid]).albums
+        change = next(c for c in ap.files if c.path_before == first)
+        by = {t.key: t for t in change.tags}
+        assert by["year"].migration is True and by["tracktotal"].migration is False
+        [u] = [u for u in ap.unwritten if u.field == "releasecountry"]
+        assert u.folder == ap.folder_before and isinstance(u.folder, type(ap.folder_before))
+    finally:
+        service.reset()
