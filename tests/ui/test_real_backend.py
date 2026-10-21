@@ -1264,6 +1264,7 @@ def test_real_subtracks_split_errors_and_merge_setting_events(real, qtbot):
 # ---------------------------------------------------------------- Picard tag names (contract 2026-10-21)
 def test_real_picard_renames_unwritten_and_tag_settings(real, qtbot):
     import mutagen
+
     from mm_ui import problems as P
     from mm_ui.review import ApplyDialog
     from mm_ui.tagsettings import TagSettingsDialog
@@ -1318,3 +1319,105 @@ def test_real_picard_renames_unwritten_and_tag_settings(real, qtbot):
     tags = mutagen.File(folder / "01 One.flac")
     assert tags["YEAR"] == ["1984"] and tags["TOTALTRACKS"] == ["2"]    # nothing written before Apply
     assert any(P.is_rename(t) for f in _plan.albums[0].files for t in f.tags)
+
+
+def test_real_tag_batch_latin1_losses_junk_and_settings(real, qtbot):
+    from mm_ui import problems as P
+    from mm_ui.review import DROPPED_TEXT, MOVING_TEXT, ApplyDialog
+    from mm_ui.tagsettings import TagSettingsDialog, hashes_available
+    svc = real["svc"]
+    if not hasattr(svc.settings.get(), "id3_latin1"):
+        pytest.skip("service predates the tag batch (580c9f1)")
+    if not hasattr(svc.settings, "verify_hashes_available"):
+        pytest.skip("service predates the tag batch follow-ups (bfe3fc0)")
+    title, rid = "Latin Batch", 752
+    folder = real["lib"] / "Batch Band" / title
+    for i, t in enumerate(["One", "Two"], 1):
+        tone(folder / f"{i:02d} {t}.wav")
+    (folder / ".DS_Store").write_bytes(b"\0junk")
+    real["discogs"].releases[rid] = release(rid, "Batch Band", title, 1999, f"BAT {rid}", ["Łódź", "東京"])
+    assert svc._c.jobs.wait(svc.library.scan().id).state.name == "DONE"
+    (row,) = [x for x in svc.albums(None, limit=50).items if x.title == title]
+    assert svc._c.jobs.wait(svc.match.find([row.id]).id).state.name == "DONE"
+    svc.match.choose(row.id, rid)
+
+    def build(**kw):
+        plan = svc.plan.build([row.id], **kw)
+        if plan.fetch_job is not None:
+            svc._c.jobs.wait(plan.fetch_job)
+            plan = svc.plan.build([row.id], **kw)
+        return plan
+
+    plan = build()
+    (ap,) = plan.albums
+    assert ap.id3v23_files == 2 and not ap.encoding_losses           # WAV: v2.3; UTF-16 by default
+    assert [p.name for p in ap.junk_moving] == [".DS_Store"]
+    dlg = ApplyDialog(plan); qtbot.addWidget(dlg)
+    assert MOVING_TEXT in dlg.moving_label.text() and dlg.junk_label.isHidden() == (not ap.junk)
+    n = sum(a.id3v23_files for a in plan.albums)
+    d = TagSettingsDialog(svc, v23_files=n); qtbot.addWidget(d)
+    assert d.boxes["id3_latin1"].isEnabled() and not d.boxes["id3v23_mp3"].isChecked()   # WAV makes it apply
+    assert d.xxhash_ok == ("xxhash" in hashes_available(svc)) and d.hash_combo.currentData() == "sha256"
+    d.boxes["id3_latin1"].setChecked(True); d.save()
+    assert svc.settings.get().id3_latin1 is True
+    plan = build()
+    (ap,) = plan.albums
+    sev = {x.value: x.severity for x in ap.encoding_losses}
+    assert sev["東京"] == "dropped" and "Łódź" in sev, ap.encoding_losses
+    assert ap.encoding_dropped >= 1 and ap.encoding_transliterated + ap.encoding_dropped == len(ap.encoding_losses)
+    assert P.ENCODING_DROPPED in [P.kind_of(p) for p in ap.problems]
+    dlg = ApplyDialog(plan); qtbot.addWidget(dlg)
+    assert not dlg.drop_banner.isHidden() and dlg.drop_btn is not None and not dlg.ok_btn.isEnabled()
+    dlg.problem_list.setCurrentRow(0); dlg.confirm_drop = lambda ap: True; dlg.allow_drop()
+    assert dlg.drop_album == row.id
+    plan = build(allow_encoding_drop={row.id})
+    (ap,) = plan.albums
+    assert not ap.problems, ap.problems
+    dlg = ApplyDialog(plan); qtbot.addWidget(dlg)
+    assert dlg.ok_btn.isEnabled() and DROPPED_TEXT in dlg.loss_label.text()
+    assert (folder / ".DS_Store").exists() and (folder / "01 One.wav").exists()   # nothing written before Apply
+    svc.settings.set(id3_latin1=False)
+
+
+def test_real_latin1_transliterated_amber_with_proposed_tooltip(real, qtbot):
+    pytest.importorskip("unidecode", reason="transliteration needs the optional unidecode package")
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor
+
+    from mm_ui.review import TRANSLIT, ApplyDialog
+    svc = real["svc"]
+    if not hasattr(svc.settings, "verify_hashes_available"):
+        pytest.skip("service predates Latin-1 severity (bfe3fc0)")
+    title, rid = "Translit Batch", 753
+    folder = real["lib"] / "Translit Band" / title
+    for i, t in enumerate(["One", "Two"], 1):
+        tone(folder / f"{i:02d} {t}.wav")
+    real["discogs"].releases[rid] = release(rid, "Translit Band", title, 1999, f"TRL {rid}", ["Łódź", "Two"])
+    assert svc._c.jobs.wait(svc.library.scan().id).state.name == "DONE"
+    (row,) = [x for x in svc.albums(None, limit=50).items if x.title == title]
+    assert svc._c.jobs.wait(svc.match.find([row.id]).id).state.name == "DONE"
+    svc.match.choose(row.id, rid)
+    svc.settings.set(id3_latin1=True)
+    try:
+        plan = svc.plan.build([row.id])
+        if plan.fetch_job is not None:
+            svc._c.jobs.wait(plan.fetch_job)
+            plan = svc.plan.build([row.id])
+        (ap,) = plan.albums
+        (x,) = [x for x in ap.encoding_losses if x.value == "Łódź"]
+        assert x.severity == "transliterated" and x.proposed_value == "Lódz", x
+        assert ap.encoding_transliterated >= 1 and ap.encoding_dropped == 0 and not ap.problems
+        d = ApplyDialog(plan); qtbot.addWidget(d)
+        assert d.drop_banner.isHidden() and d.ok_btn.isEnabled()
+
+        def walk(it):
+            for i in range(it.childCount()):
+                yield it.child(i); yield from walk(it.child(i))
+        (r,) = [r for r in walk(d.tree.invisibleRootItem())
+                if r.data(0, Qt.UserRole) == "encoding_loss" and r.text(1) == "Łódź"]
+        assert r.data(0, Qt.UserRole + 1) == "transliterated" and r.text(2) == "Lódz"
+        assert all(r.foreground(c).color().name() == QColor(TRANSLIT).name() for c in range(3))
+        assert "Łódź -> Lódz" in r.toolTip(1)
+        assert f"color:{TRANSLIT}" in d.loss_label.text() and "1 transliterated" in d.loss_label.text()
+    finally:
+        svc.settings.set(id3_latin1=False)
