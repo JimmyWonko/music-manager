@@ -235,7 +235,8 @@ def test_plan_lists_latin1_losses_and_junk(tmp_path):
         [ap] = service.plan.build([aid]).albums
         assert ap.encoding_losses == [] and ap.junk == []  # UTF-16: nothing lost
         service.settings.set(id3_latin1=True)
-        [ap] = service.plan.build([aid]).albums
+        plan = service.plan.build([aid])
+        [ap] = plan.albums
         got = {(loss.path.name, loss.field, loss.value, loss.severity, loss.proposed_value)
                for loss in ap.encoding_losses}
         want = {("1-01 One.wav", "title", "One 日本", "dropped", None)}
@@ -246,8 +247,16 @@ def test_plan_lists_latin1_losses_and_junk(tmp_path):
         assert got == want
         assert (ap.encoding_dropped, ap.encoding_transliterated) == (1, len(want) - 1)
         assert [p.kind for p in ap.problems] == [service.ProblemKind.ENCODING_DROPPED]
-        [ap] = service.plan.build([aid], allow_encoding_drop={aid}).albums  # the manual option
+        assert ap.encoding_losses  # a held album still lists its losses and totals
+        n = len(want) - 1
+        line = (f"{lib.double.name}: Latin-1 (Settings.id3_latin1): {n} tag value(s) transliterated, 1 dropped and "
+                "not written (existing value kept)")
+        assert f"{line} (album held: allow_encoding_drop to apply): see AlbumPlan.encoding_losses" in plan.warnings
+        assert not any('"?"' in w for w in plan.warnings)
+        plan = service.plan.build([aid], allow_encoding_drop={aid})  # the manual option
+        [ap] = plan.albums
         assert ap.problems == [] and ap.encoding_dropped == 1
+        assert f"{line}: see AlbumPlan.encoding_losses" in plan.warnings
         one = next(c for c in ap.files if c.path_before.name == "1-01 One.wav")
         assert "title" not in {t.key for t in one.tags}  # the dropped field is not written
     finally:

@@ -364,10 +364,13 @@ def build(album_ids: list[int], template: str | None = None,
         changes = _file_changes(t, cfg.clear_other_tags, warnings, cfg.migrate_tag_keys, unwritten,
                                (cfg.write_styles, cfg.styles_in_genre), (cfg.id3v23_mp3, cfg.id3_latin1), losses)
         dropped = [x for x in losses if x.severity == "dropped"]
+        drop_ok = {int(a) for a in allow_encoding_drop}
         if losses:
-            warnings.append(f"{t.album.path.name}: {len(losses) - len(dropped)} tag value(s) transliterated and "
-                            f"{len(dropped)} not written as Latin-1 (Settings.id3_latin1): see AlbumPlan.encoding_losses")
-        if dropped and t.album_id not in {int(a) for a in allow_encoding_drop}:
+            held = " (album held: allow_encoding_drop to apply)" if dropped and t.album_id not in drop_ok else ""
+            warnings.append(f"{t.album.path.name}: Latin-1 (Settings.id3_latin1): {len(losses) - len(dropped)} tag "
+                            f"value(s) transliterated, {len(dropped)} dropped and not written (existing value kept)"
+                            f"{held}: see AlbumPlan.encoding_losses")
+        if dropped and t.album_id not in drop_ok:
             problems.append(Problem(
                 ProblemKind.ENCODING_DROPPED,
                 f"{len(dropped)} tag value(s) have characters Latin-1 can't hold and no sensible substitute "
