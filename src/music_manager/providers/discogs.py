@@ -433,6 +433,7 @@ class DiscogsTrack:
     legacy_number: int | None = None  # number the old (side-1)*20+n scheme gave
     side: str | None = None  # normalised side position (A1) when its whole disc uses sides
     duration_s: float | None = None  # Discogs duration ("3:45"), None when not listed
+    subtracks: tuple[str, ...] = ()  # merged subtrack positions ("2-9a", "2-9b"); see flatten_tracklist(merge=)
 
 
 def parse_duration(text: str | None) -> float | None:
@@ -454,6 +455,86 @@ def _track_artist(item: DiscogsTrackJSON, fallback: str) -> str:
         ARTIST_NUM_SUFFIX.sub("", a.get("anv") or a.get("name") or "").strip()
         for a in artists
     )
+
+
+# 9a / 2-9a / 9.1 / 2-9.1 / CD2-9a (the disc prefixes parse_position accepts)
+SUBPOS = re.compile(r"^((?:(?:cd|dvd|disc|disk)\s*)?(?:\d+-)?\d+)(?:([a-z])|\.(\d+))$", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class SubtrackGroup:
+    """Consecutive release tracks sharing one base position (2-9a, 2-9b; 9.1, 9.2; an index track's
+    sub_tracks): often ripped as ONE file. See match.collapse_subtracks."""
+    disc: int
+    base: str  # "2-9"
+    positions: tuple[str, ...]  # ("2-9a", "2-9b")
+    titles: tuple[str, ...]
+    durations: tuple[float | None, ...]
+
+
+def subtrack_groups(release: DiscogsRelease) -> list[SubtrackGroup]:
+    """Every run of 2+ consecutive playable tracks sharing a numeric base position, in tracklist order.
+
+    Letter suffixes (9a, 2-9b) always count; dotted ones (9.1) only when the release also has plain
+    numeric positions (else "1.1" may be disc.track). Vinyl side positions (A1a) never count. An index
+    track's sub_tracks form a group when their positions share one base.
+    """
+    entries = _tracklist_entries(release, "")
+    plain = any(re.fullmatch(r"(?:\d+-)?\d+", e[0]) for e in entries)
+    groups: list[SubtrackGroup] = []
+    run: list[tuple[str, str, str, str]] = []
+    run_base = ""
+
+    def close():
+        if len(run) > 1:
+            groups.append(SubtrackGroup(max(parse_position(run_base)[0], 1), run_base, tuple(e[0] for e in run),
+                                        tuple(e[1] for e in run), tuple(parse_duration(e[3]) for e in run)))
+
+    for entry in entries:
+        m = SUBPOS.match(entry[0])
+        base = m.group(1) if m and (m.group(2) or plain) else ""
+        if base and base == run_base:
+            run.append(entry)
+            continue
+        close()
+        run, run_base = ([entry], base) if base else ([], "")
+    close()
+    return groups
+
+
+def _merge_entries(entries: list[tuple[str, str, str, str]], merge) -> tuple[list, dict[int, tuple[str, ...]]]:
+    """Replace each run of entries whose positions are one of merge by one "A / B" entry at the base."""
+    wanted = {tuple(p.casefold() for p in g): tuple(g) for g in merge or () if len(g) > 1}
+    out: list[tuple[str, str, str, str]] = []
+    subs: dict[int, tuple[str, ...]] = {}
+    i = 0
+    while i < len(entries):
+        hit = None
+        for key, group in wanted.items():
+            span = entries[i:i + len(key)]
+            if tuple(e[0].casefold() for e in span) == key:
+                hit = (group, span)
+                break
+        if hit is None:
+            out.append(entries[i])
+            i += 1
+            continue
+        group, span = hit
+        m = SUBPOS.match(span[0][0])
+        base = m.group(1) if m else span[0][0]
+        titles = [e[1] for e in span]
+        prefix = titles[0].split(": ", 1)[0] + ": " if ": " in titles[0] else ""
+        if prefix and all(t.startswith(prefix) for t in titles):
+            title = prefix + " / ".join(t[len(prefix):] for t in titles)
+        else:
+            title = " / ".join(titles)
+        secs = [parse_duration(e[3]) for e in span]
+        total = sum(secs) if all(x is not None for x in secs) else None  # type: ignore[misc]
+        duration = f"{int(total) // 60}:{int(total) % 60:02d}" if total is not None else ""
+        subs[len(out)] = group
+        out.append((base, title, span[0][2], duration))
+        i += len(span)
+    return out, subs
 
 
 def _tracklist_entries(release: DiscogsRelease, album_artist: str) -> list[tuple[str, str, str, str]]:
@@ -489,7 +570,7 @@ def _tracklist_entries(release: DiscogsRelease, album_artist: str) -> list[tuple
     return entries
 
 
-def flatten_tracklist(release: DiscogsRelease, album_artist: str) -> list[DiscogsTrack]:
+def flatten_tracklist(release: DiscogsRelease, album_artist: str, merge=()) -> list[DiscogsTrack]:
     """Discogs tracklist -> numbered tracks.
 
     Each disc keeps Discogs' own numbers (1, 2, ... or 1-1, 1-2, ...) when
@@ -499,10 +580,15 @@ def flatten_tracklist(release: DiscogsRelease, album_artist: str) -> list[Discog
 
     When every track on a disc has a distinct side position, each track also
     gets `side` (A1, A2, B1 ...), which file names use by default.
+
+    merge: subtrack groups (position tuples, see subtrack_groups) to make one track each: position
+    the base ("2-9"), title "A / B" ("Work: A / B" for an index track's movements), duration the sum
+    when every part has one, subtracks the merged positions. Later tracks keep their numbers.
     """
     parsed = []
     durations = []
-    for position, title, artist, duration in _tracklist_entries(release, album_artist):
+    entries, merged = _merge_entries(_tracklist_entries(release, album_artist), merge)
+    for position, title, artist, duration in entries:
         disc, number = parse_position(position)
         parsed.append((max(disc, 1), number, position, title, artist))
         durations.append(parse_duration(duration))
@@ -539,6 +625,7 @@ def flatten_tracklist(release: DiscogsRelease, album_artist: str) -> list[Discog
                 legacy_number=legacy_vinyl_number(position),
                 side=sides_of.get(i),
                 duration_s=durations[i],
+                subtracks=merged.get(i, ()),
             )
         )
     return out

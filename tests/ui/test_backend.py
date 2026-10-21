@@ -493,7 +493,7 @@ CONTRACT = Path(os.environ.get("MM_TEST_CONTRACT", "/workspace/mm-fix/API-CONTRA
 
 
 # Contract sections for service commits the UI doesn't build against yet (regexes on the heading).
-PENDING_SECTIONS: list[str] = []   # c2fcf25 is built against now; was ["Additions of 2026-10-20 (afternoon"]
+PENDING_SECTIONS: list[str] = [r"Subtracks \(2026-10-21\)"]  # mock not updated for subtracks yet (was c2fcf25)
 
 
 def _without_pending(text: str) -> str:

@@ -34,9 +34,8 @@ from ._common import (
     root_for,
     title_match_min,
 )
-from ._pins import resolve as resolve_pins
+from ._pins import release_tracks
 from ._releases import (
-    album_tracks,
     candidate_row,
     candidate_rows,
     release_for,
@@ -121,6 +120,7 @@ class AlbumTarget:
     layout: AlbumLayout | None = None  # None until the full release is known
     problems: list[Problem] = field(default_factory=list)
     label_missing: bool = False
+    subtracks: list = field(default_factory=list)  # match.SubtrackDecision per subtrack group (2026-10-21)
 
     @property
     def files(self) -> list[tuple[Path, Path]]:
@@ -178,12 +178,18 @@ def album_target(album_id: int, release_id: int | None, template: CompiledTempla
     folder = Path(row["folder"])
     root = library_root(folder, st)
     album = album_folder(album_id, st)
-    dtracks = album_tracks(release) if fetched else []
+    decisions: list = []
+    pin_parts = None
+    if fetched:
+        dtracks, decisions, *pin_parts = release_tracks(st, album_id, int(release_id), album, release,
+                                                        title_match_min())
+    else:
+        dtracks = []
     side_names = not st.config().sequential_sides
     target, namer = template_paths(template, root, release, dtracks, original_year, side_names)
     info = release_info(release, dtracks, original_year)
     result = AlbumTarget(album_id, int(release_id), root, album, target, release, fetched, dtracks, original_year,
-                         label_missing=not info.label.strip())
+                         label_missing=not info.label.strip(), subtracks=decisions)
     if album.layout_problem:
         lc = album.layout_conflict
         result.problems.append(Problem(ProblemKind.LAYOUT_AMBIGUOUS, album.layout_problem, [album.path],
@@ -195,7 +201,7 @@ def album_target(album_id: int, release_id: int | None, template: CompiledTempla
             continue  # a cluster moves only its own files, so its target may be a subfolder of theirs
         result.problems.append(Problem(LAYOUT_KIND[kind], message, list(paths)))
     if fetched:
-        pins, pin_problems, overrides = resolve_pins(st, album_id, int(release_id), album, dtracks, title_match_min())
+        pins, pin_problems, overrides = pin_parts
         layout = layout_album(album, root, release, dtracks, original_year, target_dir=target, file_name=namer,
                               check=False, log=lambda _line: None, disc_folders=not template_sets_disc_path(template),
                               title_match_min=title_match_min(), pins=pins)
@@ -217,7 +223,14 @@ def _album_problems(t: AlbumTarget, track_count: int) -> list[Problem]:
         problems.append(Problem(ProblemKind.DISC_AMBIGUOUS, disc_warning(t.album, layout.ambiguous, layout.disc_conflicts),
                                 list(layout.ambiguous), disc_conflicts=list(layout.disc_conflicts)))
     if layout.count_holds:
-        problems.append(Problem(ProblemKind.DISC_TRACK_COUNT, track_count_message(t.album, layout.count_holds),
+        message = track_count_message(t.album, layout.count_holds)
+        held_discs = {h.disc for h in layout.count_holds}
+        hints = [d for d in t.subtracks if not d.merged and d.disc in held_discs]
+        if hints:
+            message += " " + "; ".join(
+                f"Subtracks {' + '.join(d.positions)} may be one file ({d.reason.replace('_', ' ')}): "
+                f"pin it to the group" for d in hints) + "."
+        problems.append(Problem(ProblemKind.DISC_TRACK_COUNT, message,
                                 [p for hold in layout.count_holds for p in hold.paths]))
     wrong = disc_folder_mismatches(layout)
     if wrong:

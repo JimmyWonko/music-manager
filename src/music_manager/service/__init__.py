@@ -70,6 +70,7 @@ from ._types import (
     RemoteTrack,
     ScorePart,
     Settings,
+    SubtrackGroup,
     TagChange,
     Template,
     TemplatePreview,
@@ -82,7 +83,7 @@ __all__ = [
     "Cluster", "ClusterFile", "ClusterRow", "Collision", "ConfigError", "CoverArt", "CoverDefaults", "CoverPreview", "Destination", "DiscChoice", "DiscConflict", "DiscFolderMismatch", "Events", "FileChange", "Job", "JobKind", "JobState", "LayoutConflict", "LocalTrack",
     "MMError", "ManualPair", "MatchReason", "MatchStatus", "MatchView", "NotFound", "Operation", "Page", "Pin", "PinConflict", "Plan", "PlanStale", "Problem",
     "ProblemKind",
-    "ProviderCredit", "ProviderError", "RemoteTrack", "ScorePart", "Settings", "TagChange", "Template",
+    "ProviderCredit", "ProviderError", "RemoteTrack", "ScorePart", "Settings", "SubtrackGroup", "TagChange", "Template",
     "TemplatePreview", "TrackPair", "ValidationError", "configure", "coverart", "events", "jobs", "journal", "library", "match",
     "plan", "provider", "reset", "settings", "templates",
 ]

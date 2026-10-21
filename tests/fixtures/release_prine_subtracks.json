@@ -1,0 +1,193 @@
+{
+ "id": 4054414,
+ "title": "The Singing Mailman Delivers",
+ "year": 2011,
+ "artists": [
+  {
+   "name": "John Prine",
+   "anv": ""
+  }
+ ],
+ "labels": [
+  {
+   "name": "Oh Boy Records",
+   "catno": "OBR-040"
+  }
+ ],
+ "formats": [
+  {
+   "name": "CD",
+   "qty": "2",
+   "descriptions": [
+    "Album"
+   ]
+  }
+ ],
+ "master_id": 2967655,
+ "country": "US",
+ "tracklist": [
+  {
+   "position": "",
+   "type_": "heading",
+   "title": "Studio Performance - August 1970",
+   "duration": ""
+  },
+  {
+   "position": "1-1",
+   "type_": "track",
+   "title": "Hello In There",
+   "duration": ""
+  },
+  {
+   "position": "1-2",
+   "type_": "track",
+   "title": "Souvenirs",
+   "duration": ""
+  },
+  {
+   "position": "1-3",
+   "type_": "track",
+   "title": "Great Society Conflict Veteran's Blues",
+   "duration": ""
+  },
+  {
+   "position": "1-4",
+   "type_": "track",
+   "title": "Paradise",
+   "duration": ""
+  },
+  {
+   "position": "1-5",
+   "type_": "track",
+   "title": "Blue Umbrella",
+   "duration": ""
+  },
+  {
+   "position": "1-6",
+   "type_": "track",
+   "title": "Aw Heck",
+   "duration": ""
+  },
+  {
+   "position": "1-7",
+   "type_": "track",
+   "title": "Illegal Smile",
+   "duration": ""
+  },
+  {
+   "position": "1-8",
+   "type_": "track",
+   "title": "Flashback Blues",
+   "duration": ""
+  },
+  {
+   "position": "1-9",
+   "type_": "track",
+   "title": "The Frying Pan",
+   "duration": ""
+  },
+  {
+   "position": "1-10",
+   "type_": "track",
+   "title": "Sour Grapes",
+   "duration": ""
+  },
+  {
+   "position": "1-11",
+   "type_": "track",
+   "title": "A Star, A Jewel, And A Hoax",
+   "duration": ""
+  },
+  {
+   "position": "",
+   "type_": "heading",
+   "title": "Live Performance - November 1970",
+   "duration": ""
+  },
+  {
+   "position": "2-1",
+   "type_": "track",
+   "title": "Flashback Blues",
+   "duration": ""
+  },
+  {
+   "position": "2-2",
+   "type_": "track",
+   "title": "Hello In There",
+   "duration": ""
+  },
+  {
+   "position": "2-3",
+   "type_": "track",
+   "title": "Your Flag Decal Won't Get You Into Heaven Anymore",
+   "duration": ""
+  },
+  {
+   "position": "2-4",
+   "type_": "track",
+   "title": "The Great Compromise",
+   "duration": ""
+  },
+  {
+   "position": "2-5",
+   "type_": "track",
+   "title": "Blue Umbrella",
+   "duration": ""
+  },
+  {
+   "position": "2-6",
+   "type_": "track",
+   "title": "Illegal Smile",
+   "duration": ""
+  },
+  {
+   "position": "2-7",
+   "type_": "track",
+   "title": "Angel From Montgomery",
+   "duration": ""
+  },
+  {
+   "position": "2-8",
+   "type_": "track",
+   "title": "A Good Time",
+   "duration": ""
+  },
+  {
+   "position": "2-9a",
+   "type_": "track",
+   "title": "Hey Good Lookin'",
+   "duration": ""
+  },
+  {
+   "position": "2-9b",
+   "type_": "track",
+   "title": "Jambalaya (On The Bayou)",
+   "duration": ""
+  },
+  {
+   "position": "2-10",
+   "type_": "track",
+   "title": "Quiet Man",
+   "duration": ""
+  },
+  {
+   "position": "2-11",
+   "type_": "track",
+   "title": "Paradise",
+   "duration": ""
+  },
+  {
+   "position": "2-12",
+   "type_": "track",
+   "title": "Great Society Conflict Veteran's Blues",
+   "duration": ""
+  },
+  {
+   "position": "2-13",
+   "type_": "track",
+   "title": "Spanish Pipedream",
+   "duration": ""
+  }
+ ],
+ "_note": "Trimmed from https://api.discogs.com/releases/4054414 (2026-10-21). Discogs lists no durations."
+}
