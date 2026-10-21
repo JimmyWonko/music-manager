@@ -137,7 +137,7 @@ def _file_changes(t: AlbumTarget, clear_other: bool, warnings: list[str], migrat
     for note in held.notes:
         warnings.append(f"{t.album.path.name}: {note}")
     if unwritten is not None:
-        unwritten += [UnwrittenField(u.field, u.reason, u.detail) for u in held.unwritten]
+        unwritten += [UnwrittenField(u.field, u.reason, u.detail, t.album.path) for u in held.unwritten]
     by_source = {item.source: item for item in layout.tracks}
     for local, _dt, method in layout.pairs:
         item = by_source.get(local)
@@ -146,7 +146,7 @@ def _file_changes(t: AlbumTarget, clear_other: bool, warnings: list[str], migrat
                                       skip_reason="no matching Discogs track: left in place, not tagged or moved"))
             continue
         try:
-            tags = [TagChange(c.key, c.before, c.after, c.key_before, c.key_after)
+            tags = [TagChange(c.key, c.before, c.after, c.key_before, c.key_after, c.migration)
                     for c in preview_tag_changes(item.source, item.meta, clear_other)]
         except Exception as exc:  # noqa: BLE001 - unreadable file: the apply will report it
             tags = []

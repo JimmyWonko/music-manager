@@ -8,6 +8,7 @@ import shutil
 import stat
 import tempfile
 from dataclasses import dataclass
+from dataclasses import replace as dc_replace
 from pathlib import Path
 
 from mutagen import File as MutagenFile
@@ -182,10 +183,21 @@ class TagPreview:
     after: str | None
     key_before: str | None
     key_after: str | None
+    migration: bool = False  # caused only by meta's migrate_legacy_keys (absent from the plain preview)
 
 
 def preview_tag_changes(path: Path, meta: TrackMeta, clear_other: bool = False) -> list[TagPreview]:
-    """What write_tags would change, without saving, with each tag's key before and after."""
+    """What write_tags would change, without saving, with each tag's key before and after. With
+    migrate_legacy_keys, a change the same preview without it would not make is marked migration=True;
+    alias renames (TOTALTRACKS -> TRACKTOTAL) happen either way and stay False."""
+    changes = _preview(path, meta, clear_other)
+    if not meta.get("migrate_legacy_keys"):
+        return changes
+    plain = set(_preview(path, {**meta, "migrate_legacy_keys": False}, clear_other))
+    return [c if c in plain else dc_replace(c, migration=True) for c in changes]
+
+
+def _preview(path: Path, meta: TrackMeta, clear_other: bool) -> list[TagPreview]:
     replace = _replace_set(path, meta, None)
     get_tags, apply, _save = _open_for_tagging(path)
     keys_before: dict[str, str] = {}

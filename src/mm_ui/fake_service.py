@@ -207,6 +207,7 @@ class Page:
 class TagChange:
     key: str; before: str | None; after: str | None
     key_before: str | None = None; key_after: str | None = None  # 2026-10-21: the file's own key (renames)
+    migration: bool = False                     # 2026-10-21: caused by Settings.migrate_tag_keys only
 
 
 @dataclass(frozen=True)
@@ -290,6 +291,7 @@ class DiscChoice:
 @dataclass(frozen=True)
 class UnwrittenField:
     field: str; reason: str; detail: str  # canonical tag name, stable reason code, human-readable text
+    folder: Path | None = None             # the album folder (AlbumPlan.folder_before)
 
 
 @dataclass(frozen=True)

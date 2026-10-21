@@ -342,7 +342,7 @@ def test_settings_and_types_are_appended(tmp_path):
         assert service.settings.set(migrate_tag_keys=True).migrate_tag_keys is True
         with pytest.raises(service.ValidationError):
             service.settings.set(migrate_tag_keys="yes")
-        assert [f.name for f in dataclasses.fields(service.TagChange)][-2:] == ["key_before", "key_after"]
+        assert [f.name for f in dataclasses.fields(service.TagChange)][-3:] == ["key_before", "key_after", "migration"]
         assert "migrate_tag_keys" in [f.name for f in dataclasses.fields(service.Settings)][-3:]
     finally:
         service.reset()
@@ -417,7 +417,7 @@ def test_plan_lists_unwritten_fields_and_keeps_warnings(tmp_path):
     from music_manager import service
 
     assert [f.name for f in dataclasses.fields(service.AlbumPlan)][-1] == "unwritten"
-    assert [f.name for f in dataclasses.fields(service.UnwrittenField)] == ["field", "reason", "detail"]
+    assert [f.name for f in dataclasses.fields(service.UnwrittenField)] == ["field", "reason", "detail", "folder"]
     lib = Library(tmp_path)
     lib.multi["identifiers"] = [{"type": "Barcode", "value": "111"}, {"type": "Barcode", "value": "222"}]
     lib.multi["country"] = "UK & Europe"
@@ -502,10 +502,7 @@ def test_style_settings_are_appended_and_reach_the_plan(tmp_path):
 
 # --- follow-ups: TagChange.migration, UnwrittenField.folder (2026-10-21) ---------------------------------------------
 
-FOLLOWUP = pytest.mark.xfail(strict=True, reason="TagChange.migration / UnwrittenField.folder not built yet")
 
-
-@FOLLOWUP
 def test_preview_marks_only_migration_changes(sample):
     from mutagen.flac import FLAC
 
@@ -525,7 +522,6 @@ def test_preview_marks_only_migration_changes(sample):
     assert next(c for c in plain if c.key == "tracktotal").key_before == "TOTALTRACKS"
 
 
-@FOLLOWUP
 def test_service_types_gain_migration_and_folder_last():
     import dataclasses
 
@@ -536,7 +532,6 @@ def test_service_types_gain_migration_and_folder_last():
     assert [f.name for f in dataclasses.fields(service.UnwrittenField)] == ["field", "reason", "detail", "folder"]
 
 
-@FOLLOWUP
 def test_plan_fills_migration_and_unwritten_folder(tmp_path):
     from mutagen.flac import FLAC
     from service_fixtures import Library
