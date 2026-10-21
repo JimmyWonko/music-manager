@@ -214,8 +214,8 @@ def test_a_group_pin_maps_one_file_to_the_subtracks(lib):
     assert view.problems == [] and view.unmatched_tracks == [] and view.unmatched_files == []
     [group] = view.subtrack_groups
     assert (group.merged, group.reason, group.path) == (True, "pinned", f)
-    [manual] = [p for p in view.pairs if p.method == "manual"]
-    assert manual.local.path == f and manual.remote.subtracks == ["2-9a", "2-9b"]
+    [grouped] = [p for p in view.pairs if p.remote is not None and p.remote.subtracks]
+    assert grouped.local.path == f and grouped.remote.subtracks == ["2-9a", "2-9b"]
     service.match.choose(aid, PRINE)
     [ap] = service.plan.build([aid]).albums
     assert ap.problems == []
@@ -263,3 +263,30 @@ def test_appended_fields_keep_their_order():
     assert names(service.MatchView)[-1] == "subtrack_groups"
     assert names(service.SubtrackGroup) == ["disc", "position", "positions", "titles", "merged", "reason", "path",
                                             "duration_s"]
+
+
+PAIR_TODO = pytest.mark.xfail(strict=True, reason="TrackPair.method 'subtracks' / positions: not implemented yet")
+
+
+@PAIR_TODO
+@pytest.mark.parametrize("how", ["auto", "pin"])
+def test_a_pair_with_merged_subtracks_has_method_subtracks_and_positions(lib, how):
+    aid, f = lib.prine_id, _file(lib, "2-09")
+    if how == "pin":
+        rid = PRINE
+        service.match.pin(aid, f, positions=["2-9a", "2-9b"], release_id=rid)
+    else:
+        rid = TIMED
+    view = service.match.view(aid, rid)
+    [pair] = [p for p in view.pairs if p.method == "subtracks"]
+    assert pair.local.path == f and pair.positions == ["2-9a", "2-9b"] and pair.ok
+    assert all(p.positions == [] for p in view.pairs if p is not pair)
+    cand = next(c for c in service.match.candidates(aid) if c.release_id == rid)
+    assert [p.positions for p in cand.alignment if p.method == "subtracks"] == [["2-9a", "2-9b"]]
+
+
+@PAIR_TODO
+def test_track_pair_positions_is_appended_last():
+    import dataclasses
+
+    assert [f.name for f in dataclasses.fields(service.TrackPair)][-1] == "positions"
