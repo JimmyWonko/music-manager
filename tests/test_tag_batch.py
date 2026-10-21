@@ -231,3 +231,29 @@ def test_misfiled_folders_with_correct_tags_are_disagree_even_without_lengths(tm
     hand_sorted(tmp_path.joinpath(*FOLDER))
     [check] = check_disc_swaps(tmp_path, Source())
     assert check.status == "disagree" and check.flagged and len(check.disagreements) == 10
+
+
+@pytest.mark.xfail(strict=True, reason="AlbumPlan.junk_moving not built yet")
+def test_plan_lists_junk_that_moves_with_the_album(tmp_path):
+    import dataclasses
+
+    from service_fixtures import Library
+
+    from music_manager import service
+
+    lib = Library(tmp_path)
+    (lib.double / ".DS_Store").write_bytes(b"junk")
+    (lib.double / "scans" / "Thumbs.db").write_bytes(b"junk")
+    (lib.double / "notes.txt").write_text("not junk")
+    lib.start(tmp_path)
+    try:
+        assert [f.name for f in dataclasses.fields(service.AlbumPlan)][-1] == "junk_moving"
+        aid = lib.album_id(lib.double)
+        lib.find(aid)
+        service.match.choose(aid, lib.multi["id"])
+        [ap] = service.plan.build([aid]).albums
+        assert ap.junk_moving == [lib.double / ".DS_Store", lib.double / "scans" / "Thumbs.db"]
+        assert lib.double / ".DS_Store" in {c.path_before for c in ap.files}  # it still moves with the album
+        assert ap.junk == []
+    finally:
+        service.reset()
