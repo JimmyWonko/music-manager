@@ -383,6 +383,28 @@ python3 -m pytest tests        # needs pytest; no network access
 `tests/samples` holds tiny silent files made with ffmpeg
 (`tests/make_samples.sh`), and `tests/fixtures` holds saved Discogs JSON.
 
+## Desktop UI (preview)
+
+`src/mm_ui` is a PySide6 front end over `music_manager.service`: a library
+list, the Discogs review screen (candidates, track pairing, the destination
+preview and anything that holds an album back), the apply/undo preview,
+history and the naming settings. It talks to the service only through the
+contract types, so it also runs on an in-memory mock.
+
+```sh
+pip install -e '.[ui]'
+MM_BACKEND=real mm-ui                  # or: MM_BACKEND=real python -m mm_ui
+mm-ui                                  # mock data (the default), nothing on disk is touched
+```
+
+`MM_BACKEND=real` imports `music_manager.service` from this repository;
+`MM_BACKEND_PATH` points it at another checkout, and `MM_BACKEND=auto` falls
+back to the mock when the service can't be loaded. Its tests live
+in `tests/ui` (`pip install -e '.[ui-test]'`; they are skipped without
+PySide6/pytest-qt). The real-backend ones run with `MM_BACKEND=real` and
+need ffmpeg for their synthetic audio. Open contract questions from the UI
+side are in `docs/ui/CONTRACT-QUESTIONS.md`.
+
 ## License
 
 music-manager is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. It is distributed WITHOUT ANY WARRANTY. See the [LICENSE](LICENSE) file for the full text.

@@ -19,10 +19,14 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest"]
 ui = ["PySide6"]
+ui-test = ["PySide6", "pytest", "pytest-qt"]
 
 [project.scripts]
 discogs-tag = "music_manager.cli.discogs_tag:main"
 album-m3u = "music_manager.cli.album_m3u:main"
+
+[project.gui-scripts]
+mm-ui = "mm_ui.app:main"
 
 [project.urls]
 Homepage = "https://github.com/JimmyWonko/music-manager"
