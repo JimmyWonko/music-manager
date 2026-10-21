@@ -376,3 +376,67 @@ def test_plan_shows_picard_keys_renames_and_flags(tmp_path):
         assert {"genre", "style", "media", "releasecountry"} & keys
     finally:
         service.reset()
+
+
+# --- structured unwritten fields (Pixel, 2026-10-21) -----------------------------------------------------------------
+
+UNWRITTEN = pytest.mark.xfail(strict=True, reason="AlbumPlan.unwritten / UnwrittenField not built yet")
+
+
+def _unwritten(rel):
+    return [(u.field, u.reason) for u in fields_of(rel).unwritten]
+
+
+@UNWRITTEN
+@pytest.mark.parametrize(("changes", "expected"), [
+    ({"identifiers": [{"type": "Barcode", "value": "111"}, {"type": "Barcode", "value": "222"}]},
+     [("barcode", "conflicting_barcodes")]),
+    ({"country": "UK & Europe"}, [("releasecountry", "region_not_country")]),
+    ({"country": "Benelux"}, [("releasecountry", "region_not_country")]),
+    ({"country": "Unknown"}, [("releasecountry", "unknown_country")]),
+    ({"formats": [{"name": "CD", "qty": "1"}, {"name": "DVD", "qty": "1"}]},
+     [("media", "mixed_media")]),
+    ({"formats": [{"name": "CD", "qty": "1", "descriptions": ["Album", "EP"]}]}, [("releasetype", "no_single_type")]),
+    ({"formats": [{"name": "CD", "qty": "1", "descriptions": ["Compilation"]}]}, [("releasetype", "no_single_type")]),
+    ({"labels": [{"name": "A", "catno": "A-1"}, {"name": "B", "catno": "none"}]},
+     [("catalognumber", "missing_catalog_number")]),
+    ({}, []),
+])
+def test_held_back_fields_are_structured(changes, expected):
+    assert _unwritten(release(**changes)) == expected
+
+
+@UNWRITTEN
+def test_unwritten_field_detail_matches_the_note():
+    f = fields_of(release(country="UK & Europe"))
+    [u] = f.unwritten
+    assert u.detail and u.detail in f.notes[0]
+
+
+@UNWRITTEN
+def test_plan_lists_unwritten_fields_and_keeps_warnings(tmp_path):
+    import dataclasses
+
+    from service_fixtures import Library
+
+    from music_manager import service
+
+    assert [f.name for f in dataclasses.fields(service.AlbumPlan)][-1] == "unwritten"
+    assert [f.name for f in dataclasses.fields(service.UnwrittenField)] == ["field", "reason", "detail"]
+    lib = Library(tmp_path)
+    lib.multi["identifiers"] = [{"type": "Barcode", "value": "111"}, {"type": "Barcode", "value": "222"}]
+    lib.multi["country"] = "UK & Europe"
+    lib.start(tmp_path)
+    try:
+        service.jobs.wait(service.library.scan().id)
+        aid = lib.album_id(lib.double)
+        lib.find(aid)
+        service.match.choose(aid, lib.multi["id"])
+        plan = service.plan.build([aid])
+        [ap] = plan.albums
+        assert {(u.field, u.reason) for u in ap.unwritten} >= {
+            ("barcode", "conflicting_barcodes"), ("releasecountry", "region_not_country")}
+        assert all(isinstance(u, service.UnwrittenField) and u.detail for u in ap.unwritten)
+        assert any("barcode" in w.casefold() for w in plan.warnings)  # warnings kept
+    finally:
+        service.reset()
