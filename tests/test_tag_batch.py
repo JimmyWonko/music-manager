@@ -210,3 +210,25 @@ def test_junk_left_behind_stops_at_a_folder_with_other_files(tmp_path):
     (album.parent / "notes.txt").write_text("x")
     assert _junk_left_behind(album, root, target, {album / "Thumbs.db"}) == [album / ".DS_Store"]
     assert _junk_left_behind(album, root, root / "Artist" / "Other", set())[-1] == album / "Thumbs.db"
+
+
+@pytest.mark.xfail(strict=True, reason="DISAGREE still needs lengths and titles (to be restored)")
+def test_misfiled_folders_with_correct_tags_are_disagree_even_without_lengths(tmp_path):
+    """John Prine style: every tag right, files in the wrong CD folder. DISAGREE comes from the folder,
+    tag and cue/m3u contradicting each other, not from lengths: no Discogs durations, still flagged."""
+    from prine_fixtures import FOLDER, PRINE_ID, hand_sorted, release
+
+    from music_manager.swapcheck import check_disc_swaps
+
+    rel = release()
+    for item in rel["tracklist"]:
+        item["duration"] = ""
+
+    class Source:
+        def release(self, release_id):
+            assert release_id == PRINE_ID
+            return rel
+
+    hand_sorted(tmp_path.joinpath(*FOLDER))
+    [check] = check_disc_swaps(tmp_path, Source())
+    assert check.status == "disagree" and check.flagged and len(check.disagreements) == 10
