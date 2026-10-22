@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 
-import pytest
-
 from mm_ui import fake_service as FS
 
 
@@ -15,7 +13,6 @@ def test_fake_mirrors_the_follow_ups(fake):
     assert fake.settings.verify_hashes_available() == ["sha256"]
 
 
-@pytest.mark.xfail(strict=True, reason="status_counts().id3v23 not mirrored in the fake yet")
 def test_fake_status_counts_has_a_library_wide_id3v23(fake):
     counts = fake.library.status_counts()
     assert set(counts) == set(FS.MatchStatus) and isinstance(counts.id3v23, int)

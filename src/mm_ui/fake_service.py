@@ -203,6 +203,14 @@ class Page:
     items: list; total: int; offset: int
 
 
+class StatusCounts(dict):
+    """library.status_counts(): MatchStatus -> albums, plus a library-wide id3v23 track count (2026-10-21)."""
+
+    def __init__(self, counts=(), id3v23: int = 0):
+        super().__init__(counts)
+        self.id3v23 = id3v23
+
+
 @dataclass(frozen=True)
 class TagChange:
     key: str; before: str | None; after: str | None
