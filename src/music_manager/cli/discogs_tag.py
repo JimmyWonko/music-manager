@@ -14,6 +14,8 @@ import argparse
 import os
 import re
 import sys
+import traceback
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -132,7 +134,7 @@ def choose_release(
     auto: bool,
     release_id: int | None,
 ) -> DiscogsRelease | None:
-    if release_id:
+    if release_id is not None:
         return api.release(release_id)
 
     ranked = sorted(((score_result(r, guess), r) for r in results), key=lambda x: -x[0])
@@ -188,6 +190,14 @@ def choose_release(
         print("  not understood")
 
 
+class AlbumResult(StrEnum):
+    """process_album's outcome. A StrEnum, so it still equals the old strings."""
+
+    APPLIED = "applied"
+    SKIPPED = "skipped"
+    SKIPPED_TAGGED = "skipped-tagged"  # not counted by --limit
+
+
 def process_album(
     api: Discogs,
     album: AlbumFolder,
@@ -200,8 +210,8 @@ def process_album(
     clear_other: bool = False,
     scan_root: Path | None = None,
     allow_track_mismatch: bool = False,
-) -> str:
-    """Returns "applied", "skipped", or "skipped-tagged" (not counted by --limit).
+) -> AlbumResult:
+    """Returns AlbumResult.APPLIED, SKIPPED or SKIPPED_TAGGED (not counted by --limit).
 
     In --auto mode a release whose track count differs from the local files
     is not applied unless allow_track_mismatch is set.
@@ -215,14 +225,14 @@ def process_album(
             print(f"  held because of: {', '.join(f'{d.name}/' for d in conflict.subfolders)} ({what})")
             print(f"  loose files: {', '.join(f.name for f in conflict.loose_files)}")
         print("  skipped: nothing written")
-        return "skipped"
+        return AlbumResult.SKIPPED
 
     if skip_tagged:
         tagged = album_release_ids(album.tracks)
         ids = set(tagged.values())
         if len(ids) == 1 and None not in ids:
             print(f"skip tagged (Discogs {ids.pop()}): {album.path}")
-            return "skipped-tagged"
+            return AlbumResult.SKIPPED_TAGGED
         if ids - {None}:
             untagged = sum(1 for v in tagged.values() if v is None)
             found = ", ".join(sorted(i for i in ids if i))
@@ -237,7 +247,7 @@ def process_album(
     print(f"tracks  {len(album.tracks)}")
 
     results = []
-    if not release_id:
+    if release_id is None:
         results = api.search_releases(guess["artist"], guess["album"], guess.get("catno", ""), guess.get("year", ""))
         if not results and guess["album"]:
             results = api.search_releases("", guess["album"], guess.get("catno", ""), guess.get("year", ""))
@@ -248,7 +258,7 @@ def process_album(
         raise
     if release is None:
         print("  skipped")
-        return "skipped"
+        return AlbumResult.SKIPPED
 
     album_artist = release_artists(release)
     dtracks = flatten_tracklist(release, album_artist)
@@ -271,9 +281,9 @@ def process_album(
 
     if len(dtracks) != len(album.tracks):
         print(f"  warning: {len(album.tracks)} local files vs {len(dtracks)} Discogs tracks")
-        if auto and not release_id and not allow_track_mismatch:
+        if auto and release_id is None and not allow_track_mismatch:
             print("  skipped: track count mismatch in --auto mode (use --allow-track-mismatch to apply anyway)")
-            return "skipped"
+            return AlbumResult.SKIPPED
 
     triples, _legacy, conflicts, holds = align_tracks_detailed(album, dtracks)
     unsure = ambiguous_disc_files(triples)
@@ -282,22 +292,22 @@ def process_album(
         for conflict in conflicts:
             print(f"    {describe_disc_conflict(conflict, album.path)}")
         print("  skipped: nothing written")
-        return "skipped"
+        return AlbumResult.SKIPPED
     if holds:
         print(f"  warning: {track_count_message(album, holds)}")
         print("  skipped: nothing written")
-        return "skipped"
+        return AlbumResult.SKIPPED
 
     if not yes and sys.stdin.isatty() and not dry_run:
         ans = prompt("  apply tags + rename? [Y/n] ").lower()
         if ans in {"n", "no"}:
-            return "skipped"
+            return AlbumResult.SKIPPED
 
     apply_album(
         album, dest_root, release, dtracks, original_year,
         dry_run=dry_run, clear_other=clear_other, scan_root=scan_root,
     )
-    return "applied"
+    return AlbumResult.APPLIED
 
 
 def self_test() -> int:
@@ -561,6 +571,20 @@ def _self_test_fixes() -> None:
         assert not src.exists() and dest.read_bytes() == b"audio" * 1000
 
 
+def _positive_int(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be a positive release id, not {value}")
+    return value
+
+
+def _non_negative_int(text: str) -> int:
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be 0 (all) or more, not {value}")
+    return value
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="discogs-tag",
@@ -656,10 +680,10 @@ Undo:
         help="with --auto, apply a match even when its track count differs from the local files",
     )
     parser.add_argument("--skip-tagged", action="store_true", help="skip albums whose files all carry the same Discogs release id")
-    parser.add_argument("--release-id", type=int, help="use this Discogs release id (single album)")
+    parser.add_argument("--release-id", type=_positive_int, help="use this Discogs release id (single album)")
     parser.add_argument(
         "--limit",
-        type=int,
+        type=_non_negative_int,
         default=0,
         help="process at most N albums (0 = all); albums skipped by --skip-tagged do not count",
     )
@@ -669,7 +693,8 @@ Undo:
         help="also remove text tags this tool does not write (comments, MusicBrainz ids, ...); "
         "ReplayGain, AccurateRip, encoder info, art, lyrics and ISRC are always kept",
     )
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()  # one mode per run
+    modes.add_argument(
         "--check-disc-swaps",
         action="store_true",
         help="read-only: report multi-disc albums under PATH whose disc-1/disc-2 tracks look swapped "
@@ -682,14 +707,14 @@ Undo:
                         help="with --check-disc-swaps: let Discogs responses go into the cache (default: read only)")
     parser.add_argument("--journal-dir", type=Path, metavar="DIR",
                         help="with --check-disc-swaps: apply journals to read (default: the discogs-tag journal folder)")
-    parser.add_argument("--save-token", action="store_true", help="store a Discogs user token and exit")
-    parser.add_argument("--self-test", action="store_true", help="run built-in naming tests and exit")
-    parser.add_argument(
+    modes.add_argument("--save-token", action="store_true", help="store a Discogs user token and exit")
+    modes.add_argument("--self-test", action="store_true", help="run built-in naming tests and exit")
+    modes.add_argument(
         "--normalize-folders",
         action="store_true",
         help="rename album folders under PATH to the current naming rule (preview unless --apply)",
     )
-    parser.add_argument(
+    modes.add_argument(
         "--undo-journal",
         type=Path,
         metavar="FILE",
@@ -706,7 +731,12 @@ Undo:
         help="with --undo-journal: also restore tag snapshots from journals written before the JSON format "
         "(they are pickled; only use this on journals discogs-tag itself wrote)",
     )
-    return parser.parse_args(argv)
+    parser.add_argument("--debug", action="store_true",
+                        help="print the full traceback when an album fails (the batch still goes on)")
+    args = parser.parse_args(argv)
+    if args.report is not None and not args.check_disc_swaps:
+        parser.error("--report only goes with --check-disc-swaps")
+    return args
 
 
 def check_disc_swaps_cli(root: Path, report: Path | None, allow_cache_write: bool,
@@ -741,39 +771,34 @@ def check_disc_swaps_cli(root: Path, report: Path | None, allow_cache_write: boo
     return 3 if any(c.flagged for c in checks) else 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(sys.argv[1:] if argv is None else argv)
-    if args.self_test:
-        return self_test()
-    naming.SIDE_NAMES = not args.sequential_sides
+def run_save_token() -> int:
+    token = prompt("Paste Discogs user token: ")
+    if not token:
+        print("no token entered", file=sys.stderr)
+        return 1
+    save_token(token)
+    print(f"saved {token_path()}")
+    return 0
 
-    if args.save_token:
-        token = prompt("Paste Discogs user token: ")
-        if not token:
-            print("no token entered", file=sys.stderr)
-            return 1
-        save_token(token)
-        print(f"saved {token_path()}")
-        return 0
 
-    if args.undo_journal is not None:
-        apply = args.apply and not args.dry_run
-        return undo_journal(args.undo_journal.expanduser(), apply=apply, trust_legacy=args.trust_legacy_journal)
+def run_undo(args: argparse.Namespace) -> int:
+    apply = args.apply and not args.dry_run
+    return undo_journal(args.undo_journal.expanduser(), apply=apply, trust_legacy=args.trust_legacy_journal)
 
-    if args.path is None:
-        print("error: pass an album folder or tree", file=sys.stderr)
-        return 2
 
-    if args.check_disc_swaps:
-        return check_disc_swaps_cli(args.path.expanduser(), args.report, args.allow_cache_write, args.journal_dir)
+def run_disc_swap_check(args: argparse.Namespace) -> int:
+    return check_disc_swaps_cli(args.path.expanduser(), args.report, args.allow_cache_write, args.journal_dir)
 
-    if args.normalize_folders:
-        apply = args.apply and not args.dry_run
-        return normalize_folders(args.path.expanduser(), apply=apply)
+
+def run_normalize(args: argparse.Namespace) -> int:
+    apply = args.apply and not args.dry_run
+    return normalize_folders(args.path.expanduser(), apply=apply)
+
+
+def run_tagging(args: argparse.Namespace) -> int:
     if args.apply:
         print("error: --apply only goes with --normalize-folders or --undo-journal", file=sys.stderr)
         return 2
-
     root = args.path.expanduser()
     try:
         root = root.resolve()
@@ -796,7 +821,7 @@ def main(argv: list[str] | None = None) -> int:
     if not albums:
         print(f"No album folders with audio under {root}")
         return 0
-    if args.release_id and len(albums) > 1 and args.limit != 1:
+    if args.release_id is not None and len(albums) > 1 and args.limit != 1:
         print("error: --release-id only works on a single album folder", file=sys.stderr)
         return 2
 
@@ -840,13 +865,15 @@ def main(argv: list[str] | None = None) -> int:
                 failed += 1
                 detail = str(exc) if isinstance(exc, (DiscogsError, AlbumApplyError)) else f"{type(exc).__name__}: {exc}"
                 print(f"  error: {album.path}: {detail}", file=sys.stderr)
+                if args.debug:
+                    traceback.print_exc()
                 failures.append((album.path, detail.splitlines()[0] if detail else type(exc).__name__))
                 continue
-            if result == "skipped-tagged":
+            if result == AlbumResult.SKIPPED_TAGGED:
                 skipped += 1
                 continue
             processed += 1
-            if result == "applied":
+            if result == AlbumResult.APPLIED:
                 applied += 1
             else:
                 skipped += 1
@@ -857,6 +884,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  failed  {path}: {reason}")
     return 0 if failed == 0 else 1
 
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.self_test:
+        return self_test()
+    naming.SIDE_NAMES = not args.sequential_sides
+    if args.save_token:
+        return run_save_token()
+    if args.undo_journal is not None:
+        return run_undo(args)
+    if args.path is None:
+        print("error: pass an album folder or tree", file=sys.stderr)
+        return 2
+    if args.check_disc_swaps:
+        return run_disc_swap_check(args)
+    if args.normalize_folders:
+        return run_normalize(args)
+    return run_tagging(args)
 
 if __name__ == "__main__":
     sys.exit(main())

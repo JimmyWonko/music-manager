@@ -7,10 +7,7 @@ from conftest import SAMPLES
 
 from music_manager.cli import discogs_tag as cli
 
-XF = pytest.mark.xfail(strict=True, reason="CLI review items not built yet")
 
-
-@XF
 @pytest.mark.parametrize("argv, needle", [
     (["--limit", "-1", "album"], "--limit"),
     (["--release-id", "0", "album"], "--release-id"),
@@ -28,7 +25,6 @@ def test_bad_arguments_are_clean_argparse_errors(argv, needle, capsys):
     assert "usage: discogs-tag" in err and needle in err and "Traceback" not in err
 
 
-@XF
 def test_valid_arguments_still_parse():
     assert cli.parse_args(["--limit", "0", "a"]).limit == 0
     assert cli.parse_args(["--release-id", "1", "a"]).release_id == 1
@@ -37,7 +33,6 @@ def test_valid_arguments_still_parse():
     assert cli.parse_args(["a"]).debug is False
 
 
-@XF
 def test_release_id_checks_use_is_not_none():
     calls = []
 
@@ -50,7 +45,6 @@ def test_release_id_checks_use_is_not_none():
     assert calls == [0]
 
 
-@XF
 def test_album_result_enum_keeps_the_old_strings():
     assert [r.value for r in cli.AlbumResult] == ["applied", "skipped", "skipped-tagged"]
     assert cli.AlbumResult.SKIPPED_TAGGED == "skipped-tagged"
@@ -63,7 +57,7 @@ def _one_album(tmp_path):
     return album
 
 
-@pytest.mark.parametrize("debug", [False, pytest.param(True, marks=XF)])  # without --debug: today's behaviour
+@pytest.mark.parametrize("debug", [False, True])
 def test_debug_shows_the_traceback_and_the_batch_still_finishes(tmp_path, monkeypatch, capsys, debug):
     album = _one_album(tmp_path)
 
@@ -79,7 +73,6 @@ def test_debug_shows_the_traceback_and_the_batch_still_finishes(tmp_path, monkey
     assert ("Traceback (most recent call last)" in err) is debug
 
 
-@XF
 def test_process_album_returns_album_results(tmp_path, capsys):
     album = _one_album(tmp_path)
     from mutagen import File as MutagenFile
@@ -95,7 +88,6 @@ def test_process_album_returns_album_results(tmp_path, capsys):
     assert result is cli.AlbumResult.SKIPPED_TAGGED
 
 
-@XF
 @pytest.mark.parametrize("argv, mode", [
     (["--save-token"], "run_save_token"),
     (["--undo-journal", "j.jsonl"], "run_undo"),
