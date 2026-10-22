@@ -32,7 +32,7 @@ FETCH_STEP_MS = 5              # mock fetch job: one release per event-loop step
 from . import fake_service as T
 from .fake_service import (Album, AlbumFilter, AlbumPlan, AlbumRow, AlbumSort, Collision, Destination,
                            FakeService, FileChange, Job, JobKind, JobState, LIBRARY_ROOT, MatchStatus, NotFound,
-                           Operation, Page, Plan, PlanStale, Problem, ProblemKind, MMError, Settings, TagChange, Template,
+                           Operation, Page, StatusCounts, Plan, PlanStale, Problem, ProblemKind, MMError, Settings, TagChange, Template,
                            TemplatePreview, ValidationError, Cluster, ClusterFile, MatchView, LocalTrack, Candidate,
                            ScorePart, DISCOGS, SCANNED_AT, ClusterRow, Pin, ManualPair)
 
@@ -401,13 +401,16 @@ class FakeContract:
                 items.append(self._synth_row(syn_idx[m - bisect.bisect_left(real_positions, m)]))
         return Page(items, total, offset)
 
-    def _status_counts(self, filter: AlbumFilter | None = None) -> dict[MatchStatus, int]:
+    def _status_counts(self, filter: AlbumFilter | None = None) -> StatusCounts:
         f = replace(filter, status=None) if filter is not None else AlbumFilter()
         out = {s: 0 for s in MatchStatus}
         for a in self.fake.albums(f):
             out[a.status] += 1
         out[MatchStatus.UNMATCHED] += self._pad(f)
-        return out
+        v23_ext = (".wav", ".aif", ".aiff") + ((".mp3",) if self._settings.id3v23_mp3 else ())
+        v23 = sum(self.mock_v23.get(a.id, sum(1 for t in self._album(a.id).tracks if t.path.suffix.lower() in v23_ext))
+                  for a in self.fake.albums(AlbumFilter()))   # library-wide, like the real backend
+        return StatusCounts(out, id3v23=v23)
 
     def _album(self, album_id: int) -> Album:
         if album_id >= SYNTH_BASE:

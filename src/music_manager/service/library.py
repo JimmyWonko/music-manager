@@ -42,6 +42,7 @@ from ._types import (
     MMError,
     NotFound,
     Page,
+    StatusCounts,
     ValidationError,
 )
 
@@ -329,14 +330,19 @@ def albums(filter: AlbumFilter, sort: AlbumSort, offset: int, limit: int, descen
     return Page([row_to_album_row(r) for r in rows], total, offset)
 
 
-def status_counts(filter: AlbumFilter | None = None) -> dict[MatchStatus, int]:
-    """One query; filter.status is ignored, every status is counted."""
+def status_counts(filter: AlbumFilter | None = None) -> StatusCounts:
+    """One query; filter.status is ignored, every status is counted. .id3v23 is library-wide (StatusCounts)."""
     st = state()
     where, params = _where(st, filter, with_status=False)
     counts = {s: 0 for s in MatchStatus}
     for row in st.index.query(f"SELECT status, COUNT(*) AS n FROM albums{where} GROUP BY status", params):
         counts[MatchStatus(row["status"])] = row["n"]
-    return counts
+    from .plan import V23_SUFFIXES  # plan imports this module
+
+    suffixes = [*V23_SUFFIXES, *([".mp3"] if st.config().id3v23_mp3 else [])]
+    v23 = st.index.one("SELECT COUNT(*) AS n FROM tracks WHERE "
+                       + " OR ".join(["lower(path) LIKE ?"] * len(suffixes)), [f"%{s}" for s in suffixes])["n"]
+    return StatusCounts(counts, id3v23=v23)
 
 
 def album(album_id: int) -> Album:

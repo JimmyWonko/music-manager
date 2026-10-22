@@ -135,6 +135,18 @@ class Page(Generic[T]):
     offset: int
 
 
+class StatusCounts(dict):
+    """library.status_counts(): MatchStatus -> albums, plus id3v23 (2026-10-21, additive).
+
+    id3v23 is library-wide (the filter doesn't narrow it): tracks written as ID3v2.3 under the current
+    settings, i.e. WAV/AIFF always and MP3 with Settings.id3v23_mp3.
+    """
+
+    def __init__(self, counts=(), id3v23: int = 0):
+        super().__init__(counts)
+        self.id3v23 = id3v23
+
+
 # --- library ------------------------------------------------------------------
 
 @dataclass(frozen=True)
