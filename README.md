@@ -100,11 +100,15 @@ Before this fix, re-running discogs-tag on its own flat `2CD` folder
 swapped the disc-1 and disc-2 tracks that share a number. The tags still
 agree with Discogs, so only the audio shows it. This check compares each
 file's real length with the Discogs length at its tagged disc and track.
-It flags an album when giving the same-number files to the other disc
-fits clearly better (by at least 5 s per track, `SWAP_MARGIN_S`), and
-prints the evidence for each track. As secondary evidence it also reports
-title tags that don't match the release, and files whose last apply
-journal shows them moving to another disc.
+An album is flagged as swapped only when both kinds of evidence agree:
+giving the same-number files to the other disc fits the lengths clearly
+better (by at least 5 s per track, `SWAP_MARGIN_S`), and the titles favour
+the other disc too (Jaro-Winkler similarity, `TITLE_MARGIN`; the title the
+last apply journal recorded before it re-tagged the file, else the file's
+title tag). Lengths alone never flag, because Discogs lengths are often
+rounded or from another pressing: when the lengths point to a swap and the
+titles don't, the album is reported as **unsure** (listed, not flagged).
+The evidence is printed for each track.
 
 It also checks every file's disc folder (`CD1/`, `Disc 2/`) against its
 disc tag (DISCNUMBER), and uses the album's `.cue` and `.m3u` files as the
@@ -117,7 +121,8 @@ disagree make the album **DISAGREE**, with a line per file such as
 CD2/13 Mason Jar.flac: folder CD2 (disc 2), DISCNUMBER 1, cue/m3u disc 1 (Anthology CD1.cue, Anthology CD1.m3u) -> the folder is wrong
 ```
 
-The length check can't see this (each file's audio and tags still agree).
+The length check can't see this (each file's audio and tags still agree),
+and this check needs no lengths or titles.
 Move the files into the folder of their disc, or apply from a flat copy.
 
 ```sh
@@ -131,7 +136,8 @@ but never written unless you pass `--allow-cache-write`. Requests are
 rate-limited like every other Discogs call. Without a token, only cached
 releases (under 6 hours old) are used. `--report FILE` also writes the
 report to FILE, which must not exist yet. Exit status: 0 = nothing
-flagged, 3 = album(s) flagged (likely swapped, mixed or disagree), 1 = could not run. Fix a flagged album
+flagged, 3 = album(s) flagged (likely swapped, mixed or disagree; "unsure"
+does not count), 1 = could not run. Fix a flagged album
 with `--undo-journal` on the apply that swapped it, or by re-tagging it.
 
 ## Where files go
@@ -146,7 +152,7 @@ than the release's year) that is the master's year; otherwise it is the
 release's own year. The release year after the title only appears for a
 reissue. Anything unknown is left out together with its brackets and
 spaces: no catalog number means no `[CATNO]`, and with no year at all
-the name is just `Album [CATNO]` or `Album`. Examples from the library:
+the name is just `Album [CATNO]` or `Album`. Examples:
 
 ```text
 Black Flag/[1979]  Nervous Breakdown [1988] [SSTCD001]/   (1988 reissue of a 1979 release)
@@ -278,7 +284,14 @@ fresh one is written in the new folder. Hand-made playlists are moved as they ar
 | `--report FILE` | With `--check-disc-swaps`: also write the report to FILE (must not exist). |
 | `--allow-cache-write` | With `--check-disc-swaps`: allow Discogs responses to be cached (default: cache is only read). |
 | `--journal-dir DIR` | With `--check-disc-swaps`: the apply journals to read (default: the discogs-tag journal folder). |
+| `--debug` | When an album fails, also print the full traceback. The run still goes on with the next album. |
 | `-h`, `--help` | Show this help. |
+
+`--check-disc-swaps`, `--save-token`, `--self-test`, `--normalize-folders`
+and `--undo-journal` are modes, and only one can be used per run. Bad
+combinations (two modes, `--report` without `--check-disc-swaps`, a
+negative `--limit`, a release id that isn't a positive number) are
+rejected with an argument error before anything is read.
 
 Without a TTY, pass `--release-id` or `--auto`. Otherwise the album is
 reported as failed instead of waiting for a prompt.
@@ -350,7 +363,7 @@ album folder's previous name).
 ## Python API (`music_manager.service`)
 
 A desktop app (or any other front end) drives the same engine through
-`music_manager.service`, described in `API-CONTRACT.md`: `library`
+`music_manager.service`: `library`
 (scan and browse), `match` (find, review and choose releases), `plan`
 (a read-only preview of every move and tag change, then apply),
 `journal` (history and undo), `templates`, `settings`, `jobs` and the
@@ -373,12 +386,68 @@ touch under `~` (discogs-tag journals, the Discogs cache, the trash and the
 Discogs token) into those two folders, so an embedding app never writes to
 the home folder.
 
+## Tag writing settings (service and desktop UI)
+
+These are `Settings` fields (`settings.set`), used by `plan.build` and the
+desktop UI. The `discogs-tag` command doesn't expose them.
+
+- **ID3v2.3.** WAV and AIFF files are always written as ID3v2.3. MP3s are
+  written as ID3v2.3 too when `id3v23_mp3` is on (default: off, ID3v2.4).
+- **Latin-1 text (`id3_latin1`).** ID3v2.3 text is written as Latin-1
+  instead of UTF-16, and the plan lists every value that changes. A
+  character Latin-1 lacks is *transliterated* when a sensible substitute
+  exists (`ł` → `l`, curly quotes → straight ones; this needs the optional
+  `transliterate` extra). A value with no substitute is *dropped*: that
+  field is not written and the file keeps its current value. A drop holds
+  the album back (problem `encoding_dropped`) until you allow it
+  (`allow_encoding_drop`).
+- **Junk files.** `.DS_Store`, `Thumbs.db`, `desktop.ini` and AppleDouble
+  `._*` files don't keep an emptied album folder alive: they go to the
+  freedesktop trash (never deleted outright) before the folder is removed,
+  and the journal records it, so undo brings them back.
+- **Copy check (`verify_hash`).** A move to another drive is verified with
+  SHA-256 (`sha256`, the default) or with the faster xxHash (`xxhash`,
+  needs the `fast-verify` extra).
+- **Cover art.** Saving the cover as a folder image (`save_cover_art`) is
+  the norm; embedding the front cover in the tracks is opt-in
+  (`embed_cover_art`, default off). `replace_cover_art` (default off:
+  tracks with front art keep it), `cover_source` (`folder_first`,
+  `discogs_first`, `folder`, `discogs`) and `cover_max_bytes` (0 = no
+  limit; bigger images are skipped, never resized) go with it. Only JPEG
+  and PNG are embedded, in MP3/WAV/AIFF, FLAC, Ogg and MP4/M4A files.
+- **Picard tag names.** Tags follow Picard's names. Other spellings of a
+  field the tool writes (`TOTALTRACKS` next to `TRACKTOTAL`, ...) are
+  always replaced by the Picard one. The Vorbis `YEAR` tag that earlier
+  versions wrote is a migration you turn on: with `migrate_tag_keys` it is
+  removed; without it an existing `YEAR` is kept up to date and none is
+  created.
+
+## Clustering and the Match window
+
+Loose files that aren't in an album folder are grouped into album
+clusters by their album-level tags (album, album artist; disc suffixes
+ignored, the folder name as the album fallback), adapted from Picard's
+clustering (`music_manager.clustering`, `library.scan_clusters`).
+
+The desktop UI's Match window lists folder albums, tag clusters and
+unclustered files on the left, and the selected one's Discogs release
+tracks with their files, similarity and problems on the right. You can
+adopt or un-adopt a cluster, pair a file with a track (Ctrl+P) or drag
+it onto one (a file on a track that already has one swaps them), unpin,
+move a loose file to another cluster or out to "Unclustered files", and
+split or merge Discogs sub-tracks (`merge_subtracks`).
+
 ## Tests
 
 ```sh
 python3 discogs-tag.py --self-test
 python3 -m pytest tests        # needs pytest; no network access
 ```
+
+`pip install -e ".[dev]"` installs pytest. The other extras in
+`pyproject.toml`: `ui` (PySide6), `ui-test` (PySide6, pytest, pytest-qt),
+`fast-verify` (xxhash, BSD-2-Clause) and `transliterate` (Unidecode,
+GPL-2.0-or-later). Tests that need an extra are skipped without it.
 
 `tests/samples` holds tiny silent files made with ffmpeg
 (`tests/make_samples.sh`), and `tests/fixtures` holds saved Discogs JSON.
@@ -404,6 +473,15 @@ in `tests/ui` (`pip install -e '.[ui-test]'`; they are skipped without
 PySide6/pytest-qt). The real-backend ones run with `MM_BACKEND=real` and
 need ffmpeg for their synthetic audio. Open contract questions from the UI
 side are in `docs/ui/CONTRACT-QUESTIONS.md`.
+
+## Known limits / testers
+
+- The swapped-disc check is command-line only (`discogs-tag
+  --check-disc-swaps`); the desktop UI doesn't have it yet.
+- Picard naming scripts and functions such as `$join` aren't supported
+  yet; folder names come from the built-in templates.
+- This tool retags and moves files. Try it on a copy of your library
+  first.
 
 ## License
 
